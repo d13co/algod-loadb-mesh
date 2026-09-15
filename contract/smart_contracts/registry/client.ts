@@ -21,8 +21,10 @@ export const PER_BYTE_SURCHARGE = 100n
 /** Box I/O granted per box reference. */
 export const BOX_REF_BUDGET = 2048
 
-// ABI encoding of put(string,byte[],byte[],byte[],byte[])void.
+// ABI encoding of put(byte[16],byte[],byte[],byte[],byte[])void.
 export const SELECTOR_LEN = 4
+/** A box tag: the keyed hash of a node id, computed off chain (§3). */
+export const TAG_LEN = 16
 export const LENGTH_PREFIX = 2
 export const PUT_PARTS = 4
 /** Largest part: one arg minus its ABI length prefix. */
@@ -30,16 +32,16 @@ export const MAX_PART_LEN = MAX_ARG_LEN - LENGTH_PREFIX
 
 export const enc = (s: string) => new TextEncoder().encode(s)
 
-export const boxKey = (id: string) => enc(BOX_PREFIX + id)
+export const boxKey = (tag: Uint8Array) => Uint8Array.from([...enc(BOX_PREFIX), ...tag])
 
 /** mbr(box) = 2500 + 400 × (len(key) + len(value)) microAlgo */
 export const boxMbr = (keyLen: number, valueLen: number) => 2500n + 400n * BigInt(keyLen + valueLen)
 
-/** Summed length of the args of put(id, value). */
-export const putArgsLen = (id: string, valueLen: number) => SELECTOR_LEN + LENGTH_PREFIX + enc(id).length + PUT_PARTS * LENGTH_PREFIX + valueLen
+/** Summed length of the args of put(tag, value). */
+export const putArgsLen = (valueLen: number) => SELECTOR_LEN + TAG_LEN + PUT_PARTS * LENGTH_PREFIX + valueLen
 
-/** Largest value a single put can carry for the given id. */
-export const maxValueLen = (id: string) => MAX_APP_ARGS_LEN - putArgsLen(id, 0)
+/** Largest value a single put can carry. */
+export const MAX_VALUE_LEN = MAX_APP_ARGS_LEN - putArgsLen(0)
 
 /**
  * References needed so any box the registry can hold may be read (box_del of
@@ -73,22 +75,22 @@ export async function createRegistry(algorand: AlgorandClient, sender: Address) 
 
 type CallOpts = { refs?: number; fee?: bigint }
 
-/** Box references for a call on node `id`: all of them name the same box. */
-export const boxRefs = (id: string, n = BOX_REFS) => Array.from({ length: n }, () => ({ appId: 0n, name: boxKey(id) }))
+/** Box references for a call on the record under `tag`: all of them name the same box. */
+export const boxRefs = (tag: Uint8Array, n = BOX_REFS) => Array.from({ length: n }, () => ({ appId: 0n, name: boxKey(tag) }))
 
-export function putParams(id: string, value: Uint8Array | Parts, opts: CallOpts = {}) {
+export function putParams(tag: Uint8Array, value: Uint8Array | Parts, opts: CallOpts = {}) {
   const [part0, part1, part2, part3] = value instanceof Uint8Array ? parts(value) : value
   const valueLen = part0.length + part1.length + part2.length + part3.length
   return {
-    args: { id, part0, part1, part2, part3 },
-    boxReferences: boxRefs(id, opts.refs),
-    staticFee: (opts.fee ?? callFee(MIN_FEE, putArgsLen(id, valueLen))).microAlgo(),
+    args: { tag, part0, part1, part2, part3 },
+    boxReferences: boxRefs(tag, opts.refs),
+    staticFee: (opts.fee ?? callFee(MIN_FEE, putArgsLen(valueLen))).microAlgo(),
     populateAppCallResources: false,
   }
 }
 
-export function removeParams(id: string, opts: CallOpts = {}) {
-  return { args: { id }, boxReferences: boxRefs(id, opts.refs), populateAppCallResources: false }
+export function removeParams(tag: Uint8Array, opts: CallOpts = {}) {
+  return { args: { tag }, boxReferences: boxRefs(tag, opts.refs), populateAppCallResources: false }
 }
 
 export type { RegistryClient }

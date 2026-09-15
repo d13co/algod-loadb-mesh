@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/d13co/algod-loadb-mesh/internal/domain"
 )
 
 // The embedded programs and spec are copies of the AlgoKit build output;
@@ -37,8 +39,8 @@ func TestMethods(t *testing.T) {
 		got           string
 		sel           []byte
 	}{
-		{"put(string,byte[],byte[],byte[],byte[])void", "4cc15367", PutMethod.GetSignature(), PutMethod.GetSelector()},
-		{"remove(string)void", "8e8900b9", RemoveMethod.GetSignature(), RemoveMethod.GetSelector()},
+		{"put(byte[16],byte[],byte[],byte[],byte[])void", "324f5a1b", PutMethod.GetSignature(), PutMethod.GetSelector()},
+		{"remove(byte[16])void", "12ad14c2", RemoveMethod.GetSignature(), RemoveMethod.GetSelector()},
 	} {
 		if tc.got != tc.sig {
 			t.Errorf("method %s, want %s", tc.got, tc.sig)
@@ -66,27 +68,28 @@ func TestLimits(t *testing.T) {
 	if BoxRefs != 8 {
 		t.Fatalf("BoxRefs = %d", BoxRefs)
 	}
-	if got := MaxValueLen(48); got != 16322 {
-		t.Fatalf("MaxValueLen(48) = %d", got)
+	if MaxValueLen != 16356 {
+		t.Fatalf("MaxValueLen = %d", MaxValueLen)
 	}
-	if PutParts*MaxPartLen < MaxValueLen(0) {
+	if PutParts*MaxPartLen < MaxValueLen {
 		t.Fatal("parts cannot carry the largest value")
 	}
 }
 
-// lenPrefix is the uint16 length that starts the ARC-4 encoding of a string or byte[].
+// lenPrefix is the uint16 length that starts the ARC-4 encoding of a byte[].
 func lenPrefix(b []byte) []byte {
 	return binary.BigEndian.AppendUint16(nil, uint16(len(b)))
 }
 
+var testTag = [domain.BoxTagLen]byte{0: 0xaa, 7: 0x07, 15: 0xff}
+
 func TestPutArgs(t *testing.T) {
-	id := "k44"
-	for _, n := range []int{0, 1, MaxPartLen, MaxPartLen + 1, 3*MaxPartLen + 5, MaxValueLen(len(id))} {
+	for _, n := range []int{0, 1, MaxPartLen, MaxPartLen + 1, 3*MaxPartLen + 5, MaxValueLen} {
 		value := make([]byte, n)
 		for i := range value {
 			value[i] = byte(i % 251)
 		}
-		args, err := PutArgs(id, value)
+		args, err := PutArgs(testTag, value)
 		if err != nil {
 			t.Fatalf("n=%d: %v", n, err)
 		}
@@ -96,8 +99,8 @@ func TestPutArgs(t *testing.T) {
 		if !bytes.Equal(args[0], PutMethod.GetSelector()) {
 			t.Fatalf("n=%d: selector %x", n, args[0])
 		}
-		if want := append(lenPrefix([]byte(id)), id...); !bytes.Equal(args[1], want) {
-			t.Fatalf("n=%d: id arg %x", n, args[1])
+		if !bytes.Equal(args[1], testTag[:]) { // byte[16] is static: no length prefix
+			t.Fatalf("n=%d: tag arg %x", n, args[1])
 		}
 		var joined []byte
 		total := 0
@@ -124,21 +127,21 @@ func TestPutArgs(t *testing.T) {
 		if total > MaxAppArgsLen {
 			t.Fatalf("n=%d: args total %d", n, total)
 		}
-		if n == MaxValueLen(len(id)) && total != MaxAppArgsLen {
+		if n == MaxValueLen && total != MaxAppArgsLen {
 			t.Fatalf("largest value: args total %d, want %d", total, MaxAppArgsLen)
 		}
 	}
-	if _, err := PutArgs(id, make([]byte, MaxValueLen(len(id))+1)); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := PutArgs(testTag, make([]byte, MaxValueLen+1)); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized value: err = %v", err)
 	}
 }
 
 func TestRemoveArgs(t *testing.T) {
-	args, err := RemoveArgs("k44")
+	args, err := RemoveArgs(testTag)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := [][]byte{RemoveMethod.GetSelector(), append(lenPrefix([]byte("k44")), "k44"...)}
+	want := [][]byte{RemoveMethod.GetSelector(), testTag[:]}
 	if len(args) != len(want) || !bytes.Equal(args[0], want[0]) || !bytes.Equal(args[1], want[1]) {
 		t.Fatalf("args %x, want %x", args, want)
 	}
@@ -146,10 +149,9 @@ func TestRemoveArgs(t *testing.T) {
 
 // Values measured on a consensus v42 localnet.
 func TestCallFee(t *testing.T) {
-	id := "k44" // args = 4 + (2+3) + 4×2 + value
-	overhead := MaxAppArgsLen - MaxValueLen(len(id))
+	overhead := MaxAppArgsLen - MaxValueLen // 4 + 16 + 4×2
 	for argsLen, want := range map[int]uint64{overhead: 1000, 2048: 1000, 2049: 1001, 3048: 1100, 16384: 2434} {
-		args, err := PutArgs(id, make([]byte, argsLen-overhead))
+		args, err := PutArgs(testTag, make([]byte, argsLen-overhead))
 		if err != nil {
 			t.Fatal(err)
 		}

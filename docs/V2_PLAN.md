@@ -259,7 +259,7 @@ heartbeat, so remote agents route by facts instead of config.
 **Contract**: one application per fleet. Global state holds a schema
 version. Boxes hold one `NodeRecord` each:
 
-- key: `n<id>` (≤ 64 bytes)
+- key: `n` || 16-byte keyed hash of the id, so ids stay private
 - value: `version || nonce || AEAD(ciphertext of msgpack(NodeRecord))`,
   a few hundred bytes (limit 32 KB)
 - approval program: only the creator address may create, replace or delete

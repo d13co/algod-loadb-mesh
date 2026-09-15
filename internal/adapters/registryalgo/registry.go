@@ -106,8 +106,7 @@ func (r *Registry) List(ctx context.Context) ([]domain.NodeRecord, uint64, error
 		if i >= r.MaxRecords {
 			break
 		}
-		id, ok := domain.IDFromBoxName(name)
-		if !ok {
+		if !domain.IsRecordBox(name) {
 			continue
 		}
 		blob, err := r.Reader.Box(ctx, r.AppID, name)
@@ -117,10 +116,10 @@ func (r *Registry) List(ctx context.Context) ([]domain.NodeRecord, uint64, error
 		if err != nil {
 			return nil, 0, err
 		}
-		rec, err := domain.OpenRecord(r.Key, id, blob)
+		rec, err := domain.OpenRecord(r.Key, name, blob)
 		if err != nil {
 			if r.Log != nil {
-				r.Log.Warn("registry: skipping unreadable box", "id", id, "err", err)
+				r.Log.Warn("registry: skipping unreadable box", "box", fmt.Sprintf("%x", name), "err", err)
 			}
 			continue
 		}
@@ -139,14 +138,14 @@ func (r *Registry) Put(ctx context.Context, rec domain.NodeRecord) error {
 	if err != nil {
 		return err
 	}
-	if max := MaxValueLen(len(rec.ID)); len(blob) > max {
-		return fmt.Errorf("registry: sealed record for %q is %d bytes, limit is %d", rec.ID, len(blob), max)
+	if len(blob) > MaxValueLen {
+		return fmt.Errorf("registry: sealed record for %q is %d bytes, limit is %d", rec.ID, len(blob), MaxValueLen)
 	}
-	args, err := PutArgs(rec.ID, blob)
+	args, err := PutArgs(domain.BoxTag(r.Key, rec.ID), blob)
 	if err != nil {
 		return fmt.Errorf("registry: put %q: %w", rec.ID, err)
 	}
-	name := domain.BoxName(rec.ID)
+	name := domain.BoxName(r.Key, rec.ID)
 	if err := r.ensureFunded(ctx, len(name), len(blob)); err != nil {
 		return err
 	}
@@ -155,11 +154,11 @@ func (r *Registry) Put(ctx context.Context, rec domain.NodeRecord) error {
 
 // Delete implements ports.Registry.
 func (r *Registry) Delete(ctx context.Context, id string) error {
-	args, err := RemoveArgs(id)
+	args, err := RemoveArgs(domain.BoxTag(r.Key, id))
 	if err != nil {
 		return fmt.Errorf("registry: remove %q: %w", id, err)
 	}
-	return r.call(ctx, args, domain.BoxName(id))
+	return r.call(ctx, args, domain.BoxName(r.Key, id))
 }
 
 func (r *Registry) call(ctx context.Context, args [][]byte, box []byte) error {

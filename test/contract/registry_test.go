@@ -217,6 +217,21 @@ func TestRegistryLifecycle(t *testing.T) {
 		t.Fatalf("want 2 records, got %d", len(got))
 	}
 
+	// Box names are keyed hashes: a public reader sees neither ids nor their
+	// lengths.
+	boxes, err := algodhttp.New(algodURL, localToken, nil).BoxNames(c, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(boxes) != 2 {
+		t.Fatalf("want 2 boxes, got %d", len(boxes))
+	}
+	for _, name := range boxes {
+		if len(name) != 1+domain.BoxTagLen || name[0] != 'n' || strings.Contains(string(name), "k4") {
+			t.Errorf("box name %q reveals more than a tag", name)
+		}
+	}
+
 	if err := reg.Put(c, large); err != nil { // leave a large box to delete
 		t.Fatal(err)
 	}

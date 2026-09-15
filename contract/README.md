@@ -17,12 +17,13 @@ smart_contracts/artifacts/registry/
 ```
 
 The interface is two ARC-4 methods, both creator only, over the box map
-`records` (`n<id>` → sealed record):
+`records` (`n` || tag → sealed record), where the tag is a 16-byte keyed hash
+of the node id computed off chain, so ids never appear on chain:
 
-- `put(string id, byte[] part0, byte[] part1, byte[] part2, byte[] part3)void`
-  stores the concatenated parts as the record of `id`, replacing any previous
-  one.
-- `remove(string id)void` deletes it.
+- `put(byte[16] tag, byte[] part0, byte[] part1, byte[] part2, byte[] part3)void`
+  stores the concatenated parts as the record under `tag`, replacing any
+  previous one.
+- `remove(byte[16] tag)void` deletes it.
 
 Creation is a bare call; update and delete are bare calls restricted to the
 creator. The value comes in four parts because one arg is limited to 4096

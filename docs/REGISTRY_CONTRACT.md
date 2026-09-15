@@ -24,7 +24,8 @@ Requirements it satisfies:
 - A dead node does not disappear on its own; removal is an explicit act.
 
 Non-goals: per-agent keys, roles, revocation of individual readers, hiding
-the *number* of nodes or the *ids* (box names are plaintext, see §9).
+the *number* of nodes (box names hide the ids, but not how many boxes there
+are, see §9).
 
 ## 2. On-chain structure
 
@@ -35,7 +36,7 @@ the *number* of nodes or the *ids* (box names are plaintext, see §9).
 | Global state schema | 0 uints, 0 byte slices |
 | Local state schema | 0 / 0 (no opt-in exists) |
 | Extra program pages | 0 |
-| Boxes | one per node record, key `n<id>`, value = sealed record (§4) |
+| Boxes | one per node record, key `n` + 16-byte tag of the id (§3), value = sealed record (§4) |
 | Creation note | `algod-loadb-mesh registry` (informational) |
 
 A registry app may live on a different network than the nodes it describes:
@@ -46,16 +47,27 @@ by default it is the local node.
 ## 3. Box naming
 
 ```
-key   = "n" || id
-id    = 1..48 bytes, the NodeRecord.ID (stable short name, e.g. "k44")
+key      = "n" || tag
+tag      = HMAC-SHA256(tag_key, id)[0:16]
+tag_key  = HKDF-SHA256(IKM = sync_key, salt = "algod-loadb-mesh", info = "registry-box-tag-v1", L = 32)
+id       = 1..48 bytes, the NodeRecord.ID (stable short name, e.g. "k44")
 ```
 
-Box keys are therefore 2..49 bytes, within Algorand's 64-byte limit; the
-one-byte prefix keeps the per-box minimum balance down (§8). Readers list
-boxes with `GET /v2/applications/{app}/boxes`, keep those whose name starts
-with `n`, and fetch each with `GET /v2/applications/{app}/box?name=b64:<key>`.
-Boxes with any other first byte are reserved for future use and must be
-ignored; a future box kind must therefore not start with `n`.
+Every box key is 17 bytes. The tag is a keyed hash of the node id under a key
+derived from the sync key (§5), so only key holders can compute a node's box
+name, and the chain shows neither the ids nor their lengths. It is one-way:
+a reader learns which node a box belongs to from the `id` inside the
+decrypted record, and checks that the id hashes to the box's tag (§4). A
+16-byte tag makes an accidental collision between two ids of one fleet
+negligible (about n²/2¹²⁹ for n nodes), and only key holders could search
+for one on purpose. The one-byte prefix keeps the per-box minimum balance
+down (§8).
+
+Readers list boxes with `GET /v2/applications/{app}/boxes`, keep the 17-byte
+names that start with `n`, and fetch each with
+`GET /v2/applications/{app}/box?name=b64:<key>`. Boxes with any other first
+byte are reserved for future use and must be ignored; a future box kind must
+therefore not start with `n`.
 
 ## 4. Box value format
 
@@ -71,21 +83,22 @@ offset  size  field
 - Nonce: 12 random bytes from the writer's CSPRNG, never reused with the
   same key by construction (96-bit random nonces; the fleet writes at most a
   few thousand records over its lifetime).
-- Additional authenticated data: the **box key** (`n<id>`). A ciphertext
+- Additional authenticated data: the **box key** (`n` || tag). A ciphertext
   copied into another node's box fails to open, so a key holder cannot be
   tricked into treating record A's endpoints as node B's.
 - Plaintext: the JSON encoding of `NodeRecord` (§6), UTF-8, no framing.
 
 Readers must reject a value whose version byte is unknown, whose length is
 below 13 + 16 bytes, whose tag does not verify, whose JSON does not parse,
-or whose decoded `id` differs from the box name's id. Rejected boxes are
+or whose decoded `id` does not hash to the box name's tag (§3), which catches
+a key holder sealing node A's record under node B's name. Rejected boxes are
 skipped with a warning; they never abort a listing.
 
 Size: a typical record is 300–600 bytes. The limit is not the 32 KB box value
 but what one `put` call can carry (§8): application args total at most 16384
-bytes, of which the ABI encoding takes `14 + len(id)`, so the sealed value
-may be at most `16370 − len(id)` bytes (16322 for a 48-byte id), about 16.3 KB
-of JSON. The client refuses larger records before sending.
+bytes, of which the ABI encoding takes 28 (selector, tag and four length
+prefixes), so the sealed value may be at most 16356 bytes whatever the id,
+about 16.3 KB of JSON. The client refuses larger records before sending.
 
 ## 5. Keys
 
@@ -122,6 +135,8 @@ sync_key = HKDF-SHA256(IKM = seed[0:32], salt = "algod-loadb-mesh", info = "regi
 where `seed` is the ed25519 seed of the sync account. Deriving through HKDF
 means the on-chain signing key is never used directly as an AEAD key, and a
 future format can use a different `info` string without changing the account.
+The box tag key of §3 is derived from `sync_key` in turn, with its own `info`,
+so tags and ciphertexts never share a key.
 
 **Agent heartbeat keys.** Not part of the contract, but stored in records:
 
@@ -145,7 +160,7 @@ on order).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | string, 1..48 bytes | node name; must equal the box name suffix |
+| `id` | string, 1..48 bytes | node name; its tag (§3) must equal the box name's |
 | `network` | string | genesis id of the node, e.g. `mainnet-v1.0`; agents only peer within their own network |
 | `endpoints` | array of string, ≥ 1 | algod REST base URLs other agents dial, preferred order (e.g. two WireGuard addresses) |
 | `token` | string | the node's `algod.token`; grants full API access to the node |
@@ -184,12 +199,12 @@ fails if the copies differ from the build.
 
 ```ts
 export class Registry extends Contract {
-  records = BoxMap<string, bytes>({ keyPrefix: 'n' })
+  records = BoxMap<bytes<16>, bytes>({ keyPrefix: 'n' })
 
   @abimethod()
-  put(id: string, part0: bytes, part1: bytes, part2: bytes, part3: bytes): void {
+  put(tag: bytes<16>, part0: bytes, part1: bytes, part2: bytes, part3: bytes): void {
     this.onlyCreator()
-    const box = this.records(id)
+    const box = this.records(tag)
     box.delete() // the size may change, so start over
     box.create({ size: part0.length + part1.length + part2.length + part3.length })
     let offset: uint64 = 0
@@ -203,9 +218,9 @@ export class Registry extends Contract {
   }
 
   @abimethod()
-  remove(id: string): void {
+  remove(tag: bytes<16>): void {
     this.onlyCreator()
-    this.records(id).delete()
+    this.records(tag).delete()
   }
 
   @baremethod({ allowActions: 'UpdateApplication' })
@@ -227,16 +242,17 @@ export class Registry extends Contract {
 | Call | Selector | Effect |
 |---|---|---|
 | bare create (NoOp, no args) | | create the application |
-| `put(string,byte[],byte[],byte[],byte[])void` | `4cc15367` | delete box `n<id>` if present, create it with size Σ len(partᵢ), write the parts in order |
-| `remove(string)void` | `8e8900b9` | delete box `n<id>` if present |
+| `put(byte[16],byte[],byte[],byte[],byte[])void` | `324f5a1b` | delete box `n` \|\| tag if present, create it with size Σ len(partᵢ), write the parts in order |
+| `remove(byte[16])void` | `12ad14c2` | delete box `n` \|\| tag if present |
 | bare UpdateApplication | | replace the programs |
 | bare DeleteApplication | | delete the application |
 
-Args follow ARC-4: `ApplicationArgs[0]` is the selector, `string` and
-`byte[]` are a big-endian uint16 length followed by the bytes, and the router
-rejects an arg whose length prefix does not match its size. A box name is the
-map prefix followed by the raw id bytes, so the program can only ever touch
-boxes whose name starts with `n`.
+Args follow ARC-4: `ApplicationArgs[0]` is the selector, `byte[16]` is the
+16 raw bytes, and `byte[]` is a big-endian uint16 length followed by the
+bytes. The router rejects a tag of any other length and a part whose length
+prefix does not match its size. A box name is the map prefix followed by the
+tag, so the program can only ever touch 17-byte boxes starting with `n`. It
+never sees a node id: tags are computed off chain (§3).
 
 The value travels in four parts because a single application arg, like any
 AVM byte string, is limited to 4096 bytes, so a part holds at most 4094. Four
@@ -272,18 +288,17 @@ main:
 ### Bytecode
 
 ```
-approval  0a 20 03 00 02 01 31 1b 41 00 1d 31 19 14 44 31 18 44 82 02 04 4c c1
-          53 67 04 8e 89 00 b9 36 1a 00 8e 02 00 26 00 b5 00 31 19 8d 06 00 11
-          ff ef ff ef ff ef 00 09 00 01 00 31 18 44 88 00 b9 24 43 31 18 44 88
-          00 b1 24 43 31 18 14 43 36 1a 01 49 22 59 23 08 4b 01 15 12 44 57 02
-          00 36 1a 02 49 22 59 23 08 4b 01 15 12 44 57 02 00 36 1a 03 49 22 59
-          23 08 4b 01 15 12 44 57 02 00 36 1a 04 49 22 59 23 08 4b 01 15 12 44
-          57 02 00 36 1a 05 49 22 59 23 08 4b 01 15 12 44 57 02 00 88 00 58 80
-          01 6e 4f 05 50 49 bc 48 4b 04 15 4b 04 15 4b 01 08 4b 04 15 4b 01 08
-          4b 04 15 4b 01 08 4b 04 4c b9 48 4b 03 22 4f 09 bb 4b 03 4f 03 4f 07
-          bb 4b 02 4f 02 4f 05 bb 4f 02 bb 24 43 36 1a 01 49 22 59 23 08 4b 01
-          15 12 44 57 02 00 88 00 09 80 01 6e 4c 50 bc 48 24 43 31 00 32 09 12
-          44 89                                                                 (255 bytes)
+approval  0a 20 04 00 01 02 10 31 1b 41 00 1d 31 19 14 44 31 18 44 82 02 04 32
+          4f 5a 1b 04 12 ad 14 c2 36 1a 00 8e 02 00 26 00 ad 00 31 19 8d 06 00
+          11 ff ef ff ef ff ef 00 09 00 01 00 31 18 44 88 00 a9 23 43 31 18 44
+          88 00 a1 23 43 31 18 14 43 36 1a 01 49 15 25 12 44 36 1a 02 49 22 59
+          24 08 4b 01 15 12 44 57 02 00 36 1a 03 49 22 59 24 08 4b 01 15 12 44
+          57 02 00 36 1a 04 49 22 59 24 08 4b 01 15 12 44 57 02 00 36 1a 05 49
+          22 59 24 08 4b 01 15 12 44 57 02 00 88 00 50 80 01 6e 4f 05 50 49 bc
+          48 4b 04 15 4b 04 15 4b 01 08 4b 04 15 4b 01 08 4b 04 15 4b 01 08 4b
+          04 4c b9 48 4b 03 22 4f 09 bb 4b 03 4f 03 4f 07 bb 4b 02 4f 02 4f 05
+          bb 4f 02 bb 23 43 36 1a 01 49 15 25 12 44 88 00 09 80 01 6e 4c 50 bc
+          48 23 43 31 00 32 09 12 44 89                                         (240 bytes)
 clear     0a 81 01 43
 ```
 
@@ -304,16 +319,16 @@ id is taken from the confirmation's `application-index`. Immediately
 afterwards the app account is funded (below) so the first `put` does not
 fail.
 
-**Put**: NoOp call of `put(id, part0, part1, part2, part3)`, where the parts
-are the sealed value split in order into pieces of at most 4094 bytes, each
-filled before the next (the remaining parts are empty), with eight box
-references to `n<id>` (app id 0 = the called app). The args are
-`4 + (2 + len(id)) + 4 × 2 + len(value)` bytes. Protocol limits as of
+**Put**: NoOp call of `put(tag, part0, part1, part2, part3)`, where `tag` is
+the node id's tag (§3) and the parts are the sealed value split in order into
+pieces of at most 4094 bytes, each filled before the next (the remaining parts
+are empty), with eight box references to `n` || tag (app id 0 = the called
+app). The args are `4 + 16 + 4 × 2 + len(value)` bytes. Protocol limits as of
 consensus v42:
 
 | Limit | Value | Consequence |
 |---|---|---|
-| Summed length of application args | 16384 bytes | value ≤ `16370 − len(id)` (§4); checked by the client before funding or sending |
+| Summed length of application args | 16384 bytes | value ≤ 16356 bytes (§4); checked by the client before funding or sending |
 | Length of one arg | 4096 bytes | a part holds at most 4094 bytes; the value is split across four |
 | Arg bytes covered by the minimum fee | 2048 | see fees below |
 | Box I/O per box reference | 2048 bytes | see below |
@@ -326,7 +341,7 @@ sized to the new value alone fails whenever a record shrinks (`read budget
 exceeded`). Since no box can be larger than the args limit allows,
 ⌈16384/2048⌉ = 8 references always suffice, and the client always sends 8.
 
-**Remove**: NoOp call of `remove(id)` with eight references, for the same
+**Remove**: NoOp call of `remove(tag)` with eight references, for the same
 reason.
 
 **Funding**: boxes are paid for by the *application account*
@@ -354,7 +369,7 @@ What the design protects against, and what it does not:
 
 | Threat | Outcome |
 |---|---|
-| Public observer reads the chain | Sees the app, the number of boxes, the node ids in box names, record sizes and write times. Cannot read endpoints, tokens or keys. |
+| Public observer reads the chain | Sees the app, the number of boxes, record sizes and write times. Box names are fixed-length tags, so it cannot learn node ids or their lengths, nor read endpoints, tokens or keys. A tag is stable for a node, so successive writes to the same node can be linked to each other. |
 | Observer without the key writes a box | Rejected by the approval program (creator check). |
 | Key holder or compromised host | Full read/write of the registry and, through the tokens inside it, full API access to every node. This is inherent to "one shared secret" and is bounded by the WireGuard network the endpoints live on. Rotation: create a new sync account, `registry init` a fresh app, roll the config, delete the old app. |
 | Ciphertext moved between boxes | Fails authentication (box key is AAD). |
@@ -362,9 +377,9 @@ What the design protects against, and what it does not:
 | Algod serving stale boxes | Reads carry the node's `last-round`; agents keep serving from their cache and refresh through any peer's algod. |
 | Malformed record written by a buggy client | Skipped on read; the rest of the fleet still loads. |
 
-The node ids being visible is accepted: they are short labels with no
-routing value. If that ever changes, hashing the id into the box name is a
-version-2 change of §3 only.
+Node ids are hidden, but not how many nodes there are or when each one's
+record changes. Anyone who has the sync key can still compute the tag of a
+guessed id; that is no leak, since they can read every record anyway.
 
 ## 10. Client protocol
 
@@ -373,10 +388,11 @@ from the disk cache first, and on demand when a heartbeat arrives from an id
 the agent does not know (rate-limited to one refresh per tenth of the
 period):
 
-1. `boxes` for the app; ignore names without the `n` prefix; stop after
-   1000 names (`MaxRecords`) as a runaway guard.
+1. `boxes` for the app; ignore names that are not 17 bytes starting with
+   `n`; stop after 1000 names (`MaxRecords`) as a runaway guard.
 2. `box` for each name; a 404 between list and get means "deleted, skip".
-3. Open and validate each value; skip failures with a warning.
+3. Open and validate each value, including that the record's id hashes to
+   the box's tag; skip failures with a warning.
 4. Return the records plus the algod's current round; the caller persists
    them to `registry.cache` and hands them to the peer directory.
 
@@ -401,14 +417,19 @@ creates the app. All need the sync key and an algod to submit through.
   different meaning.
 - Adding optional JSON fields is backward compatible within a version.
 - The approval program has no version marker; the app itself is the unit of
-  upgrade, and the ARC-56 spec describes the interface of a given build. `UpdateApplication` by the creator is allowed if a program change
-  is ever needed without migrating boxes.
-- The HKDF `info` strings are the key-derivation version.
+  upgrade, and the ARC-56 spec describes the interface of a given build.
+  `UpdateApplication` by the creator is allowed if a program change is ever
+  needed without migrating boxes.
+- The HKDF `info` strings are the key-derivation version. Changing the tag
+  derivation renames every box, so it needs a fresh app or a migration.
 
 ## 12. Verification status
 
-- Record codec: round trip, wrong key, wrong box name, tampering and a
-  golden ciphertext prefix are unit-tested.
+- Record codec: round trip, wrong key, wrong box name, tampering, a record
+  sealed under another id's name, and golden values for the ciphertext
+  prefix and a box tag (the tag checked against an independent computation)
+  are unit-tested, as are the fixed 17-byte shape of box names for ids of any
+  length and the tag's dependence on the key.
 - Programs: the Go-embedded TEAL, bytecode and ARC-56 spec are checked
   byte-for-byte against the AlgoKit build output, and the method signatures,
   selectors and arg encoding against fixed values
@@ -416,10 +437,11 @@ creates the app. All need the sync key and an algod to submit through.
 - Contract (`contract/`, `npm test`, algokit localnet on consensus v42): the
   ARC-56 interface (methods, selectors, bare actions, box map); bare creation
   with zero schemas, and no creation through a method; `put` storing under
-  `n<id>`, growing, shrinking and replacing up to 16 KB; parts of uneven
+  `n` || tag, growing, shrinking and replacing up to 16 KB; parts of uneven
   sizes (including empty ones anywhere) concatenated in order; `remove` and
   its idempotence; rejection of unknown selectors, the former raw
-  `"put"`/`"del"` args, missing parts, mismatched ABI length prefixes, bare
+  `"put"`/`"del"` args, tags of 15, 17 or 3 bytes, missing parts, mismatched
+  ABI length prefixes, bare
   NoOp calls, methods under another on-completion, opt-in and close-out, and
   every non-creator call (put, remove, update, delete); creator update (boxes
   kept) and delete; the box MBR formula and its release on `remove`; `put`
@@ -429,7 +451,8 @@ creates the app. All need the sync key and an algod to submit through.
   and the read budget on the replaced or removed value.
 - Go client (`test/contract`, tag `contract`, `make contract-test`):
   `Create` (including algod-compiled programs equal to the embedded
-  bytecode), app account funding, `Put`/`List`/`Delete` round trips, a
+  bytecode), app account funding, `Put`/`List`/`Delete` round trips, box names
+  on chain being 17-byte tags that do not contain the ids, a
   record spanning several parts (with surcharged fee) and shrinking back,
   refusal of oversized records, a rekeyed sync account, and a second key
   holder being unable to write.

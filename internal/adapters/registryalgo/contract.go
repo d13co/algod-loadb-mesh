@@ -6,13 +6,16 @@ import (
 	"fmt"
 
 	"github.com/algorand/go-algorand-sdk/v2/abi"
+
+	"github.com/d13co/algod-loadb-mesh/internal/domain"
 )
 
-// The registry application, an ARC-4 contract. Boxes named n<id> hold one
-// encrypted NodeRecord each. Only the creator may call its methods:
+// The registry application, an ARC-4 contract. Boxes named n<tag> hold one
+// encrypted NodeRecord each, where tag is domain.BoxTag of the node id. Only
+// the creator may call its methods:
 //
-//	put(string id, byte[] part0, byte[] part1, byte[] part2, byte[] part3)void
-//	remove(string id)void
+//	put(byte[16] tag, byte[] part0, byte[] part1, byte[] part2, byte[] part3)void
+//	remove(byte[16] tag)void
 //
 // put stores the concatenated parts. Creation, update and deletion of the
 // application are bare calls; update and deletion are creator only too.
@@ -85,29 +88,25 @@ const (
 // ABI encoding of put's args.
 const (
 	selectorLen  = 4
-	lengthPrefix = 2 // of string and byte[]
+	lengthPrefix = 2 // of byte[]
 	// PutParts is the number of byte[] parts put takes.
 	PutParts = 4
 	// MaxPartLen is the largest part: one arg less its length prefix.
 	MaxPartLen = MaxArgLen - lengthPrefix
+	// MaxValueLen is the largest value a put can carry: its args are the
+	// selector, the tag and four length-prefixed parts. Four parts of
+	// MaxPartLen exceed it, so any value up to this length fits.
+	MaxValueLen = MaxAppArgsLen - selectorLen - domain.BoxTagLen - PutParts*lengthPrefix
 )
 
-// MaxValueLen is the largest value a put for an id of the given length can
-// carry: its args are the selector, the id and four parts, the last two
-// kinds with length prefixes. Four parts of MaxPartLen exceed it, so any
-// value up to this length fits.
-func MaxValueLen(idLen int) int {
-	return MaxAppArgsLen - selectorLen - lengthPrefix - idLen - PutParts*lengthPrefix
-}
-
-// PutArgs builds the application args of put(id, value), filling each part
-// before the next. value must be at most MaxValueLen(len(id)) bytes.
-func PutArgs(id string, value []byte) ([][]byte, error) {
-	if max := MaxValueLen(len(id)); len(value) > max {
-		return nil, fmt.Errorf("value of %d bytes exceeds %d", len(value), max)
+// PutArgs builds the application args of put(tag, value), filling each part
+// before the next. value must be at most MaxValueLen bytes.
+func PutArgs(tag [domain.BoxTagLen]byte, value []byte) ([][]byte, error) {
+	if len(value) > MaxValueLen {
+		return nil, fmt.Errorf("value of %d bytes exceeds %d", len(value), MaxValueLen)
 	}
 	parts := make([]interface{}, 0, 1+PutParts)
-	parts = append(parts, id)
+	parts = append(parts, tag)
 	for i := 0; i < PutParts; i++ {
 		n := min(len(value), MaxPartLen)
 		parts = append(parts, value[:n])
@@ -116,9 +115,9 @@ func PutArgs(id string, value []byte) ([][]byte, error) {
 	return encodeCall(PutMethod, parts)
 }
 
-// RemoveArgs builds the application args of remove(id).
-func RemoveArgs(id string) ([][]byte, error) {
-	return encodeCall(RemoveMethod, []interface{}{id})
+// RemoveArgs builds the application args of remove(tag).
+func RemoveArgs(tag [domain.BoxTagLen]byte) ([][]byte, error) {
+	return encodeCall(RemoveMethod, []interface{}{tag})
 }
 
 func encodeCall(m abi.Method, values []interface{}) ([][]byte, error) {

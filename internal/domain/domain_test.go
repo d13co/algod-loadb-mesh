@@ -3,7 +3,9 @@ package domain
 import (
 	"crypto/ed25519"
 	crand "crypto/rand"
+	"encoding/json"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 )
@@ -218,22 +220,22 @@ func TestRecordCodecRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenRecord(key, "k44", blob)
+	got, err := OpenRecord(key, BoxName(key, "k44"), blob)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !got.StaticEqual(rec) {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
-	if _, err := OpenRecord(key, "k45", blob); err == nil {
+	if _, err := OpenRecord(key, BoxName(key, "k45"), blob); err == nil {
 		t.Fatal("box name is bound as AAD; opening under another id must fail")
 	}
 	other, _ := DeriveSyncKey(append([]byte("x"), seed[1:]...))
-	if _, err := OpenRecord(other, "k44", blob); err == nil {
+	if _, err := OpenRecord(other, BoxName(key, "k44"), blob); err == nil {
 		t.Fatal("wrong key must fail")
 	}
 	blob[len(blob)-1] ^= 1
-	if _, err := OpenRecord(key, "k44", blob); err == nil {
+	if _, err := OpenRecord(key, BoxName(key, "k44"), blob); err == nil {
 		t.Fatal("tamper must fail")
 	}
 }
@@ -338,17 +340,49 @@ func TestSyncJudge(t *testing.T) {
 }
 
 func TestBoxName(t *testing.T) {
-	if got := string(BoxName("k44")); got != "nk44" {
-		t.Fatalf("BoxName = %q", got)
+	key, _ := DeriveSyncKey(make([]byte, 32))
+	name := BoxName(key, "k44")
+	if len(name) != 1+BoxTagLen || name[0] != 'n' || !IsRecordBox(name) {
+		t.Fatalf("BoxName = %x", name)
 	}
-	for name, want := range map[string]string{"nk44": "k44", "nnode": "node"} {
-		if id, ok := IDFromBoxName([]byte(name)); !ok || id != want {
-			t.Errorf("IDFromBoxName(%q) = %q, %v", name, id, ok)
+	tag := BoxTag(key, "k44")
+	if string(name[1:]) != string(tag[:]) {
+		t.Fatal("BoxName is not the prefix and BoxTag")
+	}
+	// Fixed key: the tag must not drift across versions, or every existing
+	// record becomes unaddressable.
+	if got, want := hexPrefix(tag[:], BoxTagLen), "6fd848fd861291e60b536937f14a5aec"; got != want {
+		t.Fatalf("tag of k44 = %s, want %s", got, want)
+	}
+	if string(BoxName(key, "k45")) == string(name) {
+		t.Fatal("different ids share a box")
+	}
+	other, _ := DeriveSyncKey(append([]byte("x"), make([]byte, 31)...))
+	if string(BoxName(other, "k44")) == string(name) {
+		t.Fatal("tag does not depend on the key")
+	}
+	// Ids of any length give names of one length, and nothing of the id shows.
+	long := BoxName(key, "a-rather-long-node-name-0123456789abcdef0123456789")
+	if len(long) != len(name) || strings.Contains(string(long), "rather") {
+		t.Fatalf("long id name %x", long)
+	}
+	for _, n := range [][]byte{nil, []byte("n"), []byte("nk44"), append([]byte("x"), tag[:]...), append(name, 0)} {
+		if IsRecordBox(n) {
+			t.Errorf("IsRecordBox(%x) = true", n)
 		}
 	}
-	for _, name := range []string{"", "n", "k44", "xk44"} {
-		if id, ok := IDFromBoxName([]byte(name)); ok {
-			t.Errorf("IDFromBoxName(%q) = %q, want foreign", name, id)
-		}
+}
+
+func TestOpenRecordChecksID(t *testing.T) {
+	key, _ := DeriveSyncKey(make([]byte, 32))
+	rec := NodeRecord{ID: "k44", Network: "n", Endpoints: []string{"http://x"}, Version: 1}
+	// A key holder sealing a record under another node's name, with that
+	// name as AAD, still produces a box that does not open.
+	plain, _ := json.Marshal(rec)
+	aead, _ := newAEAD(key)
+	nonce := make([]byte, recordNonceLen)
+	forged := aead.Seal(append([]byte{recordVersion}, nonce...), nonce, plain, BoxName(key, "k45"))
+	if _, err := OpenRecord(key, BoxName(key, "k45"), forged); err == nil || !strings.Contains(err.Error(), "not its id") {
+		t.Fatalf("err = %v", err)
 	}
 }

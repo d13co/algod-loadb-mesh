@@ -23,7 +23,7 @@ import { TransactionComposer, AppCallMethodCall, AppMethodCallTransactionArgumen
 import { SendParams, SendSingleTransactionResult, SendAtomicTransactionComposerResults } from '@algorandfoundation/algokit-utils/types/transaction'
 import { Address, encodeAddress, modelsv2, OnApplicationComplete, Transaction, TransactionSigner } from 'algosdk'
 
-export const APP_SPEC: Arc56Contract = {"name":"Registry","structs":{},"methods":[{"name":"put","args":[{"type":"string","name":"id"},{"type":"byte[]","name":"part0"},{"type":"byte[]","name":"part1"},{"type":"byte[]","name":"part2"},{"type":"byte[]","name":"part3"}],"returns":{"type":"void"},"actions":{"create":[],"call":["NoOp"]},"readonly":false,"desc":"Stores the concatenation of the parts as the record of node `id`,\nreplacing any previous record.\n\nThe value arrives in parts because one application arg is limited to\n4096 bytes while all args of a call may total 16384 (consensus v42), so\nfour parts carry any value that fits in a call. Unused parts are empty.","events":[],"recommendations":{}},{"name":"remove","args":[{"type":"string","name":"id"}],"returns":{"type":"void"},"actions":{"create":[],"call":["NoOp"]},"readonly":false,"desc":"Removes the record of node `id`. Removing a missing record is not an error.","events":[],"recommendations":{}}],"arcs":[22,28],"desc":"algod-loadb-mesh fleet registry (docs/REGISTRY_CONTRACT.md §7).\n\nARC-4 application. Boxes named `n<id>` hold one sealed NodeRecord each;\nthe program never looks inside them. Only the creator (the sync account)\nmay call a method, update or delete the application.","networks":{},"state":{"schema":{"global":{"ints":0,"bytes":0},"local":{"ints":0,"bytes":0}},"keys":{"global":{},"local":{},"box":{}},"maps":{"global":{},"local":{},"box":{"records":{"keyType":"AVMString","valueType":"AVMBytes","desc":"Sealed NodeRecords by node id.","prefix":"bg=="}}}},"bareActions":{"create":["NoOp"],"call":["DeleteApplication","UpdateApplication"]},"sourceInfo":{"approval":{"sourceInfo":[{"pc":[253],"errorMessage":"creator only"},{"pc":[82,98,114,130,146,225],"errorMessage":"invalid array length header"},{"pc":[89,105,121,137,153,232],"errorMessage":"invalid number of bytes for arc4.dynamic_array<arc4.uint8>"}],"pcOffsetMethod":"none"},"clear":{"sourceInfo":[],"pcOffsetMethod":"none"}},"source":{"approval":"I3ByYWdtYSB2ZXJzaW9uIDEwCiNwcmFnbWEgdHlwZXRyYWNrIGZhbHNlCgovLyBAYWxnb3JhbmRmb3VuZGF0aW9uL2FsZ29yYW5kLXR5cGVzY3JpcHQvYXJjNC9pbmRleC5kLnRzOjpDb250cmFjdC5hcHByb3ZhbFByb2dyYW0oKSAtPiB1aW50NjQ6Cm1haW46CiAgICBpbnRjYmxvY2sgMCAyIDEKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjEwCiAgICAvLyBleHBvcnQgY2xhc3MgUmVnaXN0cnkgZXh0ZW5kcyBDb250cmFjdCB7CiAgICB0eG4gTnVtQXBwQXJncwogICAgYnogbWFpbl9iYXJlX3JvdXRpbmdAOQogICAgdHhuIE9uQ29tcGxldGlvbgogICAgIQogICAgYXNzZXJ0CiAgICB0eG4gQXBwbGljYXRpb25JRAogICAgYXNzZXJ0CiAgICBwdXNoYnl0ZXNzIDB4NGNjMTUzNjcgMHg4ZTg5MDBiOSAvLyBtZXRob2QgInB1dChzdHJpbmcsYnl0ZVtdLGJ5dGVbXSxieXRlW10sYnl0ZVtdKXZvaWQiLCBtZXRob2QgInJlbW92ZShzdHJpbmcpdm9pZCIKICAgIHR4bmEgQXBwbGljYXRpb25BcmdzIDAKICAgIG1hdGNoIHB1dCByZW1vdmUKCm1haW5fYWZ0ZXJfaWZfZWxzZUAxNDoKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjEwCiAgICAvLyBleHBvcnQgY2xhc3MgUmVnaXN0cnkgZXh0ZW5kcyBDb250cmFjdCB7CiAgICBlcnIKCm1haW5fYmFyZV9yb3V0aW5nQDk6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoxMAogICAgLy8gZXhwb3J0IGNsYXNzIFJlZ2lzdHJ5IGV4dGVuZHMgQ29udHJhY3QgewogICAgdHhuIE9uQ29tcGxldGlvbgogICAgc3dpdGNoIG1haW5fX19hbGdvdHNfXy5kZWZhdWx0Q3JlYXRlQDEwIG1haW5fYWZ0ZXJfaWZfZWxzZUAxNCBtYWluX2FmdGVyX2lmX2Vsc2VAMTQgbWFpbl9hZnRlcl9pZl9lbHNlQDE0IG1haW5fdXBkYXRlQDExIG1haW5fZGVzdHJveUAxMgogICAgZXJyCgptYWluX2Rlc3Ryb3lAMTI6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo1MAogICAgLy8gQGJhcmVtZXRob2QoeyBhbGxvd0FjdGlvbnM6ICdEZWxldGVBcHBsaWNhdGlvbicgfSkKICAgIHR4biBBcHBsaWNhdGlvbklECiAgICBhc3NlcnQKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjUyCiAgICAvLyB0aGlzLm9ubHlDcmVhdG9yKCkKICAgIGNhbGxzdWIgb25seUNyZWF0b3IKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjUwCiAgICAvLyBAYmFyZW1ldGhvZCh7IGFsbG93QWN0aW9uczogJ0RlbGV0ZUFwcGxpY2F0aW9uJyB9KQogICAgaW50Y18yIC8vIDEKICAgIHJldHVybgoKbWFpbl91cGRhdGVAMTE6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo0NQogICAgLy8gQGJhcmVtZXRob2QoeyBhbGxvd0FjdGlvbnM6ICdVcGRhdGVBcHBsaWNhdGlvbicgfSkKICAgIHR4biBBcHBsaWNhdGlvbklECiAgICBhc3NlcnQKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjQ3CiAgICAvLyB0aGlzLm9ubHlDcmVhdG9yKCkKICAgIGNhbGxzdWIgb25seUNyZWF0b3IKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjQ1CiAgICAvLyBAYmFyZW1ldGhvZCh7IGFsbG93QWN0aW9uczogJ1VwZGF0ZUFwcGxpY2F0aW9uJyB9KQogICAgaW50Y18yIC8vIDEKICAgIHJldHVybgoKbWFpbl9fX2FsZ290c19fLmRlZmF1bHRDcmVhdGVAMTA6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoxMAogICAgLy8gZXhwb3J0IGNsYXNzIFJlZ2lzdHJ5IGV4dGVuZHMgQ29udHJhY3QgewogICAgdHhuIEFwcGxpY2F0aW9uSUQKICAgICEKICAgIHJldHVybgoKCi8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjpSZWdpc3RyeS5wdXRbcm91dGluZ10oKSAtPiB2b2lkOgpwdXQ6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoyMgogICAgLy8gQGFiaW1ldGhvZCgpCiAgICB0eG5hIEFwcGxpY2F0aW9uQXJncyAxCiAgICBkdXAKICAgIGludGNfMCAvLyAwCiAgICBleHRyYWN0X3VpbnQxNiAvLyBvbiBlcnJvcjogaW52YWxpZCBhcnJheSBsZW5ndGggaGVhZGVyCiAgICBpbnRjXzEgLy8gMgogICAgKwogICAgZGlnIDEKICAgIGxlbgogICAgPT0KICAgIGFzc2VydCAvLyBpbnZhbGlkIG51bWJlciBvZiBieXRlcyBmb3IgYXJjNC5keW5hbWljX2FycmF5PGFyYzQudWludDg+CiAgICBleHRyYWN0IDIgMAogICAgdHhuYSBBcHBsaWNhdGlvbkFyZ3MgMgogICAgZHVwCiAgICBpbnRjXzAgLy8gMAogICAgZXh0cmFjdF91aW50MTYgLy8gb24gZXJyb3I6IGludmFsaWQgYXJyYXkgbGVuZ3RoIGhlYWRlcgogICAgaW50Y18xIC8vIDIKICAgICsKICAgIGRpZyAxCiAgICBsZW4KICAgID09CiAgICBhc3NlcnQgLy8gaW52YWxpZCBudW1iZXIgb2YgYnl0ZXMgZm9yIGFyYzQuZHluYW1pY19hcnJheTxhcmM0LnVpbnQ4PgogICAgZXh0cmFjdCAyIDAKICAgIHR4bmEgQXBwbGljYXRpb25BcmdzIDMKICAgIGR1cAogICAgaW50Y18wIC8vIDAKICAgIGV4dHJhY3RfdWludDE2IC8vIG9uIGVycm9yOiBpbnZhbGlkIGFycmF5IGxlbmd0aCBoZWFkZXIKICAgIGludGNfMSAvLyAyCiAgICArCiAgICBkaWcgMQogICAgbGVuCiAgICA9PQogICAgYXNzZXJ0IC8vIGludmFsaWQgbnVtYmVyIG9mIGJ5dGVzIGZvciBhcmM0LmR5bmFtaWNfYXJyYXk8YXJjNC51aW50OD4KICAgIGV4dHJhY3QgMiAwCiAgICB0eG5hIEFwcGxpY2F0aW9uQXJncyA0CiAgICBkdXAKICAgIGludGNfMCAvLyAwCiAgICBleHRyYWN0X3VpbnQxNiAvLyBvbiBlcnJvcjogaW52YWxpZCBhcnJheSBsZW5ndGggaGVhZGVyCiAgICBpbnRjXzEgLy8gMgogICAgKwogICAgZGlnIDEKICAgIGxlbgogICAgPT0KICAgIGFzc2VydCAvLyBpbnZhbGlkIG51bWJlciBvZiBieXRlcyBmb3IgYXJjNC5keW5hbWljX2FycmF5PGFyYzQudWludDg+CiAgICBleHRyYWN0IDIgMAogICAgdHhuYSBBcHBsaWNhdGlvbkFyZ3MgNQogICAgZHVwCiAgICBpbnRjXzAgLy8gMAogICAgZXh0cmFjdF91aW50MTYgLy8gb24gZXJyb3I6IGludmFsaWQgYXJyYXkgbGVuZ3RoIGhlYWRlcgogICAgaW50Y18xIC8vIDIKICAgICsKICAgIGRpZyAxCiAgICBsZW4KICAgID09CiAgICBhc3NlcnQgLy8gaW52YWxpZCBudW1iZXIgb2YgYnl0ZXMgZm9yIGFyYzQuZHluYW1pY19hcnJheTxhcmM0LnVpbnQ4PgogICAgZXh0cmFjdCAyIDAKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjI0CiAgICAvLyB0aGlzLm9ubHlDcmVhdG9yKCkKICAgIGNhbGxzdWIgb25seUNyZWF0b3IKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjEyCiAgICAvLyByZWNvcmRzID0gQm94TWFwPHN0cmluZywgYnl0ZXM+KHsga2V5UHJlZml4OiAnbicgfSkKICAgIHB1c2hieXRlcyAibiIKICAgIHVuY292ZXIgNQogICAgY29uY2F0CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoyNgogICAgLy8gYm94LmRlbGV0ZSgpIC8vIHRoZSBzaXplIG1heSBjaGFuZ2UsIHNvIHN0YXJ0IG92ZXIKICAgIGR1cAogICAgYm94X2RlbAogICAgcG9wCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoyNwogICAgLy8gYm94LmNyZWF0ZSh7IHNpemU6IHBhcnQwLmxlbmd0aCArIHBhcnQxLmxlbmd0aCArIHBhcnQyLmxlbmd0aCArIHBhcnQzLmxlbmd0aCB9KQogICAgZGlnIDQKICAgIGxlbgogICAgZGlnIDQKICAgIGxlbgogICAgZGlnIDEKICAgICsKICAgIGRpZyA0CiAgICBsZW4KICAgIGRpZyAxCiAgICArCiAgICBkaWcgNAogICAgbGVuCiAgICBkaWcgMQogICAgKwogICAgZGlnIDQKICAgIHN3YXAKICAgIGJveF9jcmVhdGUKICAgIHBvcAogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MjkKICAgIC8vIGJveC5yZXBsYWNlKG9mZnNldCwgcGFydDApCiAgICBkaWcgMwogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MjgKICAgIC8vIGxldCBvZmZzZXQ6IHVpbnQ2NCA9IDAKICAgIGludGNfMCAvLyAwCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoyOQogICAgLy8gYm94LnJlcGxhY2Uob2Zmc2V0LCBwYXJ0MCkKICAgIHVuY292ZXIgOQogICAgYm94X3JlcGxhY2UKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjMxCiAgICAvLyBib3gucmVwbGFjZShvZmZzZXQsIHBhcnQxKQogICAgZGlnIDMKICAgIHVuY292ZXIgMwogICAgdW5jb3ZlciA3CiAgICBib3hfcmVwbGFjZQogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MzMKICAgIC8vIGJveC5yZXBsYWNlKG9mZnNldCwgcGFydDIpCiAgICBkaWcgMgogICAgdW5jb3ZlciAyCiAgICB1bmNvdmVyIDUKICAgIGJveF9yZXBsYWNlCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czozNQogICAgLy8gYm94LnJlcGxhY2Uob2Zmc2V0LCBwYXJ0MykKICAgIHVuY292ZXIgMgogICAgYm94X3JlcGxhY2UKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjIyCiAgICAvLyBAYWJpbWV0aG9kKCkKICAgIGludGNfMiAvLyAxCiAgICByZXR1cm4KCgovLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo6UmVnaXN0cnkucmVtb3ZlW3JvdXRpbmddKCkgLT4gdm9pZDoKcmVtb3ZlOgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MzkKICAgIC8vIEBhYmltZXRob2QoKQogICAgdHhuYSBBcHBsaWNhdGlvbkFyZ3MgMQogICAgZHVwCiAgICBpbnRjXzAgLy8gMAogICAgZXh0cmFjdF91aW50MTYgLy8gb24gZXJyb3I6IGludmFsaWQgYXJyYXkgbGVuZ3RoIGhlYWRlcgogICAgaW50Y18xIC8vIDIKICAgICsKICAgIGRpZyAxCiAgICBsZW4KICAgID09CiAgICBhc3NlcnQgLy8gaW52YWxpZCBudW1iZXIgb2YgYnl0ZXMgZm9yIGFyYzQuZHluYW1pY19hcnJheTxhcmM0LnVpbnQ4PgogICAgZXh0cmFjdCAyIDAKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjQxCiAgICAvLyB0aGlzLm9ubHlDcmVhdG9yKCkKICAgIGNhbGxzdWIgb25seUNyZWF0b3IKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjEyCiAgICAvLyByZWNvcmRzID0gQm94TWFwPHN0cmluZywgYnl0ZXM+KHsga2V5UHJlZml4OiAnbicgfSkKICAgIHB1c2hieXRlcyAibiIKICAgIHN3YXAKICAgIGNvbmNhdAogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6NDIKICAgIC8vIHRoaXMucmVjb3JkcyhpZCkuZGVsZXRlKCkKICAgIGJveF9kZWwKICAgIHBvcAogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MzkKICAgIC8vIEBhYmltZXRob2QoKQogICAgaW50Y18yIC8vIDEKICAgIHJldHVybgoKCi8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjpSZWdpc3RyeS5vbmx5Q3JlYXRvcigpIC0+IHZvaWQ6Cm9ubHlDcmVhdG9yOgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6NTYKICAgIC8vIGFzc2VydChUeG4uc2VuZGVyID09PSBHbG9iYWwuY3JlYXRvckFkZHJlc3MsICdjcmVhdG9yIG9ubHknKQogICAgdHhuIFNlbmRlcgogICAgZ2xvYmFsIENyZWF0b3JBZGRyZXNzCiAgICA9PQogICAgYXNzZXJ0IC8vIGNyZWF0b3Igb25seQogICAgcmV0c3ViCg==","clear":"I3ByYWdtYSB2ZXJzaW9uIDEwCiNwcmFnbWEgdHlwZXRyYWNrIGZhbHNlCgovLyBAYWxnb3JhbmRmb3VuZGF0aW9uL2FsZ29yYW5kLXR5cGVzY3JpcHQvYmFzZS1jb250cmFjdC5kLnRzOjpCYXNlQ29udHJhY3QuY2xlYXJTdGF0ZVByb2dyYW0oKSAtPiB1aW50NjQ6Cm1haW46CiAgICBwdXNoaW50IDEKICAgIHJldHVybgo="},"byteCode":{"approval":"CiADAAIBMRtBAB0xGRREMRhEggIETMFTZwSOiQC5NhoAjgIAJgC1ADEZjQYAEf/v/+//7wAJAAEAMRhEiAC5JEMxGESIALEkQzEYFEM2GgFJIlkjCEsBFRJEVwIANhoCSSJZIwhLARUSRFcCADYaA0kiWSMISwEVEkRXAgA2GgRJIlkjCEsBFRJEVwIANhoFSSJZIwhLARUSRFcCAIgAWIABbk8FUEm8SEsEFUsEFUsBCEsEFUsBCEsEFUsBCEsETLlISwMiTwm7SwNPA08Hu0sCTwJPBbtPArskQzYaAUkiWSMISwEVEkRXAgCIAAmAAW5MULxIJEMxADIJEkSJ","clear":"CoEBQw=="},"events":[],"templateVariables":{}} as unknown as Arc56Contract
+export const APP_SPEC: Arc56Contract = {"name":"Registry","structs":{},"methods":[{"name":"put","args":[{"type":"byte[16]","name":"tag"},{"type":"byte[]","name":"part0"},{"type":"byte[]","name":"part1"},{"type":"byte[]","name":"part2"},{"type":"byte[]","name":"part3"}],"returns":{"type":"void"},"actions":{"create":[],"call":["NoOp"]},"readonly":false,"desc":"Stores the concatenation of the parts as the record under `tag`,\nreplacing any previous record.\n\nThe value arrives in parts because one application arg is limited to\n4096 bytes while all args of a call may total 16384 (consensus v42), so\nfour parts carry any value that fits in a call. Unused parts are empty.","events":[],"recommendations":{}},{"name":"remove","args":[{"type":"byte[16]","name":"tag"}],"returns":{"type":"void"},"actions":{"create":[],"call":["NoOp"]},"readonly":false,"desc":"Removes the record under `tag`. Removing a missing record is not an error.","events":[],"recommendations":{}}],"arcs":[22,28],"desc":"algod-loadb-mesh fleet registry (docs/REGISTRY_CONTRACT.md §7).\n\nARC-4 application. Boxes named `n<tag>` hold one sealed NodeRecord each,\nwhere the tag is a 16-byte keyed hash of the node id computed off chain, so\nthe chain never sees node ids. The program never looks inside the tag or\nthe record. Only the creator (the sync account) may call a method, update\nor delete the application.","networks":{},"state":{"schema":{"global":{"ints":0,"bytes":0},"local":{"ints":0,"bytes":0}},"keys":{"global":{},"local":{},"box":{}},"maps":{"global":{},"local":{},"box":{"records":{"keyType":"AVMBytes","valueType":"AVMBytes","desc":"Sealed NodeRecords by the tag of their node id.","prefix":"bg=="}}}},"bareActions":{"create":["NoOp"],"call":["DeleteApplication","UpdateApplication"]},"sourceInfo":{"approval":{"sourceInfo":[{"pc":[238],"errorMessage":"creator only"},{"pc":[91,107,123,139],"errorMessage":"invalid array length header"},{"pc":[98,114,130,146],"errorMessage":"invalid number of bytes for arc4.dynamic_array<arc4.uint8>"},{"pc":[85,220],"errorMessage":"invalid number of bytes for arc4.static_array<arc4.uint8, 16>"}],"pcOffsetMethod":"none"},"clear":{"sourceInfo":[],"pcOffsetMethod":"none"}},"source":{"approval":"I3ByYWdtYSB2ZXJzaW9uIDEwCiNwcmFnbWEgdHlwZXRyYWNrIGZhbHNlCgovLyBAYWxnb3JhbmRmb3VuZGF0aW9uL2FsZ29yYW5kLXR5cGVzY3JpcHQvYXJjNC9pbmRleC5kLnRzOjpDb250cmFjdC5hcHByb3ZhbFByb2dyYW0oKSAtPiB1aW50NjQ6Cm1haW46CiAgICBpbnRjYmxvY2sgMCAxIDIgMTYKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjEyCiAgICAvLyBleHBvcnQgY2xhc3MgUmVnaXN0cnkgZXh0ZW5kcyBDb250cmFjdCB7CiAgICB0eG4gTnVtQXBwQXJncwogICAgYnogbWFpbl9iYXJlX3JvdXRpbmdAOQogICAgdHhuIE9uQ29tcGxldGlvbgogICAgIQogICAgYXNzZXJ0CiAgICB0eG4gQXBwbGljYXRpb25JRAogICAgYXNzZXJ0CiAgICBwdXNoYnl0ZXNzIDB4MzI0ZjVhMWIgMHgxMmFkMTRjMiAvLyBtZXRob2QgInB1dChieXRlWzE2XSxieXRlW10sYnl0ZVtdLGJ5dGVbXSxieXRlW10pdm9pZCIsIG1ldGhvZCAicmVtb3ZlKGJ5dGVbMTZdKXZvaWQiCiAgICB0eG5hIEFwcGxpY2F0aW9uQXJncyAwCiAgICBtYXRjaCBwdXQgcmVtb3ZlCgptYWluX2FmdGVyX2lmX2Vsc2VAMTQ6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czoxMgogICAgLy8gZXhwb3J0IGNsYXNzIFJlZ2lzdHJ5IGV4dGVuZHMgQ29udHJhY3QgewogICAgZXJyCgptYWluX2JhcmVfcm91dGluZ0A5OgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MTIKICAgIC8vIGV4cG9ydCBjbGFzcyBSZWdpc3RyeSBleHRlbmRzIENvbnRyYWN0IHsKICAgIHR4biBPbkNvbXBsZXRpb24KICAgIHN3aXRjaCBtYWluX19fYWxnb3RzX18uZGVmYXVsdENyZWF0ZUAxMCBtYWluX2FmdGVyX2lmX2Vsc2VAMTQgbWFpbl9hZnRlcl9pZl9lbHNlQDE0IG1haW5fYWZ0ZXJfaWZfZWxzZUAxNCBtYWluX3VwZGF0ZUAxMSBtYWluX2Rlc3Ryb3lAMTIKICAgIGVycgoKbWFpbl9kZXN0cm95QDEyOgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6NTIKICAgIC8vIEBiYXJlbWV0aG9kKHsgYWxsb3dBY3Rpb25zOiAnRGVsZXRlQXBwbGljYXRpb24nIH0pCiAgICB0eG4gQXBwbGljYXRpb25JRAogICAgYXNzZXJ0CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo1NAogICAgLy8gdGhpcy5vbmx5Q3JlYXRvcigpCiAgICBjYWxsc3ViIG9ubHlDcmVhdG9yCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo1MgogICAgLy8gQGJhcmVtZXRob2QoeyBhbGxvd0FjdGlvbnM6ICdEZWxldGVBcHBsaWNhdGlvbicgfSkKICAgIGludGNfMSAvLyAxCiAgICByZXR1cm4KCm1haW5fdXBkYXRlQDExOgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6NDcKICAgIC8vIEBiYXJlbWV0aG9kKHsgYWxsb3dBY3Rpb25zOiAnVXBkYXRlQXBwbGljYXRpb24nIH0pCiAgICB0eG4gQXBwbGljYXRpb25JRAogICAgYXNzZXJ0CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo0OQogICAgLy8gdGhpcy5vbmx5Q3JlYXRvcigpCiAgICBjYWxsc3ViIG9ubHlDcmVhdG9yCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo0NwogICAgLy8gQGJhcmVtZXRob2QoeyBhbGxvd0FjdGlvbnM6ICdVcGRhdGVBcHBsaWNhdGlvbicgfSkKICAgIGludGNfMSAvLyAxCiAgICByZXR1cm4KCm1haW5fX19hbGdvdHNfXy5kZWZhdWx0Q3JlYXRlQDEwOgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MTIKICAgIC8vIGV4cG9ydCBjbGFzcyBSZWdpc3RyeSBleHRlbmRzIENvbnRyYWN0IHsKICAgIHR4biBBcHBsaWNhdGlvbklECiAgICAhCiAgICByZXR1cm4KCgovLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo6UmVnaXN0cnkucHV0W3JvdXRpbmddKCkgLT4gdm9pZDoKcHV0OgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MjQKICAgIC8vIEBhYmltZXRob2QoKQogICAgdHhuYSBBcHBsaWNhdGlvbkFyZ3MgMQogICAgZHVwCiAgICBsZW4KICAgIGludGNfMyAvLyAxNgogICAgPT0KICAgIGFzc2VydCAvLyBpbnZhbGlkIG51bWJlciBvZiBieXRlcyBmb3IgYXJjNC5zdGF0aWNfYXJyYXk8YXJjNC51aW50OCwgMTY+CiAgICB0eG5hIEFwcGxpY2F0aW9uQXJncyAyCiAgICBkdXAKICAgIGludGNfMCAvLyAwCiAgICBleHRyYWN0X3VpbnQxNiAvLyBvbiBlcnJvcjogaW52YWxpZCBhcnJheSBsZW5ndGggaGVhZGVyCiAgICBpbnRjXzIgLy8gMgogICAgKwogICAgZGlnIDEKICAgIGxlbgogICAgPT0KICAgIGFzc2VydCAvLyBpbnZhbGlkIG51bWJlciBvZiBieXRlcyBmb3IgYXJjNC5keW5hbWljX2FycmF5PGFyYzQudWludDg+CiAgICBleHRyYWN0IDIgMAogICAgdHhuYSBBcHBsaWNhdGlvbkFyZ3MgMwogICAgZHVwCiAgICBpbnRjXzAgLy8gMAogICAgZXh0cmFjdF91aW50MTYgLy8gb24gZXJyb3I6IGludmFsaWQgYXJyYXkgbGVuZ3RoIGhlYWRlcgogICAgaW50Y18yIC8vIDIKICAgICsKICAgIGRpZyAxCiAgICBsZW4KICAgID09CiAgICBhc3NlcnQgLy8gaW52YWxpZCBudW1iZXIgb2YgYnl0ZXMgZm9yIGFyYzQuZHluYW1pY19hcnJheTxhcmM0LnVpbnQ4PgogICAgZXh0cmFjdCAyIDAKICAgIHR4bmEgQXBwbGljYXRpb25BcmdzIDQKICAgIGR1cAogICAgaW50Y18wIC8vIDAKICAgIGV4dHJhY3RfdWludDE2IC8vIG9uIGVycm9yOiBpbnZhbGlkIGFycmF5IGxlbmd0aCBoZWFkZXIKICAgIGludGNfMiAvLyAyCiAgICArCiAgICBkaWcgMQogICAgbGVuCiAgICA9PQogICAgYXNzZXJ0IC8vIGludmFsaWQgbnVtYmVyIG9mIGJ5dGVzIGZvciBhcmM0LmR5bmFtaWNfYXJyYXk8YXJjNC51aW50OD4KICAgIGV4dHJhY3QgMiAwCiAgICB0eG5hIEFwcGxpY2F0aW9uQXJncyA1CiAgICBkdXAKICAgIGludGNfMCAvLyAwCiAgICBleHRyYWN0X3VpbnQxNiAvLyBvbiBlcnJvcjogaW52YWxpZCBhcnJheSBsZW5ndGggaGVhZGVyCiAgICBpbnRjXzIgLy8gMgogICAgKwogICAgZGlnIDEKICAgIGxlbgogICAgPT0KICAgIGFzc2VydCAvLyBpbnZhbGlkIG51bWJlciBvZiBieXRlcyBmb3IgYXJjNC5keW5hbWljX2FycmF5PGFyYzQudWludDg+CiAgICBleHRyYWN0IDIgMAogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MjYKICAgIC8vIHRoaXMub25seUNyZWF0b3IoKQogICAgY2FsbHN1YiBvbmx5Q3JlYXRvcgogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MTQKICAgIC8vIHJlY29yZHMgPSBCb3hNYXA8Ynl0ZXM8MTY+LCBieXRlcz4oeyBrZXlQcmVmaXg6ICduJyB9KQogICAgcHVzaGJ5dGVzICJuIgogICAgdW5jb3ZlciA1CiAgICBjb25jYXQKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjI4CiAgICAvLyBib3guZGVsZXRlKCkgLy8gdGhlIHNpemUgbWF5IGNoYW5nZSwgc28gc3RhcnQgb3ZlcgogICAgZHVwCiAgICBib3hfZGVsCiAgICBwb3AKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjI5CiAgICAvLyBib3guY3JlYXRlKHsgc2l6ZTogcGFydDAubGVuZ3RoICsgcGFydDEubGVuZ3RoICsgcGFydDIubGVuZ3RoICsgcGFydDMubGVuZ3RoIH0pCiAgICBkaWcgNAogICAgbGVuCiAgICBkaWcgNAogICAgbGVuCiAgICBkaWcgMQogICAgKwogICAgZGlnIDQKICAgIGxlbgogICAgZGlnIDEKICAgICsKICAgIGRpZyA0CiAgICBsZW4KICAgIGRpZyAxCiAgICArCiAgICBkaWcgNAogICAgc3dhcAogICAgYm94X2NyZWF0ZQogICAgcG9wCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czozMQogICAgLy8gYm94LnJlcGxhY2Uob2Zmc2V0LCBwYXJ0MCkKICAgIGRpZyAzCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czozMAogICAgLy8gbGV0IG9mZnNldDogdWludDY0ID0gMAogICAgaW50Y18wIC8vIDAKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjMxCiAgICAvLyBib3gucmVwbGFjZShvZmZzZXQsIHBhcnQwKQogICAgdW5jb3ZlciA5CiAgICBib3hfcmVwbGFjZQogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MzMKICAgIC8vIGJveC5yZXBsYWNlKG9mZnNldCwgcGFydDEpCiAgICBkaWcgMwogICAgdW5jb3ZlciAzCiAgICB1bmNvdmVyIDcKICAgIGJveF9yZXBsYWNlCiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czozNQogICAgLy8gYm94LnJlcGxhY2Uob2Zmc2V0LCBwYXJ0MikKICAgIGRpZyAyCiAgICB1bmNvdmVyIDIKICAgIHVuY292ZXIgNQogICAgYm94X3JlcGxhY2UKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjM3CiAgICAvLyBib3gucmVwbGFjZShvZmZzZXQsIHBhcnQzKQogICAgdW5jb3ZlciAyCiAgICBib3hfcmVwbGFjZQogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6MjQKICAgIC8vIEBhYmltZXRob2QoKQogICAgaW50Y18xIC8vIDEKICAgIHJldHVybgoKCi8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjpSZWdpc3RyeS5yZW1vdmVbcm91dGluZ10oKSAtPiB2b2lkOgpyZW1vdmU6CiAgICAvLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo0MQogICAgLy8gQGFiaW1ldGhvZCgpCiAgICB0eG5hIEFwcGxpY2F0aW9uQXJncyAxCiAgICBkdXAKICAgIGxlbgogICAgaW50Y18zIC8vIDE2CiAgICA9PQogICAgYXNzZXJ0IC8vIGludmFsaWQgbnVtYmVyIG9mIGJ5dGVzIGZvciBhcmM0LnN0YXRpY19hcnJheTxhcmM0LnVpbnQ4LCAxNj4KICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjQzCiAgICAvLyB0aGlzLm9ubHlDcmVhdG9yKCkKICAgIGNhbGxzdWIgb25seUNyZWF0b3IKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjE0CiAgICAvLyByZWNvcmRzID0gQm94TWFwPGJ5dGVzPDE2PiwgYnl0ZXM+KHsga2V5UHJlZml4OiAnbicgfSkKICAgIHB1c2hieXRlcyAibiIKICAgIHN3YXAKICAgIGNvbmNhdAogICAgLy8gc21hcnRfY29udHJhY3RzL3JlZ2lzdHJ5L2NvbnRyYWN0LmFsZ28udHM6NDQKICAgIC8vIHRoaXMucmVjb3Jkcyh0YWcpLmRlbGV0ZSgpCiAgICBib3hfZGVsCiAgICBwb3AKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjQxCiAgICAvLyBAYWJpbWV0aG9kKCkKICAgIGludGNfMSAvLyAxCiAgICByZXR1cm4KCgovLyBzbWFydF9jb250cmFjdHMvcmVnaXN0cnkvY29udHJhY3QuYWxnby50czo6UmVnaXN0cnkub25seUNyZWF0b3IoKSAtPiB2b2lkOgpvbmx5Q3JlYXRvcjoKICAgIC8vIHNtYXJ0X2NvbnRyYWN0cy9yZWdpc3RyeS9jb250cmFjdC5hbGdvLnRzOjU4CiAgICAvLyBhc3NlcnQoVHhuLnNlbmRlciA9PT0gR2xvYmFsLmNyZWF0b3JBZGRyZXNzLCAnY3JlYXRvciBvbmx5JykKICAgIHR4biBTZW5kZXIKICAgIGdsb2JhbCBDcmVhdG9yQWRkcmVzcwogICAgPT0KICAgIGFzc2VydCAvLyBjcmVhdG9yIG9ubHkKICAgIHJldHN1Ygo=","clear":"I3ByYWdtYSB2ZXJzaW9uIDEwCiNwcmFnbWEgdHlwZXRyYWNrIGZhbHNlCgovLyBAYWxnb3JhbmRmb3VuZGF0aW9uL2FsZ29yYW5kLXR5cGVzY3JpcHQvYmFzZS1jb250cmFjdC5kLnRzOjpCYXNlQ29udHJhY3QuY2xlYXJTdGF0ZVByb2dyYW0oKSAtPiB1aW50NjQ6Cm1haW46CiAgICBwdXNoaW50IDEKICAgIHJldHVybgo="},"byteCode":{"approval":"CiAEAAECEDEbQQAdMRkURDEYRIICBDJPWhsEEq0UwjYaAI4CACYArQAxGY0GABH/7//v/+8ACQABADEYRIgAqSNDMRhEiAChI0MxGBRDNhoBSRUlEkQ2GgJJIlkkCEsBFRJEVwIANhoDSSJZJAhLARUSRFcCADYaBEkiWSQISwEVEkRXAgA2GgVJIlkkCEsBFRJEVwIAiABQgAFuTwVQSbxISwQVSwQVSwEISwQVSwEISwQVSwEISwRMuUhLAyJPCbtLA08DTwe7SwJPAk8Fu08CuyNDNhoBSRUlEkSIAAmAAW5MULxII0MxADIJEkSJ","clear":"CoEBQw=="},"events":[],"templateVariables":{}} as unknown as Arc56Contract
 
 /**
  * A state record containing binary data
@@ -70,23 +70,23 @@ export type RegistryArgs = {
    * The object representation of the arguments for each method
    */
   obj: {
-    'put(string,byte[],byte[],byte[],byte[])void': {
-      id: string
+    'put(byte[16],byte[],byte[],byte[],byte[])void': {
+      tag: Uint8Array
       part0: Uint8Array
       part1: Uint8Array
       part2: Uint8Array
       part3: Uint8Array
     }
-    'remove(string)void': {
-      id: string
+    'remove(byte[16])void': {
+      tag: Uint8Array
     }
   }
   /**
    * The tuple representation of the arguments for each method
    */
   tuple: {
-    'put(string,byte[],byte[],byte[],byte[])void': [id: string, part0: Uint8Array, part1: Uint8Array, part2: Uint8Array, part3: Uint8Array]
-    'remove(string)void': [id: string]
+    'put(byte[16],byte[],byte[],byte[],byte[])void': [tag: Uint8Array, part0: Uint8Array, part1: Uint8Array, part2: Uint8Array, part3: Uint8Array]
+    'remove(byte[16])void': [tag: Uint8Array]
   }
 }
 
@@ -94,8 +94,8 @@ export type RegistryArgs = {
  * The return type for each method
  */
 export type RegistryReturns = {
-  'put(string,byte[],byte[],byte[],byte[])void': void
-  'remove(string)void': void
+  'put(byte[16],byte[],byte[],byte[],byte[])void': void
+  'remove(byte[16])void': void
 }
 
 /**
@@ -106,15 +106,15 @@ export type RegistryTypes = {
    * Maps method signatures / names to their argument and return types.
    */
   methods:
-    & Record<'put(string,byte[],byte[],byte[],byte[])void' | 'put', {
-      argsObj: RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void']
-      argsTuple: RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']
-      returns: RegistryReturns['put(string,byte[],byte[],byte[],byte[])void']
+    & Record<'put(byte[16],byte[],byte[],byte[],byte[])void' | 'put', {
+      argsObj: RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void']
+      argsTuple: RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']
+      returns: RegistryReturns['put(byte[16],byte[],byte[],byte[],byte[])void']
     }>
-    & Record<'remove(string)void' | 'remove', {
-      argsObj: RegistryArgs['obj']['remove(string)void']
-      argsTuple: RegistryArgs['tuple']['remove(string)void']
-      returns: RegistryReturns['remove(string)void']
+    & Record<'remove(byte[16])void' | 'remove', {
+      argsObj: RegistryArgs['obj']['remove(byte[16])void']
+      argsTuple: RegistryArgs['tuple']['remove(byte[16])void']
+      returns: RegistryReturns['remove(byte[16])void']
     }>
   /**
    * Defines the shape of the state of the application.
@@ -124,9 +124,9 @@ export type RegistryTypes = {
       keys: {}
       maps: {
         /**
-         * Sealed NodeRecords by node id.
+         * Sealed NodeRecords by the tag of their node id.
          */
-        records: Map<string, Uint8Array>
+        records: Map<Uint8Array | string, Uint8Array>
       }
     }
   }
@@ -200,9 +200,9 @@ export type RegistryDeployParams = Expand<Omit<AppFactoryDeployParams, 'createPa
  */
 export abstract class RegistryParamsFactory {
   /**
-   * Constructs a no op call for the put(string,byte[],byte[],byte[],byte[])void ABI method
+   * Constructs a no op call for the put(byte[16],byte[],byte[],byte[],byte[])void ABI method
    *
-  * Stores the concatenation of the parts as the record of node `id`,
+  * Stores the concatenation of the parts as the record under `tag`,
   replacing any previous record.
   
   The value arrives in parts because one application arg is limited to
@@ -213,26 +213,26 @@ export abstract class RegistryParamsFactory {
    * @param params Parameters for the call
    * @returns An `AppClientMethodCallParams` object for the call
    */
-  static put(params: CallParams<RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']> & CallOnComplete): AppClientMethodCallParams & CallOnComplete {
+  static put(params: CallParams<RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']> & CallOnComplete): AppClientMethodCallParams & CallOnComplete {
     return {
       ...params,
-      method: 'put(string,byte[],byte[],byte[],byte[])void' as const,
-      args: Array.isArray(params.args) ? params.args : [params.args.id, params.args.part0, params.args.part1, params.args.part2, params.args.part3],
+      method: 'put(byte[16],byte[],byte[],byte[],byte[])void' as const,
+      args: Array.isArray(params.args) ? params.args : [params.args.tag, params.args.part0, params.args.part1, params.args.part2, params.args.part3],
     }
   }
   /**
-   * Constructs a no op call for the remove(string)void ABI method
+   * Constructs a no op call for the remove(byte[16])void ABI method
    *
-   * Removes the record of node `id`. Removing a missing record is not an error.
+   * Removes the record under `tag`. Removing a missing record is not an error.
    *
    * @param params Parameters for the call
    * @returns An `AppClientMethodCallParams` object for the call
    */
-  static remove(params: CallParams<RegistryArgs['obj']['remove(string)void'] | RegistryArgs['tuple']['remove(string)void']> & CallOnComplete): AppClientMethodCallParams & CallOnComplete {
+  static remove(params: CallParams<RegistryArgs['obj']['remove(byte[16])void'] | RegistryArgs['tuple']['remove(byte[16])void']> & CallOnComplete): AppClientMethodCallParams & CallOnComplete {
     return {
       ...params,
-      method: 'remove(string)void' as const,
-      args: Array.isArray(params.args) ? params.args : [params.args.id],
+      method: 'remove(byte[16])void' as const,
+      args: Array.isArray(params.args) ? params.args : [params.args.tag],
     }
   }
 }
@@ -528,9 +528,9 @@ export class RegistryClient {
     },
 
     /**
-     * Makes a call to the Registry smart contract using the `put(string,byte[],byte[],byte[],byte[])void` ABI method.
+     * Makes a call to the Registry smart contract using the `put(byte[16],byte[],byte[],byte[],byte[])void` ABI method.
      *
-    * Stores the concatenation of the parts as the record of node `id`,
+    * Stores the concatenation of the parts as the record under `tag`,
     replacing any previous record.
     
     The value arrives in parts because one application arg is limited to
@@ -541,19 +541,19 @@ export class RegistryClient {
      * @param params The params for the smart contract call
      * @returns The call params
      */
-    put: (params: CallParams<RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
+    put: (params: CallParams<RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
       return this.appClient.params.call(RegistryParamsFactory.put(params))
     },
 
     /**
-     * Makes a call to the Registry smart contract using the `remove(string)void` ABI method.
+     * Makes a call to the Registry smart contract using the `remove(byte[16])void` ABI method.
      *
-     * Removes the record of node `id`. Removing a missing record is not an error.
+     * Removes the record under `tag`. Removing a missing record is not an error.
      *
      * @param params The params for the smart contract call
      * @returns The call params
      */
-    remove: (params: CallParams<RegistryArgs['obj']['remove(string)void'] | RegistryArgs['tuple']['remove(string)void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
+    remove: (params: CallParams<RegistryArgs['obj']['remove(byte[16])void'] | RegistryArgs['tuple']['remove(byte[16])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
       return this.appClient.params.call(RegistryParamsFactory.remove(params))
     },
 
@@ -604,9 +604,9 @@ export class RegistryClient {
     },
 
     /**
-     * Makes a call to the Registry smart contract using the `put(string,byte[],byte[],byte[],byte[])void` ABI method.
+     * Makes a call to the Registry smart contract using the `put(byte[16],byte[],byte[],byte[],byte[])void` ABI method.
      *
-    * Stores the concatenation of the parts as the record of node `id`,
+    * Stores the concatenation of the parts as the record under `tag`,
     replacing any previous record.
     
     The value arrives in parts because one application arg is limited to
@@ -617,19 +617,19 @@ export class RegistryClient {
      * @param params The params for the smart contract call
      * @returns The call transaction
      */
-    put: (params: CallParams<RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
+    put: (params: CallParams<RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
       return this.appClient.createTransaction.call(RegistryParamsFactory.put(params))
     },
 
     /**
-     * Makes a call to the Registry smart contract using the `remove(string)void` ABI method.
+     * Makes a call to the Registry smart contract using the `remove(byte[16])void` ABI method.
      *
-     * Removes the record of node `id`. Removing a missing record is not an error.
+     * Removes the record under `tag`. Removing a missing record is not an error.
      *
      * @param params The params for the smart contract call
      * @returns The call transaction
      */
-    remove: (params: CallParams<RegistryArgs['obj']['remove(string)void'] | RegistryArgs['tuple']['remove(string)void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
+    remove: (params: CallParams<RegistryArgs['obj']['remove(byte[16])void'] | RegistryArgs['tuple']['remove(byte[16])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) => {
       return this.appClient.createTransaction.call(RegistryParamsFactory.remove(params))
     },
 
@@ -680,9 +680,9 @@ export class RegistryClient {
     },
 
     /**
-     * Makes a call to the Registry smart contract using the `put(string,byte[],byte[],byte[],byte[])void` ABI method.
+     * Makes a call to the Registry smart contract using the `put(byte[16],byte[],byte[],byte[],byte[])void` ABI method.
      *
-    * Stores the concatenation of the parts as the record of node `id`,
+    * Stores the concatenation of the parts as the record under `tag`,
     replacing any previous record.
     
     The value arrives in parts because one application arg is limited to
@@ -693,22 +693,22 @@ export class RegistryClient {
      * @param params The params for the smart contract call
      * @returns The call result
      */
-    put: async (params: CallParams<RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']> & SendParams & {onComplete?: OnApplicationComplete.NoOpOC}) => {
+    put: async (params: CallParams<RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']> & SendParams & {onComplete?: OnApplicationComplete.NoOpOC}) => {
       const result = await this.appClient.send.call(RegistryParamsFactory.put(params))
-      return {...result, return: result.return as unknown as (undefined | RegistryReturns['put(string,byte[],byte[],byte[],byte[])void'])}
+      return {...result, return: result.return as unknown as (undefined | RegistryReturns['put(byte[16],byte[],byte[],byte[],byte[])void'])}
     },
 
     /**
-     * Makes a call to the Registry smart contract using the `remove(string)void` ABI method.
+     * Makes a call to the Registry smart contract using the `remove(byte[16])void` ABI method.
      *
-     * Removes the record of node `id`. Removing a missing record is not an error.
+     * Removes the record under `tag`. Removing a missing record is not an error.
      *
      * @param params The params for the smart contract call
      * @returns The call result
      */
-    remove: async (params: CallParams<RegistryArgs['obj']['remove(string)void'] | RegistryArgs['tuple']['remove(string)void']> & SendParams & {onComplete?: OnApplicationComplete.NoOpOC}) => {
+    remove: async (params: CallParams<RegistryArgs['obj']['remove(byte[16])void'] | RegistryArgs['tuple']['remove(byte[16])void']> & SendParams & {onComplete?: OnApplicationComplete.NoOpOC}) => {
       const result = await this.appClient.send.call(RegistryParamsFactory.remove(params))
-      return {...result, return: result.return as unknown as (undefined | RegistryReturns['remove(string)void'])}
+      return {...result, return: result.return as unknown as (undefined | RegistryReturns['remove(byte[16])void'])}
     },
 
   }
@@ -746,11 +746,11 @@ export class RegistryClient {
         /**
          * Get all current values of the records map in box state
          */
-        getMap: async (): Promise<Map<string, Uint8Array>> => { return (await this.appClient.state.box.getMap("records")) as Map<string, Uint8Array> },
+        getMap: async (): Promise<Map<Uint8Array, Uint8Array>> => { return (await this.appClient.state.box.getMap("records")) as Map<Uint8Array, Uint8Array> },
         /**
          * Get a current value of the records map by key from box state
          */
-        value: async (key: string): Promise<Uint8Array | undefined> => { return await this.appClient.state.box.getMapValue("records", key) as Uint8Array | undefined },
+        value: async (key: Uint8Array | string): Promise<Uint8Array | undefined> => { return await this.appClient.state.box.getMapValue("records", key) as Uint8Array | undefined },
       },
     },
   }
@@ -762,17 +762,17 @@ export class RegistryClient {
     const resultMappers: Array<undefined | ((x: ABIReturn | undefined) => any)> = []
     return {
       /**
-       * Add a put(string,byte[],byte[],byte[],byte[])void method call against the Registry contract
+       * Add a put(byte[16],byte[],byte[],byte[],byte[])void method call against the Registry contract
        */
-      put(params: CallParams<RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) {
+      put(params: CallParams<RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) {
         promiseChain = promiseChain.then(async () => composer.addAppCallMethodCall(await client.params.put(params)))
         resultMappers.push(undefined)
         return this
       },
       /**
-       * Add a remove(string)void method call against the Registry contract
+       * Add a remove(byte[16])void method call against the Registry contract
        */
-      remove(params: CallParams<RegistryArgs['obj']['remove(string)void'] | RegistryArgs['tuple']['remove(string)void']> & {onComplete?: OnApplicationComplete.NoOpOC}) {
+      remove(params: CallParams<RegistryArgs['obj']['remove(byte[16])void'] | RegistryArgs['tuple']['remove(byte[16])void']> & {onComplete?: OnApplicationComplete.NoOpOC}) {
         promiseChain = promiseChain.then(async () => composer.addAppCallMethodCall(await client.params.remove(params)))
         resultMappers.push(undefined)
         return this
@@ -829,9 +829,9 @@ export class RegistryClient {
 }
 export type RegistryComposer<TReturns extends [...any[]] = []> = {
   /**
-   * Calls the put(string,byte[],byte[],byte[],byte[])void ABI method.
+   * Calls the put(byte[16],byte[],byte[],byte[],byte[])void ABI method.
    *
-  * Stores the concatenation of the parts as the record of node `id`,
+  * Stores the concatenation of the parts as the record under `tag`,
   replacing any previous record.
   
   The value arrives in parts because one application arg is limited to
@@ -843,18 +843,18 @@ export type RegistryComposer<TReturns extends [...any[]] = []> = {
    * @param params Any additional parameters for the call
    * @returns The typed transaction composer so you can fluently chain multiple calls or call execute to execute all queued up transactions
    */
-  put(params?: CallParams<RegistryArgs['obj']['put(string,byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(string,byte[],byte[],byte[],byte[])void']>): RegistryComposer<[...TReturns, RegistryReturns['put(string,byte[],byte[],byte[],byte[])void'] | undefined]>
+  put(params?: CallParams<RegistryArgs['obj']['put(byte[16],byte[],byte[],byte[],byte[])void'] | RegistryArgs['tuple']['put(byte[16],byte[],byte[],byte[],byte[])void']>): RegistryComposer<[...TReturns, RegistryReturns['put(byte[16],byte[],byte[],byte[],byte[])void'] | undefined]>
 
   /**
-   * Calls the remove(string)void ABI method.
+   * Calls the remove(byte[16])void ABI method.
    *
-   * Removes the record of node `id`. Removing a missing record is not an error.
+   * Removes the record under `tag`. Removing a missing record is not an error.
    *
    * @param args The arguments for the contract call
    * @param params Any additional parameters for the call
    * @returns The typed transaction composer so you can fluently chain multiple calls or call execute to execute all queued up transactions
    */
-  remove(params?: CallParams<RegistryArgs['obj']['remove(string)void'] | RegistryArgs['tuple']['remove(string)void']>): RegistryComposer<[...TReturns, RegistryReturns['remove(string)void'] | undefined]>
+  remove(params?: CallParams<RegistryArgs['obj']['remove(byte[16])void'] | RegistryArgs['tuple']['remove(byte[16])void']>): RegistryComposer<[...TReturns, RegistryReturns['remove(byte[16])void'] | undefined]>
 
   /**
    * Gets available update methods
