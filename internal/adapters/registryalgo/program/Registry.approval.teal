@@ -1,0 +1,232 @@
+#pragma version 10
+#pragma typetrack false
+
+// @algorandfoundation/algorand-typescript/arc4/index.d.ts::Contract.approvalProgram() -> uint64:
+main:
+    intcblock 0 2 1
+    bytecblock "node:"
+    // smart_contracts/registry/contract.algo.ts:10
+    // export class Registry extends Contract {
+    txn NumAppArgs
+    bz main_bare_routing@9
+    txn OnCompletion
+    !
+    assert
+    txn ApplicationID
+    assert
+    pushbytess 0x4cc15367 0x8e8900b9 // method "put(string,byte[],byte[],byte[],byte[])void", method "remove(string)void"
+    txna ApplicationArgs 0
+    match put remove
+
+main_after_if_else@14:
+    // smart_contracts/registry/contract.algo.ts:10
+    // export class Registry extends Contract {
+    err
+
+main_bare_routing@9:
+    // smart_contracts/registry/contract.algo.ts:10
+    // export class Registry extends Contract {
+    txn OnCompletion
+    switch main___algots__.defaultCreate@10 main_after_if_else@14 main_after_if_else@14 main_after_if_else@14 main_update@11 main_destroy@12
+    err
+
+main_destroy@12:
+    // smart_contracts/registry/contract.algo.ts:50
+    // @baremethod({ allowActions: 'DeleteApplication' })
+    txn ApplicationID
+    assert
+    // smart_contracts/registry/contract.algo.ts:52
+    // this.onlyCreator()
+    callsub onlyCreator
+    // smart_contracts/registry/contract.algo.ts:50
+    // @baremethod({ allowActions: 'DeleteApplication' })
+    intc_2 // 1
+    return
+
+main_update@11:
+    // smart_contracts/registry/contract.algo.ts:45
+    // @baremethod({ allowActions: 'UpdateApplication' })
+    txn ApplicationID
+    assert
+    // smart_contracts/registry/contract.algo.ts:47
+    // this.onlyCreator()
+    callsub onlyCreator
+    // smart_contracts/registry/contract.algo.ts:45
+    // @baremethod({ allowActions: 'UpdateApplication' })
+    intc_2 // 1
+    return
+
+main___algots__.defaultCreate@10:
+    // smart_contracts/registry/contract.algo.ts:10
+    // export class Registry extends Contract {
+    txn ApplicationID
+    !
+    return
+
+
+// smart_contracts/registry/contract.algo.ts::Registry.put[routing]() -> void:
+put:
+    // smart_contracts/registry/contract.algo.ts:22
+    // @abimethod()
+    txna ApplicationArgs 1
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    intc_1 // 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    extract 2 0
+    txna ApplicationArgs 2
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    intc_1 // 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    extract 2 0
+    txna ApplicationArgs 3
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    intc_1 // 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    extract 2 0
+    txna ApplicationArgs 4
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    intc_1 // 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    extract 2 0
+    txna ApplicationArgs 5
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    intc_1 // 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    extract 2 0
+    // smart_contracts/registry/contract.algo.ts:24
+    // this.onlyCreator()
+    callsub onlyCreator
+    // smart_contracts/registry/contract.algo.ts:12
+    // records = BoxMap<string, bytes>({ keyPrefix: 'node:' })
+    bytec_0 // "node:"
+    uncover 5
+    concat
+    // smart_contracts/registry/contract.algo.ts:26
+    // box.delete() // the size may change, so start over
+    dup
+    box_del
+    pop
+    // smart_contracts/registry/contract.algo.ts:27
+    // box.create({ size: part0.length + part1.length + part2.length + part3.length })
+    dig 4
+    len
+    dig 4
+    len
+    dig 1
+    +
+    dig 4
+    len
+    dig 1
+    +
+    dig 4
+    len
+    dig 1
+    +
+    dig 4
+    swap
+    box_create
+    pop
+    // smart_contracts/registry/contract.algo.ts:29
+    // box.replace(offset, part0)
+    dig 3
+    // smart_contracts/registry/contract.algo.ts:28
+    // let offset: uint64 = 0
+    intc_0 // 0
+    // smart_contracts/registry/contract.algo.ts:29
+    // box.replace(offset, part0)
+    uncover 9
+    box_replace
+    // smart_contracts/registry/contract.algo.ts:31
+    // box.replace(offset, part1)
+    dig 3
+    uncover 3
+    uncover 7
+    box_replace
+    // smart_contracts/registry/contract.algo.ts:33
+    // box.replace(offset, part2)
+    dig 2
+    uncover 2
+    uncover 5
+    box_replace
+    // smart_contracts/registry/contract.algo.ts:35
+    // box.replace(offset, part3)
+    uncover 2
+    box_replace
+    // smart_contracts/registry/contract.algo.ts:22
+    // @abimethod()
+    intc_2 // 1
+    return
+
+
+// smart_contracts/registry/contract.algo.ts::Registry.remove[routing]() -> void:
+remove:
+    // smart_contracts/registry/contract.algo.ts:39
+    // @abimethod()
+    txna ApplicationArgs 1
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    intc_1 // 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    extract 2 0
+    // smart_contracts/registry/contract.algo.ts:41
+    // this.onlyCreator()
+    callsub onlyCreator
+    // smart_contracts/registry/contract.algo.ts:12
+    // records = BoxMap<string, bytes>({ keyPrefix: 'node:' })
+    bytec_0 // "node:"
+    swap
+    concat
+    // smart_contracts/registry/contract.algo.ts:42
+    // this.records(id).delete()
+    box_del
+    pop
+    // smart_contracts/registry/contract.algo.ts:39
+    // @abimethod()
+    intc_2 // 1
+    return
+
+
+// smart_contracts/registry/contract.algo.ts::Registry.onlyCreator() -> void:
+onlyCreator:
+    // smart_contracts/registry/contract.algo.ts:56
+    // assert(Txn.sender === Global.creatorAddress, 'creator only')
+    txn Sender
+    global CreatorAddress
+    ==
+    assert // creator only
+    retsub
