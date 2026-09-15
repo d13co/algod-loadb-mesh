@@ -15,7 +15,7 @@ race:
 
 lint:
 	$(GO) vet ./...
-	test -z "$$(gofmt -l cmd internal test)"
+	test -z "$$(gofmt -l cmd deploy internal test)"
 
 dev: build
 	./bin/algod-loadb-mesh dev -nodes 3

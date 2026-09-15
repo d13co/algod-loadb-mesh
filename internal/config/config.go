@@ -2,13 +2,18 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/algorand/go-algorand-sdk/v2/mnemonic"
@@ -24,6 +29,8 @@ type Config struct {
 	Listen          string  `yaml:"listen"`
 	ClientToken     string  `yaml:"client_token"`
 	ClientTokenFile string  `yaml:"client_token_file"`
+	AdminToken      string  `yaml:"admin_token"`      // required for /loadb/*; also accepted as a client token
+	AdminTokenFile  string  `yaml:"admin_token_file"` // default: algod.admin.token in local.data_dir
 	Log             Log     `yaml:"log"`
 	Local           Local   `yaml:"local"`
 	Registry        Reg     `yaml:"registry"`
@@ -115,15 +122,23 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return c, err
 	}
-	dec := yaml.NewDecoder(strings.NewReader(string(b)))
-	dec.KnownFields(true)
-	if err := dec.Decode(&c); err != nil && !errors.Is(err, os.ErrNotExist) {
-		if err.Error() != "EOF" {
-			return c, fmt.Errorf("%s: %w", path, err)
-		}
+	if c, err = Decode(b); err != nil {
+		return c, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := c.Finish(); err != nil {
 		return c, fmt.Errorf("%s: %w", path, err)
+	}
+	return c, nil
+}
+
+// Decode parses YAML strictly (unknown keys fail) without defaults or
+// validation; Finish does those.
+func Decode(b []byte) (Config, error) {
+	var c Config
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+		return c, err
 	}
 	return c, nil
 }
@@ -158,6 +173,35 @@ func (c *Config) Finish() error {
 	}
 	if c.Local.DataDir == "" {
 		return errors.New("local.data_dir is required")
+	}
+	// URLs without a scheme are a common slip (host:port copied from
+	// algod.net) and cannot be proxied; assume plain http.
+	for i, u := range c.Local.AdvertiseEndpoints {
+		c.Local.AdvertiseEndpoints[i] = withScheme(u)
+	}
+	c.Registry.AlgodURL = withScheme(c.Registry.AlgodURL)
+	for i := range c.Registry.Static {
+		for j, u := range c.Registry.Static[i].Endpoints {
+			c.Registry.Static[i].Endpoints[j] = withScheme(u)
+		}
+	}
+	for i := range c.Tiers.External {
+		c.Tiers.External[i].URL = withScheme(c.Tiers.External[i].URL)
+	}
+	if c.AdminToken == "" {
+		path, explicit := c.AdminTokenFile, c.AdminTokenFile != ""
+		if !explicit {
+			path = filepath.Join(c.Local.DataDir, "algod.admin.token")
+		}
+		t, err := readSecret(path)
+		switch {
+		case err == nil:
+			c.AdminToken = t
+		case !explicit && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)):
+			// no default admin token: /loadb/* is closed unless auth is off entirely
+		default:
+			return fmt.Errorf("admin_token_file: %w", err)
+		}
 	}
 	if c.Registry.Type == "" {
 		switch {
@@ -261,6 +305,15 @@ func (c *Config) Finish() error {
 		c.Routing.Breaker.OpenFor = 10 * time.Second
 	}
 	return nil
+}
+
+// withScheme prefixes http:// to a non-empty URL that has no scheme.
+func withScheme(u string) string {
+	u = strings.TrimSpace(u)
+	if u == "" || strings.Contains(u, "://") {
+		return u
+	}
+	return "http://" + u
 }
 
 func readSecret(path string) (string, error) {

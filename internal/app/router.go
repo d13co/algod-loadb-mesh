@@ -3,10 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 type RouterOptions struct {
 	Mode            domain.Mode
 	ClientToken     string
+	AdminToken      string // required for /loadb/* except health; also a valid client token
 	SyncTolerance   uint64
 	UpstreamTimeout time.Duration
 	WaitTimeout     time.Duration
@@ -109,13 +112,83 @@ func writeMessage(w http.ResponseWriter, code int, msg string) {
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.inflight.Add(1)
 	defer r.inflight.Add(-1)
+	start := r.clock.Now()
 	class := domain.Classify(req.Method, req.URL.Path)
-	if r.opts.ClientToken != "" && req.Header.Get("X-Algo-API-Token") != r.opts.ClientToken {
-		if !(class.Agent && strings.HasSuffix(req.URL.Path, "/health")) {
-			r.metric.Inc("loadb_requests_unauthorized")
-			writeMessage(w, 401, "Invalid API Token")
-			return
+	sw := &statusWriter{ResponseWriter: w}
+	defer r.logRequest(sw, req, class, start)
+	r.serve(sw, req, class)
+}
+
+// logRequest writes the access log line: INFO, except health probes at DEBUG.
+func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.RequestClass, start time.Time) {
+	kv := []any{"method", req.Method, "path", req.URL.RequestURI(), "status", w.status, "bytes", w.bytes,
+		"duration", r.clock.Now().Sub(start), "ip", clientIP(req)}
+	if up := w.Header().Get("X-Algod-Loadb-Mesh-Upstream"); up != "" {
+		kv = append(kv, "upstream", up)
+	}
+	if !class.Agent {
+		kv = append(kv, "class", class.String())
+	}
+	if req.Context().Err() != nil {
+		kv = append(kv, "client_gone", true)
+	}
+	if isHealth(req, class) {
+		r.log.Debug("request", kv...)
+		return
+	}
+	r.log.Info("request", kv...)
+}
+
+// authorize checks X-Algo-API-Token and answers 401/403 itself when the
+// request may not proceed. /loadb/health is open; the rest of /loadb/* needs
+// the admin token; everything else needs the client or the admin token. With
+// neither token configured, auth is off.
+func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domain.RequestClass) bool {
+	tok := req.Header.Get("X-Algo-API-Token")
+	admin := r.opts.AdminToken != "" && tokenEqual(tok, r.opts.AdminToken)
+	switch {
+	case admin, isHealth(req, class), r.opts.AdminToken == "" && r.opts.ClientToken == "":
+		return true
+	case class.Agent && r.opts.AdminToken == "":
+		r.metric.Inc("loadb_requests_unauthorized")
+		writeMessage(w, 403, "algod-loadb-mesh: /loadb endpoints need an admin token, and none is configured")
+		return false
+	case !class.Agent && (r.opts.ClientToken == "" || tokenEqual(tok, r.opts.ClientToken)):
+		return true
+	}
+	r.metric.Inc("loadb_requests_unauthorized")
+	writeMessage(w, 401, "Invalid API Token")
+	return false
+}
+
+func tokenEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func isHealth(req *http.Request, class domain.RequestClass) bool {
+	return class.Agent && strings.TrimSuffix(req.URL.Path, "/") == "/loadb/health"
+}
+
+// clientIP is the leftmost X-Forwarded-For entry, then X-Real-IP, then the
+// socket peer. The headers are client-controlled; they are only trustworthy
+// behind a proxy that rewrites them.
+func clientIP(req *http.Request) string {
+	ip, _, _ := strings.Cut(req.Header.Get("X-Forwarded-For"), ",")
+	if ip = strings.TrimSpace(ip); ip == "" {
+		ip = strings.TrimSpace(req.Header.Get("X-Real-IP"))
+	}
+	if ip == "" {
+		ip = req.RemoteAddr
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			ip = host
 		}
+	}
+	return strings.TrimPrefix(ip, "::ffff:")
+}
+
+func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.RequestClass) {
+	if !r.authorize(w, req, class) {
+		return
 	}
 	if class.Agent {
 		r.serveAgent(w, req)
@@ -484,3 +557,34 @@ func (c *captureWriter) Flush() {
 }
 
 func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+// statusWriter records the status and body size sent to the client.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	if s.status == 0 && code >= 200 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	n, err := s.ResponseWriter.Write(b)
+	s.bytes += int64(n)
+	return n, err
+}
+
+func (s *statusWriter) Flush() {
+	if fl, ok := s.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
+func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }

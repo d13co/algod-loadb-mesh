@@ -42,6 +42,7 @@ type Options struct {
 	GenesisID        string
 	Mode             string
 	ClientToken      string
+	AdminToken       string
 	SyncTolerance    uint64
 	ReturnHysteresis int
 	LagGrace         time.Duration
@@ -109,7 +110,7 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 			f.Close()
 			return nil, err
 		}
-		cfg := config.Config{Mode: o.Mode, Listen: "127.0.0.1:0", ClientToken: o.ClientToken}
+		cfg := config.Config{Mode: o.Mode, Listen: "127.0.0.1:0", ClientToken: o.ClientToken, AdminToken: o.AdminToken}
 		cfg.Local.ID = spec.ID
 		cfg.Local.DataDir = "/dev/null"
 		cfg.Local.AdvertiseEndpoints = []string{node.URL()}

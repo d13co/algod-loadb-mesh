@@ -49,6 +49,11 @@ var defaultToken string
 
 func get(t *testing.T, url string) resp { return call(t, "GET", url, defaultToken, "") }
 
+// adminToken is sent to /loadb/* by agentGet; tests that configure one set it.
+var adminToken string
+
+func agentGet(t *testing.T, url string) resp { return call(t, "GET", url, adminToken, "") }
+
 func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -63,7 +68,7 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 
 func status(t *testing.T, agentURL string) (map[string]any, []domain.Upstream) {
 	t.Helper()
-	r := get(t, agentURL+"/loadb/status")
+	r := agentGet(t, agentURL+"/loadb/status")
 	var st struct {
 		Upstreams []domain.Upstream `json:"upstreams"`
 		Other     map[string]any    `json:"-"`
@@ -120,7 +125,7 @@ func start(t *testing.T, o devfleet.Options) *devfleet.Fleet {
 		for !converged() {
 			if time.Now().After(deadline) {
 				for j := range f.Agents {
-					t.Logf("agent %d status: %s", j, get(t, f.Servers[j].URL+"/loadb/status").body)
+					t.Logf("agent %d status: %s", j, agentGet(t, f.Servers[j].URL+"/loadb/status").body)
 				}
 				t.Fatalf("fleet did not converge at %s", url)
 			}
@@ -351,7 +356,7 @@ func recsBefore(t *testing.T, f *devfleet.Fleet) []domain.NodeRecord {
 	// The devn agent re-registers itself only on first success, so derive
 	// the key the same way the fleet did.
 	var out []domain.NodeRecord
-	r := get(t, f.Servers[2].URL+"/loadb/status")
+	r := agentGet(t, f.Servers[2].URL+"/loadb/status")
 	var st struct {
 		Local struct {
 			Online bool `json:"online"`
@@ -394,9 +399,9 @@ func TestLoadBalancerSpreadsAndAvoidsBrokenNode(t *testing.T) {
 }
 
 func TestClientTokenAndAgentEndpoints(t *testing.T) {
-	defaultToken = "secret"
-	t.Cleanup(func() { defaultToken = "" })
-	f := start(t, devfleet.Options{Nodes: threeNodes()[:1], Mode: "fallback", ClientToken: "secret"})
+	defaultToken, adminToken = "secret", "admin"
+	t.Cleanup(func() { defaultToken, adminToken = "", "" })
+	f := start(t, devfleet.Options{Nodes: threeNodes()[:1], Mode: "fallback", ClientToken: "secret", AdminToken: "admin"})
 	u := f.Servers[0].URL
 	if r := call(t, "GET", u+"/v2/status", "", ""); r.code != 401 {
 		t.Fatalf("missing token: %d", r.code)
@@ -404,13 +409,42 @@ func TestClientTokenAndAgentEndpoints(t *testing.T) {
 	if r := call(t, "GET", u+"/v2/status", "secret", ""); r.code != 200 || r.node != "arch" {
 		t.Fatalf("with token: %d", r.code)
 	}
+	if r := call(t, "GET", u+"/v2/status", "admin", ""); r.code != 200 {
+		t.Fatalf("admin token is a client token too: %d", r.code)
+	}
 	if r := call(t, "GET", u+"/loadb/health", "", ""); r.code != 200 {
 		t.Fatalf("health is open: %d %s", r.code, r.body)
 	}
-	if r := call(t, "GET", u+"/loadb/metrics", "secret", ""); r.code != 200 || !strings.Contains(string(r.body), "loadb_heartbeats_sent_total") {
+	for _, path := range []string{"/loadb/status", "/loadb/peers", "/loadb/metrics", "/loadb/nope"} {
+		for _, tok := range []string{"", "secret", "wrong"} {
+			if r := call(t, "GET", u+path, tok, ""); r.code != 401 {
+				t.Errorf("%s with token %q: %d, want 401", path, tok, r.code)
+			}
+		}
+	}
+	if r := call(t, "GET", u+"/loadb/metrics", "admin", ""); r.code != 200 || !strings.Contains(string(r.body), "loadb_heartbeats_sent_total") {
 		t.Fatalf("metrics: %d %s", r.code, r.body)
 	}
-	if r := call(t, "GET", u+"/loadb/peers", "secret", ""); r.code != 200 {
+	if r := call(t, "GET", u+"/loadb/peers", "admin", ""); r.code != 200 {
 		t.Fatalf("peers: %d", r.code)
+	}
+}
+
+// With a client token but no admin token, the agent endpoints stay closed.
+// (start() is not used: its convergence check needs /loadb/status.)
+func TestAgentEndpointsClosedWithoutAdminToken(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f, err := devfleet.Start(ctx, devfleet.Options{Nodes: threeNodes()[:1], Mode: "fallback", ClientToken: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
+	u := f.Servers[0].URL
+	if r := call(t, "GET", u+"/loadb/status", "secret", ""); r.code != 403 {
+		t.Fatalf("status without admin token configured: %d %s", r.code, r.body)
+	}
+	if r := call(t, "GET", u+"/loadb/health", "", ""); r.code == 401 || r.code == 403 {
+		t.Fatalf("health must stay open: %d", r.code)
 	}
 }

@@ -252,7 +252,12 @@ func (d *Directory) handle(msg ports.GossipMessage) {
 	hb, pub, err := domain.DecodeHeartbeat(msg.Payload)
 	if err != nil {
 		d.metric.Inc("loadb_heartbeats_rejected", "reason", "decode")
+		d.log.Debug("udp received", "from", msg.From, "bytes", len(msg.Payload), "result", "undecodable", "err", err)
 		return
+	}
+	logMsg := func(result string) {
+		d.log.Debug("udp received", "from", msg.From, "bytes", len(msg.Payload), "result", result, "id", hb.NodeID,
+			"seq", hb.Seq, "round", hb.LastRound, "online", hb.Online, "draining", hb.Draining)
 	}
 	now := d.clock.Now()
 	d.mu.Lock()
@@ -260,6 +265,7 @@ func (d *Directory) handle(msg ports.GossipMessage) {
 	p, ok := d.peers[hb.NodeID]
 	if !ok {
 		d.metric.Inc("loadb_heartbeats_rejected", "reason", "unknown")
+		logMsg("unknown_node")
 		if d.onUnknown != nil {
 			go d.onUnknown(hb.NodeID)
 		}
@@ -267,13 +273,15 @@ func (d *Directory) handle(msg ports.GossipMessage) {
 	}
 	if len(p.rec.Agent.PubKey) != ed25519.PublicKeySize || !pub.Equal(ed25519.PublicKey(p.rec.Agent.PubKey)) {
 		d.metric.Inc("loadb_heartbeats_rejected", "reason", "key")
+		logMsg("wrong_key")
 		return
 	}
 	if p.hasHB && hb.Seq <= p.hb.Seq && now.Sub(p.seenAt) < d.opts.DownAfter {
+		logMsg("stale")
 		return // stale or duplicate
 	}
 	d.metric.Inc("loadb_heartbeats_received")
-	d.log.Debug("heartbeat received", "from", hb.NodeID, "seq", hb.Seq, "round", hb.LastRound, "online", hb.Online)
+	logMsg("accepted")
 	p.hb, p.seenAt, p.hasHB = hb, now, true
 	p.judge.Judge(now, hb.Online, hb.LastRound, d.bestRoundLocked(d.monitor.State()))
 }

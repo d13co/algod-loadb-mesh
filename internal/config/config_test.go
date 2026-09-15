@@ -61,3 +61,73 @@ func TestSyncSeedFormats(t *testing.T) {
 		t.Fatalf("shared secret material: %v", err)
 	}
 }
+
+func TestURLsWithoutSchemeGetHTTP(t *testing.T) {
+	c, err := load(t, `local:
+  id: a
+  data_dir: /x
+  advertise_endpoints: [157.173.109.122:51088, "https://k48.example:443", " 10.0.0.1:8080/ "]
+registry:
+  type: static
+  algod_url: 127.0.0.1:8080
+  static:
+    - {id: b, network: n, endpoints: [10.112.0.27:54000]}
+tiers:
+  external:
+    - {name: nodely, url: mainnet-api.4160.nodely.dev}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"http://157.173.109.122:51088", "https://k48.example:443", "http://10.0.0.1:8080/"}
+	for i, u := range c.Local.AdvertiseEndpoints {
+		if u != want[i] {
+			t.Errorf("advertise_endpoints[%d] = %q, want %q", i, u, want[i])
+		}
+	}
+	if c.Registry.AlgodURL != "http://127.0.0.1:8080" || c.Registry.Static[0].Endpoints[0] != "http://10.112.0.27:54000" ||
+		c.Tiers.External[0].URL != "http://mainnet-api.4160.nodely.dev" {
+		t.Errorf("got %q %q %q", c.Registry.AlgodURL, c.Registry.Static[0].Endpoints[0], c.Tiers.External[0].URL)
+	}
+	if err := c.Finish(); err != nil || c.Local.AdvertiseEndpoints[0] != "http://157.173.109.122:51088" {
+		t.Errorf("Finish must be idempotent: %v %q", err, c.Local.AdvertiseEndpoints[0])
+	}
+}
+
+func TestAdminToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := "local: {id: a, data_dir: " + dir + "}\nregistry: {type: static}\n"
+
+	c, err := load(t, cfg)
+	if err != nil || c.AdminToken != "" {
+		t.Fatalf("no algod.admin.token: %q %v", c.AdminToken, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "algod.admin.token"), []byte("algod-admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = load(t, cfg); err != nil || c.AdminToken != "algod-admin" {
+		t.Fatalf("default from data dir: %q %v", c.AdminToken, err)
+	}
+	own := filepath.Join(t.TempDir(), "admin")
+	if err := os.WriteFile(own, []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = load(t, cfg+"admin_token_file: "+own+"\n"); err != nil || c.AdminToken != "mine" {
+		t.Fatalf("admin_token_file: %q %v", c.AdminToken, err)
+	}
+	if c, err = load(t, cfg+"admin_token: inline\nadmin_token_file: "+own+"\n"); err != nil || c.AdminToken != "inline" {
+		t.Fatalf("admin_token wins: %q %v", c.AdminToken, err)
+	}
+	if _, err = load(t, cfg+"admin_token_file: "+own+".missing\n"); err == nil || !strings.Contains(err.Error(), "admin_token_file") {
+		t.Fatalf("an explicit missing file must fail: %v", err)
+	}
+	// Unreadable default file: fail rather than silently leaving /loadb closed.
+	if os.Getuid() != 0 {
+		if err := os.Chmod(filepath.Join(dir, "algod.admin.token"), 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = load(t, cfg); err == nil {
+			t.Fatal("unreadable algod.admin.token must fail")
+		}
+	}
+}

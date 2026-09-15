@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/crypto"
 	"github.com/algorand/go-algorand-sdk/v2/mnemonic"
 
+	"github.com/d13co/algod-loadb-mesh/deploy"
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/datadir"
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryalgo"
@@ -30,6 +32,7 @@ const usage = `algod-loadb-mesh - mesh load balancer for algod
 
 usage:
   algod-loadb-mesh run        -config FILE          run the agent
+  algod-loadb-mesh config     example [-static] [-o FILE] [-force]  print an example config
   algod-loadb-mesh check-node -data-dir DIR [-probe] report the local node's capabilities
   algod-loadb-mesh registry   gen-key               create a sync account (mnemonic + address)
   algod-loadb-mesh registry   init  -config FILE    deploy the registry app with the sync account
@@ -49,6 +52,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		err = runCmd(os.Args[2:])
+	case "config":
+		err = configCmd(os.Args[2:])
 	case "check-node":
 		err = checkNodeCmd(os.Args[2:])
 	case "registry":
@@ -92,6 +97,46 @@ func runCmd(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 	return a.Serve(ctx)
+}
+
+func configCmd(args []string) error {
+	if len(args) == 0 || args[0] != "example" {
+		return fmt.Errorf("config: subcommand required (example)")
+	}
+	fs := flag.NewFlagSet("config example", flag.ExitOnError)
+	static := fs.Bool("static", false, "static peer list instead of the on-chain registry")
+	out := fs.String("o", "", "write to FILE instead of stdout")
+	force := fs.Bool("force", false, "overwrite FILE if it exists")
+	_ = fs.Parse(args[1:])
+	text := deploy.ConfigExample
+	if *static {
+		text = deploy.ConfigStaticExample
+	}
+	if *out == "" {
+		_, err := fmt.Print(text)
+		return err
+	}
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if *force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	// 0600: the file will hold tokens once filled in.
+	f, err := os.OpenFile(*out, flags, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("%s exists (use -force to overwrite)", *out)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(text); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "wrote", *out)
+	return nil
 }
 
 func checkNodeCmd(args []string) error {

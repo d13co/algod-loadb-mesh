@@ -39,12 +39,18 @@ Each host runs one agent next to its algod. The agent:
 
        algod-loadb-mesh registry gen-key
 
-2. Deploy the registry application (needs a config with `registry.sync_key_file`
-   and `local.data_dir`; the local node submits the transaction):
+2. Write a config from the example and edit it (at least `local`,
+   `registry.sync_key_file` and `mesh.advertise`; add `-static` for a static
+   peer list):
+
+       algod-loadb-mesh config example -o /etc/algod-loadb-mesh/config.yaml
+
+   Then deploy the registry application (the local node submits the
+   transaction):
 
        algod-loadb-mesh registry init -config /etc/algod-loadb-mesh/config.yaml
 
-3. Put the printed `app_id` into every host's config (see
+3. Put the printed `app_id` into every host's config (the example is also at
    [deploy/config.example.yaml](deploy/config.example.yaml)), install
    [deploy/algod-loadb-mesh.service](deploy/algod-loadb-mesh.service), start it. Agents
    register themselves on first boot and pick each other up within one
@@ -55,10 +61,13 @@ Useful commands:
     algod-loadb-mesh check-node -data-dir /var/lib/algorand -probe   # what the agent will advertise
     algod-loadb-mesh registry list -config ...                        # decrypted fleet view
     algod-loadb-mesh registry rm -config ... -id old-node             # retire a node
-    curl -H 'X-Algo-API-Token: ...' http://127.0.0.1:4000/loadb/status
+    curl -H "X-Algo-API-Token: $(cat /var/lib/algorand/algod.admin.token)" http://127.0.0.1:4000/loadb/status
 
-Agent endpoints: `/loadb/health` (no token), `/loadb/status`, `/loadb/peers`,
-`/loadb/metrics` (Prometheus text).
+Agent endpoints: `/loadb/health` (no token), and `/loadb/status`,
+`/loadb/peers`, `/loadb/metrics` (Prometheus text), which need the admin token
+in `X-Algo-API-Token`. The admin token defaults to the node's
+`algod.admin.token` (`admin_token` / `admin_token_file` override it) and is
+accepted as a client token too.
 
 Without a chain registry, `registry.type: static` lists peers in the config
 and `mesh.shared_secret` replaces the sync key as key material

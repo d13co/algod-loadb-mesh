@@ -81,7 +81,7 @@ func New(d Deps) (*Agent, error) {
 		KeepAlive: c.Mesh.KeepAlive, SyncTolerance: c.Routing.SyncTolerance, LagGrace: c.Routing.LagGrace, ReturnHysteresis: c.Routing.ReturnHysteresisRounds,
 		PeerOverrides: overrides, Externals: externals}, monitor, d.Gossip, d.Clients, stats, d.Clock, d.Log, d.Metrics, d.AgentKey)
 
-	router := app.NewRouter(app.RouterOptions{Mode: mode, ClientToken: c.ClientToken, SyncTolerance: c.Routing.SyncTolerance,
+	router := app.NewRouter(app.RouterOptions{Mode: mode, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
 		UpstreamTimeout: c.Routing.UpstreamTimeout, WaitTimeout: c.Local.WaitTimeout, PendingTTL: c.Routing.PendingTTL,
 		RetryBudget: *c.Routing.RetryBudget, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
 		dir, monitor, d.Forwarder, d.HTTPClient, stats, d.Clock, d.Log, d.Metrics, d.Rand, d.MetricsText)
