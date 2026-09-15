@@ -17,7 +17,7 @@ smart_contracts/artifacts/registry/
 ```
 
 The interface is two ARC-4 methods, both creator only, over the box map
-`records` (`node:<id>` → sealed record):
+`records` (`n<id>` → sealed record):
 
 - `put(string id, byte[] part0, byte[] part1, byte[] part2, byte[] part3)void`
   stores the concatenated parts as the record of `id`, replacing any previous

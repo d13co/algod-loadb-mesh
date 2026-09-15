@@ -210,7 +210,7 @@ func (r *Registry) ensureFunded(ctx context.Context, nameLen, valueLen int) erro
 	if err != nil {
 		return err
 	}
-	tx, err := transaction.MakePaymentTxn(r.sender.String(), appAddr.String(), need-info.Amount, []byte("algod-loadb box mbr"), "", sp)
+	tx, err := transaction.MakePaymentTxn(r.sender.String(), appAddr.String(), need-info.Amount, []byte("algod-loadb-mesh box mbr"), "", sp)
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,7 @@ func (r *Registry) Create(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	tx, err := transaction.MakeApplicationCreateTxWithBoxes(false, approval, clear, types.StateSchema{}, types.StateSchema{}, 0,
-		nil, nil, nil, nil, nil, sp, r.sender, []byte("algod-loadb registry"), types.Digest{}, [32]byte{}, types.Address{})
+		nil, nil, nil, nil, nil, sp, r.sender, []byte("algod-loadb-mesh registry"), types.Digest{}, [32]byte{}, types.Address{})
 	if err != nil {
 		return 0, err
 	}

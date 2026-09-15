@@ -11,7 +11,7 @@ import (
 // which is the trust model requested (one sync account, no RBAC); moving to
 // per-agent keys later only changes this function and the registry record.
 func AgentKey(material []byte, nodeID string) (ed25519.PrivateKey, error) {
-	seed, err := hkdf.Key(sha256.New, material, []byte("algod-loadb"), "agent-key:"+nodeID, ed25519.SeedSize)
+	seed, err := hkdf.Key(sha256.New, material, []byte("algod-loadb-mesh"), "agent-key:"+nodeID, ed25519.SeedSize)
 	if err != nil {
 		return nil, err
 	}

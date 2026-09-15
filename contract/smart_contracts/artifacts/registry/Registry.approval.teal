@@ -4,7 +4,6 @@
 // @algorandfoundation/algorand-typescript/arc4/index.d.ts::Contract.approvalProgram() -> uint64:
 main:
     intcblock 0 2 1
-    bytecblock "node:"
     // smart_contracts/registry/contract.algo.ts:10
     // export class Registry extends Contract {
     txn NumAppArgs
@@ -127,8 +126,8 @@ put:
     // this.onlyCreator()
     callsub onlyCreator
     // smart_contracts/registry/contract.algo.ts:12
-    // records = BoxMap<string, bytes>({ keyPrefix: 'node:' })
-    bytec_0 // "node:"
+    // records = BoxMap<string, bytes>({ keyPrefix: 'n' })
+    pushbytes "n"
     uncover 5
     concat
     // smart_contracts/registry/contract.algo.ts:26
@@ -207,8 +206,8 @@ remove:
     // this.onlyCreator()
     callsub onlyCreator
     // smart_contracts/registry/contract.algo.ts:12
-    // records = BoxMap<string, bytes>({ keyPrefix: 'node:' })
-    bytec_0 // "node:"
+    // records = BoxMap<string, bytes>({ keyPrefix: 'n' })
+    pushbytes "n"
     swap
     concat
     // smart_contracts/registry/contract.algo.ts:42

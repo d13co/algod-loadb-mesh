@@ -9,7 +9,7 @@ export async function deploy() {
   const deployer = await algorand.account.fromEnvironment('DEPLOYER')
 
   const client = await createRegistry(algorand, deployer.addr)
-  await client.appClient.fundAppAccount({ amount: (0.2).algo(), note: 'algod-loadb box mbr' })
+  await client.appClient.fundAppAccount({ amount: (0.2).algo(), note: 'algod-loadb-mesh box mbr' })
 
   console.log(`registry app id ${client.appId} (account ${client.appAddress}), creator ${deployer.addr}`)
   console.log(`set registry.app_id: ${client.appId}`)

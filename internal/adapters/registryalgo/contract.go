@@ -8,7 +8,7 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/abi"
 )
 
-// The registry application, an ARC-4 contract. Boxes named node:<id> hold one
+// The registry application, an ARC-4 contract. Boxes named n<id> hold one
 // encrypted NodeRecord each. Only the creator may call its methods:
 //
 //	put(string id, byte[] part0, byte[] part1, byte[] part2, byte[] part3)void

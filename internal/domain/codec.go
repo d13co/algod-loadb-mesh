@@ -17,7 +17,7 @@ import (
 const (
 	recordVersion  = 1
 	recordNonceLen = 12
-	BoxKeyPrefix   = "node:"
+	BoxKeyPrefix   = "n"
 )
 
 // SyncKey is the fleet-wide symmetric key derived from the sync account.
@@ -31,7 +31,7 @@ func DeriveSyncKey(seed []byte) (SyncKey, error) {
 	if len(seed) < 32 {
 		return k, errors.New("sync key: seed shorter than 32 bytes")
 	}
-	out, err := hkdf.Key(sha256.New, seed[:32], []byte("algod-loadb"), "registry-v1", 32)
+	out, err := hkdf.Key(sha256.New, seed[:32], []byte("algod-loadb-mesh"), "registry-v1", 32)
 	if err != nil {
 		return k, err
 	}

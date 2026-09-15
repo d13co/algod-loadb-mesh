@@ -35,12 +35,12 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	if err != nil || st.LastRound != 501 {
 		t.Fatalf("wait: %v %+v", err, st)
 	}
-	n.PutBox(7, []byte("node:x"), []byte("val"))
+	n.PutBox(7, []byte("nx"), []byte("val"))
 	names, err := c.BoxNames(ctx, 7)
-	if err != nil || len(names) != 1 || string(names[0]) != "node:x" {
+	if err != nil || len(names) != 1 || string(names[0]) != "nx" {
 		t.Fatalf("boxes: %v %q", err, names)
 	}
-	val, err := c.Box(ctx, 7, []byte("node:x"))
+	val, err := c.Box(ctx, 7, []byte("nx"))
 	if err != nil || string(val) != "val" {
 		t.Fatalf("box: %v %q", err, val)
 	}

@@ -35,8 +35,8 @@ the *number* of nodes or the *ids* (box names are plaintext, see §9).
 | Global state schema | 0 uints, 0 byte slices |
 | Local state schema | 0 / 0 (no opt-in exists) |
 | Extra program pages | 0 |
-| Boxes | one per node record, key `node:<id>`, value = sealed record (§4) |
-| Creation note | `algod-loadb registry` (informational) |
+| Boxes | one per node record, key `n<id>`, value = sealed record (§4) |
+| Creation note | `algod-loadb-mesh registry` (informational) |
 
 A registry app may live on a different network than the nodes it describes:
 records carry the node's genesis id, and agents ignore records for other
@@ -46,15 +46,16 @@ by default it is the local node.
 ## 3. Box naming
 
 ```
-key   = "node:" || id
+key   = "n" || id
 id    = 1..48 bytes, the NodeRecord.ID (stable short name, e.g. "k44")
 ```
 
-Box keys are therefore 6..53 bytes, within Algorand's 64-byte limit. Readers
-list boxes with `GET /v2/applications/{app}/boxes`, keep those whose name
-starts with `node:`, and fetch each with
-`GET /v2/applications/{app}/box?name=b64:<key>`. Boxes with any other prefix
-are reserved for future use and must be ignored.
+Box keys are therefore 2..49 bytes, within Algorand's 64-byte limit; the
+one-byte prefix keeps the per-box minimum balance down (§8). Readers list
+boxes with `GET /v2/applications/{app}/boxes`, keep those whose name starts
+with `n`, and fetch each with `GET /v2/applications/{app}/box?name=b64:<key>`.
+Boxes with any other first byte are reserved for future use and must be
+ignored; a future box kind must therefore not start with `n`.
 
 ## 4. Box value format
 
@@ -70,7 +71,7 @@ offset  size  field
 - Nonce: 12 random bytes from the writer's CSPRNG, never reused with the
   same key by construction (96-bit random nonces; the fleet writes at most a
   few thousand records over its lifetime).
-- Additional authenticated data: the **box key** (`node:<id>`). A ciphertext
+- Additional authenticated data: the **box key** (`n<id>`). A ciphertext
   copied into another node's box fails to open, so a key holder cannot be
   tricked into treating record A's endpoints as node B's.
 - Plaintext: the JSON encoding of `NodeRecord` (§6), UTF-8, no framing.
@@ -115,7 +116,7 @@ host at once and let the agents re-register (or re-`add` static entries).
 **Sync key (encryption).**
 
 ```
-sync_key = HKDF-SHA256(IKM = seed[0:32], salt = "algod-loadb", info = "registry-v1", L = 32)
+sync_key = HKDF-SHA256(IKM = seed[0:32], salt = "algod-loadb-mesh", info = "registry-v1", L = 32)
 ```
 
 where `seed` is the ed25519 seed of the sync account. Deriving through HKDF
@@ -125,7 +126,7 @@ future format can use a different `info` string without changing the account.
 **Agent heartbeat keys.** Not part of the contract, but stored in records:
 
 ```
-agent_seed = HKDF-SHA256(IKM = seed[0:32], salt = "algod-loadb", info = "agent-key:" || id, L = 32)
+agent_seed = HKDF-SHA256(IKM = seed[0:32], salt = "algod-loadb-mesh", info = "agent-key:" || id, L = 32)
 agent_key  = ed25519.NewKeyFromSeed(agent_seed)
 ```
 
@@ -183,7 +184,7 @@ fails if the copies differ from the build.
 
 ```ts
 export class Registry extends Contract {
-  records = BoxMap<string, bytes>({ keyPrefix: 'node:' })
+  records = BoxMap<string, bytes>({ keyPrefix: 'n' })
 
   @abimethod()
   put(id: string, part0: bytes, part1: bytes, part2: bytes, part3: bytes): void {
@@ -226,8 +227,8 @@ export class Registry extends Contract {
 | Call | Selector | Effect |
 |---|---|---|
 | bare create (NoOp, no args) | | create the application |
-| `put(string,byte[],byte[],byte[],byte[])void` | `4cc15367` | delete box `node:<id>` if present, create it with size Σ len(partᵢ), write the parts in order |
-| `remove(string)void` | `8e8900b9` | delete box `node:<id>` if present |
+| `put(string,byte[],byte[],byte[],byte[])void` | `4cc15367` | delete box `n<id>` if present, create it with size Σ len(partᵢ), write the parts in order |
+| `remove(string)void` | `8e8900b9` | delete box `n<id>` if present |
 | bare UpdateApplication | | replace the programs |
 | bare DeleteApplication | | delete the application |
 
@@ -235,7 +236,7 @@ Args follow ARC-4: `ApplicationArgs[0]` is the selector, `string` and
 `byte[]` are a big-endian uint16 length followed by the bytes, and the router
 rejects an arg whose length prefix does not match its size. A box name is the
 map prefix followed by the raw id bytes, so the program can only ever touch
-boxes named `node:…`.
+boxes whose name starts with `n`.
 
 The value travels in four parts because a single application arg, like any
 AVM byte string, is limited to 4096 bytes, so a part holds at most 4094. Four
@@ -271,18 +272,18 @@ main:
 ### Bytecode
 
 ```
-approval  0a 20 03 00 02 01 26 01 05 6e 6f 64 65 3a 31 1b 41 00 1d 31 19 14 44
-          31 18 44 82 02 04 4c c1 53 67 04 8e 89 00 b9 36 1a 00 8e 02 00 26 00
-          b3 00 31 19 8d 06 00 11 ff ef ff ef ff ef 00 09 00 01 00 31 18 44 88
-          00 b5 24 43 31 18 44 88 00 ad 24 43 31 18 14 43 36 1a 01 49 22 59 23
-          08 4b 01 15 12 44 57 02 00 36 1a 02 49 22 59 23 08 4b 01 15 12 44 57
-          02 00 36 1a 03 49 22 59 23 08 4b 01 15 12 44 57 02 00 36 1a 04 49 22
-          59 23 08 4b 01 15 12 44 57 02 00 36 1a 05 49 22 59 23 08 4b 01 15 12
-          44 57 02 00 88 00 54 28 4f 05 50 49 bc 48 4b 04 15 4b 04 15 4b 01 08
-          4b 04 15 4b 01 08 4b 04 15 4b 01 08 4b 04 4c b9 48 4b 03 22 4f 09 bb
-          4b 03 4f 03 4f 07 bb 4b 02 4f 02 4f 05 bb 4f 02 bb 24 43 36 1a 01 49
-          22 59 23 08 4b 01 15 12 44 57 02 00 88 00 07 28 4c 50 bc 48 24 43 31
-          00 32 09 12 44 89                                                     (259 bytes)
+approval  0a 20 03 00 02 01 31 1b 41 00 1d 31 19 14 44 31 18 44 82 02 04 4c c1
+          53 67 04 8e 89 00 b9 36 1a 00 8e 02 00 26 00 b5 00 31 19 8d 06 00 11
+          ff ef ff ef ff ef 00 09 00 01 00 31 18 44 88 00 b9 24 43 31 18 44 88
+          00 b1 24 43 31 18 14 43 36 1a 01 49 22 59 23 08 4b 01 15 12 44 57 02
+          00 36 1a 02 49 22 59 23 08 4b 01 15 12 44 57 02 00 36 1a 03 49 22 59
+          23 08 4b 01 15 12 44 57 02 00 36 1a 04 49 22 59 23 08 4b 01 15 12 44
+          57 02 00 36 1a 05 49 22 59 23 08 4b 01 15 12 44 57 02 00 88 00 58 80
+          01 6e 4f 05 50 49 bc 48 4b 04 15 4b 04 15 4b 01 08 4b 04 15 4b 01 08
+          4b 04 15 4b 01 08 4b 04 4c b9 48 4b 03 22 4f 09 bb 4b 03 4f 03 4f 07
+          bb 4b 02 4f 02 4f 05 bb 4f 02 bb 24 43 36 1a 01 49 22 59 23 08 4b 01
+          15 12 44 57 02 00 88 00 09 80 01 6e 4c 50 bc 48 24 43 31 00 32 09 12
+          44 89                                                                 (255 bytes)
 clear     0a 81 01 43
 ```
 
@@ -298,7 +299,7 @@ All transactions are single (ungrouped), signed by the sync account, sent
 through `POST /v2/transactions` and waited on for up to 8 rounds.
 
 **Create** (`registry init`): bare `ApplicationCall`, `ApplicationID = 0`,
-no args, programs from §7, zero schemas, note `algod-loadb registry`. The new
+no args, programs from §7, zero schemas, note `algod-loadb-mesh registry`. The new
 id is taken from the confirmation's `application-index`. Immediately
 afterwards the app account is funded (below) so the first `put` does not
 fail.
@@ -306,7 +307,7 @@ fail.
 **Put**: NoOp call of `put(id, part0, part1, part2, part3)`, where the parts
 are the sealed value split in order into pieces of at most 4094 bytes, each
 filled before the next (the remaining parts are empty), with eight box
-references to `node:<id>` (app id 0 = the called app). The args are
+references to `n<id>` (app id 0 = the called app). The args are
 `4 + (2 + len(id)) + 4 × 2 + len(value)` bytes. Protocol limits as of
 consensus v42:
 
@@ -338,7 +339,7 @@ mbr(box) = 2500 + 400 × (len(key) + len(value))   microAlgo
 per box on top of the account minimum. Before every `put` the client reads
 the app account, computes `required = min-balance + mbr(new box) + 100 000`
 and, if the balance is lower, sends a payment for the difference from the
-sync account (note `algod-loadb box mbr`). `remove` releases the box's share
+sync account (note `algod-loadb-mesh box mbr`). `remove` releases the box's share
 of the minimum balance back to the app account; it is not swept.
 
 Fees: a call whose args total `n` bytes needs
@@ -372,7 +373,7 @@ from the disk cache first, and on demand when a heartbeat arrives from an id
 the agent does not know (rate-limited to one refresh per tenth of the
 period):
 
-1. `boxes` for the app; ignore names without the `node:` prefix; stop after
+1. `boxes` for the app; ignore names without the `n` prefix; stop after
    1000 names (`MaxRecords`) as a runaway guard.
 2. `box` for each name; a 404 between list and get means "deleted, skip".
 3. Open and validate each value; skip failures with a warning.
@@ -415,7 +416,7 @@ creates the app. All need the sync key and an algod to submit through.
 - Contract (`contract/`, `npm test`, algokit localnet on consensus v42): the
   ARC-56 interface (methods, selectors, bare actions, box map); bare creation
   with zero schemas, and no creation through a method; `put` storing under
-  `node:<id>`, growing, shrinking and replacing up to 16 KB; parts of uneven
+  `n<id>`, growing, shrinking and replacing up to 16 KB; parts of uneven
   sizes (including empty ones anywhere) concatenated in order; `remove` and
   its idempotence; rejection of unknown selectors, the former raw
   `"put"`/`"del"` args, missing parts, mismatched ABI length prefixes, bare

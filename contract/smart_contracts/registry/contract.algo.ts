@@ -3,13 +3,13 @@ import { abimethod, assert, baremethod, BoxMap, bytes, Contract, Global, Txn, ui
 /**
  * algod-loadb-mesh fleet registry (docs/REGISTRY_CONTRACT.md §7).
  *
- * ARC-4 application. Boxes named `node:<id>` hold one sealed NodeRecord each;
+ * ARC-4 application. Boxes named `n<id>` hold one sealed NodeRecord each;
  * the program never looks inside them. Only the creator (the sync account)
  * may call a method, update or delete the application.
  */
 export class Registry extends Contract {
   /** Sealed NodeRecords by node id. */
-  records = BoxMap<string, bytes>({ keyPrefix: 'node:' })
+  records = BoxMap<string, bytes>({ keyPrefix: 'n' })
 
   /**
    * Stores the concatenation of the parts as the record of node `id`,

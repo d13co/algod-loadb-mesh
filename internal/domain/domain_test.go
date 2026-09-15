@@ -246,7 +246,7 @@ func TestRecordCodecGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "01000000000000000000000000f4e9a3"
+	const want = "010000000000000000000000001ad589"
 	got := hexPrefix(blob, 16)
 	if got != want {
 		t.Fatalf("golden prefix changed: %s want %s (full %x)", got, want, blob)
@@ -334,5 +334,21 @@ func TestSyncJudge(t *testing.T) {
 	j3.Judge(at(1), false, 0, 100)
 	if j3.Judge(at(2), true, 100, 100) != HealthSynced {
 		t.Fatal("first sight must be trusted")
+	}
+}
+
+func TestBoxName(t *testing.T) {
+	if got := string(BoxName("k44")); got != "nk44" {
+		t.Fatalf("BoxName = %q", got)
+	}
+	for name, want := range map[string]string{"nk44": "k44", "nnode": "node"} {
+		if id, ok := IDFromBoxName([]byte(name)); !ok || id != want {
+			t.Errorf("IDFromBoxName(%q) = %q, %v", name, id, ok)
+		}
+	}
+	for _, name := range []string{"", "n", "k44", "xk44"} {
+		if id, ok := IDFromBoxName([]byte(name)); ok {
+			t.Errorf("IDFromBoxName(%q) = %q, want foreign", name, id)
+		}
 	}
 }

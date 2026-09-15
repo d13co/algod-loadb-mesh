@@ -68,7 +68,7 @@ describe('registry contract', () => {
       expect(APP_SPEC.arcs).toEqual(expect.arrayContaining([22, 28]))
       expect(APP_SPEC.methods.map((m) => new algosdk.ABIMethod(m).getSignature())).toEqual([PUT, REMOVE])
       expect(APP_SPEC.bareActions).toEqual({ create: ['NoOp'], call: ['DeleteApplication', 'UpdateApplication'] })
-      expect(APP_SPEC.state.maps.box.records).toMatchObject({ keyType: 'AVMString', valueType: 'AVMBytes', prefix: Buffer.from('node:').toString('base64') })
+      expect(APP_SPEC.state.maps.box.records).toMatchObject({ keyType: 'AVMString', valueType: 'AVMBytes', prefix: Buffer.from('n').toString('base64') })
       expect(Buffer.from(selector(PUT)).toString('hex')).toBe('4cc15367')
       expect(Buffer.from(selector(REMOVE)).toString('hex')).toBe('8e8900b9')
     })
@@ -104,7 +104,7 @@ describe('registry contract', () => {
   })
 
   describe('put', () => {
-    test('stores the value verbatim in box node:<id>', async () => {
+    test('stores the value verbatim in box n<id>', async () => {
       const { algorand, client } = await setup()
       const value = bytes(500)
 

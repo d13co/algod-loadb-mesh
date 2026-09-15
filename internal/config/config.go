@@ -300,6 +300,6 @@ func (c *Config) KeyMaterial() ([]byte, error) {
 	if seed, err := c.SyncSeed(); err != nil || seed != nil {
 		return seed, err
 	}
-	sum := sha256.Sum256([]byte("algod-loadb-shared-secret:" + c.Mesh.SharedSecret))
+	sum := sha256.Sum256([]byte("algod-loadb-mesh-shared-secret:" + c.Mesh.SharedSecret))
 	return sum[:], nil
 }
