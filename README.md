@@ -80,7 +80,8 @@ Add `--setup` to the install command to do both at once
    Or let [deploy/autoconfig.sh](deploy/autoconfig.sh) fill those in from the
    host: id from the hostname (minus `.local`), the algod data dir (it asks
    when there are several) and the address from a 10.112.* interface, then
-   10.114.*, then a public one (`-h` for overrides):
+   10.114.*, then a public one, and asks whether to add Nodely as the last-resort
+   fallback (`--nodely`/`--no-nodely` to skip the question; `-h` for overrides):
 
        algod-loadb-mesh-autoconfig --app-id 1234 -o /etc/algod-loadb-mesh/config.yaml
 

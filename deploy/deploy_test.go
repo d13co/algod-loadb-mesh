@@ -90,6 +90,28 @@ func TestAutoconfigLoads(t *testing.T) {
 	}
 }
 
+// --nodely adds Nodely for the genesis network; --no-nodely and an unknown
+// network add nothing.
+func TestAutoconfigNodely(t *testing.T) {
+	for _, tc := range []struct {
+		genesis, arg, url string
+	}{
+		{`{"network":"testnet"}`, "--nodely", "https://testnet-api.4160.nodely.dev"},
+		{`{"network":"mainnet"}`, "--no-nodely", ""},
+		{`{"network":"devnet"}`, "--nodely", ""},
+	} {
+		bundle := config.Bundle{AppID: 7, Seed: make([]byte, 32)}.String()
+		c := autoconfigGenesis(t, t.TempDir(), tc.genesis, "", bundle, tc.arg)
+		got := ""
+		if len(c.Tiers.External) == 1 {
+			got = c.Tiers.External[0].URL
+		}
+		if got != tc.url || len(c.Tiers.External) > 1 {
+			t.Errorf("%s %s: externals %+v, want url %q", tc.genesis, tc.arg, c.Tiers.External, tc.url)
+		}
+	}
+}
+
 // The registry bundle's app id, sync address and key survive the script's
 // decoding, whether passed as an argument or on stdin.
 func TestAutoconfigBundle(t *testing.T) {
@@ -120,6 +142,12 @@ func TestAutoconfigBundle(t *testing.T) {
 // config it writes.
 func autoconfig(t *testing.T, dir, stdin string, args ...string) config.Config {
 	t.Helper()
+	return autoconfigGenesis(t, dir, "{}", stdin, append([]string{"--no-nodely"}, args...)...)
+}
+
+// autoconfigGenesis is autoconfig with the genesis.json content given.
+func autoconfigGenesis(t *testing.T, dir, genesis, stdin string, args ...string) config.Config {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
 	}
@@ -128,7 +156,7 @@ func autoconfig(t *testing.T, dir, stdin string, args ...string) config.Config {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"data/genesis.json": "{}",
+		"data/genesis.json": genesis,
 		"data/algod.net":    "0.0.0.0:8080",
 		"client.token":      "t",
 	} {
