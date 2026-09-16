@@ -7,7 +7,7 @@
 # role: node                          # node (next to an algod) | balancer (no algod: routes to the fleet, see `config example -balancer`); default node
 mode: fallback                        # fallback (local node first) | loadbalancer (best-scoring node); default fallback, loadbalancer for a balancer
 listen: 0.0.0.0:4000                  # clients connect here; default 127.0.0.1:4000
-client_token_file: /etc/algod-loadb-mesh/client.token   # X-Algo-API-Token clients must send
+client_token_file: /var/lib/algorand/algod.token   # X-Algo-API-Token clients must send; here the node's own algod token
 # client_token: s3cret                  # the same, inline; wins over client_token_file. No token at all: no auth
 # admin_token_file: /var/lib/algorand/algod.admin.token   # token for /loadb/* (health excepted), also valid as a client token; default: algod.admin.token in local.data_dir
 # admin_token: s3cret-admin             # the same, inline; wins over admin_token_file. No admin token: /loadb/* is closed (open only with no tokens at all)
