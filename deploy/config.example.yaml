@@ -1,0 +1,91 @@
+# algod-loadb-mesh v2 agent configuration. One file per algod on the host.
+#
+# Every option is listed. Commented `key: value` lines are optional settings,
+# shown with their default or an example value. Durations use Go syntax
+# (1500ms, 10s, 5m, 1h).
+
+# role: node                          # node (next to an algod) | balancer (no algod: routes to the fleet, see `config example -balancer`); default node
+mode: fallback                        # fallback (local node first) | loadbalancer (best-scoring node); default fallback, loadbalancer for a balancer
+listen: 0.0.0.0:4000                  # clients connect here; default 127.0.0.1:4000
+client_token_file: /etc/algod-loadb-mesh/client.token   # X-Algo-API-Token clients must send
+# client_token: s3cret                  # the same, inline; wins over client_token_file. No token at all: no auth
+# admin_token_file: /var/lib/algorand/algod.admin.token   # token for /loadb/* (health excepted), also valid as a client token; default: algod.admin.token in local.data_dir
+# admin_token: s3cret-admin             # the same, inline; wins over admin_token_file. No admin token: /loadb/* is closed (open only with no tokens at all)
+
+log:
+  level: info                         # debug | info | warn | error; default info
+  json: false                         # JSON lines instead of text; default false
+
+local:
+  id: k44                             # stable node name, at most 48 bytes; default: hostname
+  data_dir: /var/lib/algorand         # required: algod.net, algod.token, genesis.json, config.json
+  # network: mainnet-v1.0               # role balancer only, and required there: genesis id of the fleet it serves
+  advertise_endpoints:                # how *other agents* reach this algod (WireGuard IPs); required with auto_register; http:// is assumed without a scheme
+    - http://10.112.0.44:8080
+  tier: 1                             # lower is preferred; default 0
+  tags: [dc-a]                        # free-form labels published in this node's record
+  # wait_for_block_timeout: 20s         # timeout of the wait-for-block-after long-poll on the local node
+  # verify_interval: 1h                 # how often the archival window is re-measured
+  # overrides:                          # declare capabilities instead of detecting them from data_dir
+  #   archival: { kind: since, n: 25000000 }   # kind: full | trailing (last n rounds) | since (from round n) | none
+  #   developer_api: true
+  #   follow_mode: false
+
+registry:
+  type: algorand                      # algorand | static | file | memory; default: algorand with app_id, file with file, else static
+  app_id: 0                           # algorand: from `algod-loadb-mesh registry init`
+  sync_key_file: /etc/algod-loadb-mesh/sync.key   # algorand: file holding the sync key
+  # sync_key: "word1 word2 ... word25"  # the same, inline; wins over sync_key_file. 25-word mnemonic, or hex/base64 of a 32-byte seed or 64-byte key
+  # sync_address: ABC...                # only if the sync account is rekeyed: the account; sync_key is its auth key
+  # algod_url: http://127.0.0.1:8080    # algod for registry reads and transactions; default: the local node (required for a balancer)
+  # algod_token: ""                     # its API token; default: the local node's token
+  refresh: 5m                         # how often the registry is re-read; default 5m
+  auto_register: true                 # write this node's record on start; default true (false for static)
+  cache: /var/lib/algod-loadb-mesh/registry.cache   # copy of the last read, used at start until the registry answers; default: none
+  # file: /var/lib/algod-loadb-mesh/registry.json   # type file: shared JSON file holding the records
+  # static:                             # type static: the fleet, listed on every host (see `config example -static`)
+  #   - id: k45
+  #     role: node                      # node | balancer; a balancer lists only id, role, network and agent
+  #     network: mainnet-v1.0           # genesis id
+  #     endpoints: [http://10.112.0.45:8080]
+  #     token: 0123456789abcdef...      # the node's algod.token
+  #     agent:
+  #       addr: 10.112.0.45:4001        # its mesh.advertise
+  #       pubkey: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # ed25519 heartbeat key as 32 byte values; default: derived from mesh.shared_secret and id
+  #     tier: 1
+  #     tags: [dc-b]
+  #     declared: { archival: { kind: full } }   # same fields as local.overrides
+
+mesh:
+  listen: 0.0.0.0:4001                # UDP heartbeats in; default 0.0.0.0:4001
+  advertise: 10.112.0.44:4001         # what peers send heartbeats to; required with auto_register
+  # shared_secret: change-me            # key material for agent keys when there is no sync key (static registry)
+  suspect_after: 10s                  # no heartbeat for this long: probe the peer directly; default 10s
+  down_after: 30s                     # no heartbeat and no successful probe: offline; default 30s
+  probe_interval: 10s                 # direct /v2/status probes of a silent peer; default 10s
+  keepalive: 5s                       # heartbeat interval when nothing changed; default 5s
+  # peer_overrides:                     # local routing changes per peer id
+  #   bambi:
+  #     tier: 2
+
+tiers:
+  external:                           # static RPCs used as the last resort; default: none
+    - name: nodely                    # required
+      url: https://mainnet-api.4160.nodely.dev   # required
+      # token: ""                       # X-Algo-API-Token sent to it
+      tier: 100                       # default 100
+      capabilities: { archival: { kind: full } }   # same fields as local.overrides; nothing is detected for externals
+      health_check: 60s               # default 1m
+
+routing:
+  sync_tolerance: 0                   # rounds a node may trail the best and still serve; default 0
+  lag_grace: 1500ms                   # one round behind counts as lagging only after this long; default 1500ms
+  return_hysteresis_rounds: 3         # synced rounds a lagging node needs before it serves again; default 3
+  multi_broadcast: false              # POST /v2/transactions to every eligible node instead of one; default false
+  retry_budget: 1                     # extra upstreams tried for a failed idempotent request; default 1
+  upstream_timeout: 60s               # per upstream request; default 60s
+  pending_ttl: 10s                    # pending-txn lookups stick to the node that accepted the txn for ttl..2*ttl; default 10s
+  drain_timeout: 10s                  # grace for in-flight requests on shutdown; default 10s
+  breaker:
+    threshold: 5                      # consecutive failures that open an upstream's breaker; default 5
+    open_for: 10s                     # how long an open breaker refuses requests; default 10s

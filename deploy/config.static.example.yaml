@@ -1,0 +1,26 @@
+# Static peers instead of the on-chain registry: every host lists the fleet.
+# Agent keys derive from mesh.shared_secret, which must match on all hosts.
+mode: fallback
+listen: 0.0.0.0:4000
+client_token_file: /etc/algod-loadb-mesh/client.token
+local:
+  id: k44
+  data_dir: /var/lib/algorand
+mesh:
+  listen: 0.0.0.0:4001
+  shared_secret: change-me-on-every-host-identically
+registry:
+  type: static
+  static:
+    - id: k45
+      network: mainnet-v1.0
+      endpoints: [http://10.112.0.45:8080]
+      token: 0123456789abcdef...
+      agent: { addr: 10.112.0.45:4001 }
+      tier: 1
+    - id: bambi
+      network: mainnet-v1.0
+      endpoints: [http://10.112.0.50:8080]
+      token: 0123456789abcdef...
+      agent: { addr: 10.112.0.50:4001 }
+      tier: 2

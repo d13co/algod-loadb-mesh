@@ -1,0 +1,22 @@
+[Unit]
+Description=algod-loadb-mesh mesh agent
+After=network-online.target algorand.service
+Wants=network-online.target
+
+[Service]
+User=algorand
+Group=algorand
+ExecStart=/usr/local/bin/algod-loadb-mesh run -config /etc/algod-loadb-mesh/config.yaml
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/algod-loadb-mesh
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

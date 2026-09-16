@@ -1,0 +1,31 @@
+{
+  "name": "algod-loadb-mesh-registry-contract",
+  "version": "1.0.0",
+  "description": "algod-loadb-mesh registry application (docs/REGISTRY_CONTRACT.md)",
+  "main": "smart_contracts/index.ts",
+  "scripts": {
+    "build": "algokit compile ts smart_contracts --out-dir artifacts --output-bytecode --output-source-map --no-output-arc32 --target-avm-version 10 && algokit generate client smart_contracts/artifacts --output {app_spec_dir}/{contract_name}Client.ts",
+    "test": "vitest run",
+    "deploy": "ts-node --transpile-only -r dotenv/config smart_contracts/index.ts",
+    "deploy:ci": "ts-node --transpile-only -r dotenv/config smart_contracts/index.ts",
+    "check-types": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.0",
+    "npm": ">=9.0"
+  },
+  "dependencies": {
+    "@algorandfoundation/algorand-typescript": "^1.3.1"
+  },
+  "devDependencies": {
+    "@algorandfoundation/algokit-utils": "^9.2.2",
+    "@algorandfoundation/puya-ts": "^1.3.1",
+    "@tsconfig/node22": "^22.0.0",
+    "algosdk": "^3.7.0",
+    "dotenv": "^16.4.7",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
+  },
+  "private": true
+}

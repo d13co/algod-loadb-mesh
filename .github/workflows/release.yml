@@ -1,0 +1,45 @@
+name: release
+
+# Version tags (v1.2.3) publish a release with the linux/amd64 binary that
+# install.sh downloads, and move the stable branch to the tagged commit, so
+# that the scripts install.sh fetches from stable match the released binary.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.repository == 'd13co/algod-loadb-mesh'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the build stamps the version from git describe
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make lint
+      - run: make test
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          make build
+          mkdir -p dist
+          cp bin/algod-loadb-mesh dist/algod-loadb-mesh-linux-amd64
+          cd dist && sha256sum algod-loadb-mesh-linux-amd64 > checksums.txt
+      - name: Check the version is stamped
+        run: |
+          v=$(./bin/algod-loadb-mesh version | awk '{print $2}')
+          [ "$v" = "${GITHUB_REF_NAME}" ] || { echo "binary says $v, tag is $GITHUB_REF_NAME"; exit 1; }
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/algod-loadb-mesh-linux-amd64 dist/checksums.txt
+      - name: Move stable to the tagged commit
+        run: git push origin "HEAD:refs/heads/stable" # fast-forward only; fails if stable moved ahead
