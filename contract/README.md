@@ -1,8 +1,9 @@
 # algod-loadb-mesh registry contract
 
-AlgoKit project for the registry application described in
-[`docs/REGISTRY_CONTRACT.md`](../docs/REGISTRY_CONTRACT.md). The contract is
-written in Algorand TypeScript and compiled with puya-ts to TEAL (AVM 10).
+AlgoKit project for the registry application: the fleet's node records, in
+boxes, sealed with keys derived from the sync key (see
+`internal/adapters/registryalgo`). The contract is written in Algorand
+TypeScript and compiled with puya-ts to TEAL (AVM 10).
 
 ```
 smart_contracts/registry/

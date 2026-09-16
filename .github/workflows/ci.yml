@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main, stable]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Only this repository: forks do not run the fleet's CI.
+    if: github.repository == 'd13co/algod-loadb-mesh'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make lint
+      - run: make build
+      - run: make test
+      - run: make race
+      # The scripts install.sh ships: a syntax error there breaks every host.
+      - run: bash -n install.sh deploy/autoconfig.sh deploy/setup.sh

@@ -33,10 +33,12 @@ const usage = `algod-loadb-mesh - mesh load balancer for algod
 usage:
   algod-loadb-mesh run        -config FILE          run the agent
   algod-loadb-mesh config     example [-static] [-o FILE] [-force]  print an example config
+  algod-loadb-mesh config     check -config FILE     load a config and report what it resolves to
   algod-loadb-mesh check-node -data-dir DIR [-probe] report the local node's capabilities
   algod-loadb-mesh registry   gen-key               create a sync account (mnemonic + address)
   algod-loadb-mesh registry   init  -config FILE    deploy the registry app with the sync account
   algod-loadb-mesh registry   list  -config FILE [-show-tokens]
+  algod-loadb-mesh registry   bundle -config FILE   print app id + sync key as one base64 string for deploy/autoconfig.sh
   algod-loadb-mesh registry   add   -config FILE -id ID -network NET -endpoint URL -token T -agent ADDR [-tier N]
   algod-loadb-mesh registry   rm    -config FILE -id ID
   algod-loadb-mesh dev        [-nodes N] [-mode M]  run a fake fleet in-process
@@ -100,8 +102,11 @@ func runCmd(args []string) error {
 }
 
 func configCmd(args []string) error {
+	if len(args) > 0 && args[0] == "check" {
+		return configCheckCmd(args[1:])
+	}
 	if len(args) == 0 || args[0] != "example" {
-		return fmt.Errorf("config: subcommand required (example)")
+		return fmt.Errorf("config: subcommand required (example, check)")
 	}
 	fs := flag.NewFlagSet("config example", flag.ExitOnError)
 	static := fs.Bool("static", false, "static peer list instead of the on-chain registry")
@@ -137,6 +142,37 @@ func configCmd(args []string) error {
 	}
 	fmt.Fprintln(os.Stderr, "wrote", *out)
 	return nil
+}
+
+// configCheckCmd reports what a config resolves to, so that a bad one is
+// caught at install time instead of in the service log.
+func configCheckCmd(args []string) error {
+	fs := flag.NewFlagSet("config check", flag.ExitOnError)
+	path := fs.String("config", "/etc/algod-loadb-mesh/config.yaml", "config file")
+	_ = fs.Parse(args)
+	c, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	reg := c.Registry.Type
+	if reg == "algorand" {
+		reg = fmt.Sprintf("%s app %d", reg, c.Registry.AppID)
+	}
+	tokens := "no tokens: open to anyone"
+	if c.ClientToken != "" || c.AdminToken != "" {
+		tokens = fmt.Sprintf("client token %s, admin token %s", have(c.ClientToken), have(c.AdminToken))
+	}
+	fmt.Printf("%s: ok\nid %s, mode %s, data dir %s\nlisten %s, gossip %s, advertising %s\nregistry %s, %s\n",
+		*path, c.Local.ID, c.Mode, c.Local.DataDir, c.Listen, c.Mesh.Listen,
+		strings.Join(c.Local.AdvertiseEndpoints, ", "), reg, tokens)
+	return nil
+}
+
+func have(tok string) string {
+	if tok == "" {
+		return "none"
+	}
+	return "set"
 }
 
 func checkNodeCmd(args []string) error {
@@ -186,7 +222,7 @@ func checkNodeCmd(args []string) error {
 
 func registryCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("registry: subcommand required (gen-key, init, list, add, rm)")
+		return fmt.Errorf("registry: subcommand required (gen-key, init, list, bundle, add, rm)")
 	}
 	sub, rest := args[0], args[1:]
 	if sub == "gen-key" {
@@ -219,6 +255,14 @@ func registryCmd(args []string) error {
 	}
 	if seed == nil {
 		return fmt.Errorf("registry.sync_key is required")
+	}
+	if sub == "bundle" {
+		b, err := cfg.Bundle()
+		if err != nil {
+			return err
+		}
+		fmt.Println(b)
+		return nil
 	}
 	url, tok := cfg.Registry.AlgodURL, cfg.Registry.AlgodToken
 	if url == "" {

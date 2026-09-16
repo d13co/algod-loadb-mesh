@@ -1,10 +1,16 @@
 package deploy
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/algorand/go-algorand-sdk/v2/types"
 
 	"github.com/d13co/algod-loadb-mesh/internal/config"
 )
@@ -69,4 +75,76 @@ func yamlKeys(t reflect.Type) []string {
 		keys = append(keys, yamlKeys(f.Type)...)
 	}
 	return keys
+}
+
+// autoconfig.sh output loads, with everything it would detect passed in.
+func TestAutoconfigLoads(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sync.key"), []byte("00000000000000000000000000000000000000000000000000000000000000ff"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := autoconfig(t, dir, "", "--app-id", "7", "--sync-key-file", filepath.Join(dir, "sync.key"))
+	if c.Local.ID != "k44" || c.Local.AdvertiseEndpoints[0] != "http://10.112.0.44:8080" || c.Mesh.Advertise != "10.112.0.44:4001" || c.Registry.AppID != 7 {
+		t.Errorf("unexpected config: %+v", c)
+	}
+}
+
+// The registry bundle's app id, sync address and key survive the script's
+// decoding, whether passed as an argument or on stdin.
+func TestAutoconfigBundle(t *testing.T) {
+	seed := bytes.Repeat([]byte{0, 9}, 16) // leading zero bytes and a 0x09 (tab) survive
+	for _, tc := range []struct{ name, syncAddress string }{
+		{"default sender", ""},
+		{"rekeyed", types.Address{0, 1, 2, 3, 250}.String()},
+	} {
+		want := config.Bundle{AppID: 3141592653, SyncAddress: tc.syncAddress, Seed: seed}
+		for _, stdin := range []bool{false, true} {
+			arg, in := want.String(), ""
+			if stdin {
+				arg, in = "-", want.String()+"\n"
+			}
+			c := autoconfig(t, t.TempDir(), in, arg)
+			got, err := c.SyncSeed()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Registry.AppID != want.AppID || c.Registry.SyncAddress != want.SyncAddress || !bytes.Equal(got, seed) {
+				t.Errorf("%s (stdin %v): app %d, address %q, seed %x", tc.name, stdin, c.Registry.AppID, c.Registry.SyncAddress, got)
+			}
+		}
+	}
+}
+
+// autoconfig runs autoconfig.sh for a fake data dir under dir and loads the
+// config it writes.
+func autoconfig(t *testing.T, dir, stdin string, args ...string) config.Config {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	dataDir := filepath.Join(dir, "data")
+	if err := os.Mkdir(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"data/genesis.json": "{}",
+		"data/algod.net":    "0.0.0.0:8080",
+		"client.token":      "t",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.Join(dir, "config.yaml")
+	cmd := exec.Command("bash", append([]string{"autoconfig.sh", "-o", out, "--id", "k44", "--data-dir", dataDir,
+		"--address", "10.112.0.44", "--client-token-file", filepath.Join(dir, "client.token")}, args...)...)
+	cmd.Stdin = strings.NewReader(stdin)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("autoconfig.sh: %v\n%s", err, b)
+	}
+	c, err := config.Load(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

@@ -2,10 +2,9 @@
 
 Load balancer for [algod](https://github.com/algorand/go-algorand) REST endpoints.
 
-This is v2, a mesh agent that runs on every algod host. Design and
-rationale: [docs/V2_PLAN.md](docs/V2_PLAN.md). The original single-hub
-TypeScript proxy (v1) lives in the `algod-loadb` repository until the fleet
-has migrated.
+This is v2, a mesh agent that runs on every algod host. The original
+single-hub TypeScript proxy (v1) lives in the `algod-loadb` repository until
+the fleet has migrated.
 
 ## v2 in short
 
@@ -33,6 +32,35 @@ Each host runs one agent next to its algod. The agent:
     make race
     make dev            # 3 fake nodes + 3 agents in one process
 
+## Install
+
+On a linux/amd64 host, this fetches the release binary and the deploy scripts
+into `/usr/local/bin` as `algod-loadb-mesh`, `algod-loadb-mesh-autoconfig` and
+`algod-loadb-mesh-setup`, and configures nothing:
+
+    curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | sudo bash
+
+Setup is a second, privileged step: it writes the config, installs the systemd
+unit and starts the service. On a host that already runs the mesh, print the
+registry bundle (app id, sync key, and the sync address when it is rekeyed) and
+paste it into the setup on the new host:
+
+    algod-loadb-mesh registry bundle -config /etc/algod-loadb-mesh/config.yaml
+
+    sudo algod-loadb-mesh-setup -       # paste the bundle, then Ctrl-D
+
+Releases come from version tags: pushing `v1.2.3` builds the linux/amd64
+binary, publishes it with `checksums.txt`
+([.github/workflows/release.yml](.github/workflows/release.yml)) and
+fast-forwards `stable` to that commit, so the scripts install.sh fetches from
+`stable` match the binary it downloads. `--version v1.2.3` installs an older
+release.
+
+`algod-loadb-mesh-setup -h` lists the rest: `--config FILE` to install a config
+you already have, `--no-start`, `--user`, and anything autoconfig takes.
+Add `--setup` to the install command to do both at once
+([install.sh](install.sh), [deploy/setup.sh](deploy/setup.sh)).
+
 ## Run on a node
 
 1. Create the sync account once per fleet and fund it with a few ALGO:
@@ -44,6 +72,13 @@ Each host runs one agent next to its algod. The agent:
    peer list):
 
        algod-loadb-mesh config example -o /etc/algod-loadb-mesh/config.yaml
+
+   Or let [deploy/autoconfig.sh](deploy/autoconfig.sh) fill those in from the
+   host: id from the hostname (minus `.local`), the algod data dir (it asks
+   when there are several) and the address from a 10.112.* interface, then
+   10.114.*, then a public one (`-h` for overrides):
+
+       algod-loadb-mesh-autoconfig --app-id 1234 -o /etc/algod-loadb-mesh/config.yaml
 
    Then deploy the registry application (the local node submits the
    transaction):
@@ -58,6 +93,7 @@ Each host runs one agent next to its algod. The agent:
 
 Useful commands:
 
+    algod-loadb-mesh config check -config ...                         # what a config resolves to
     algod-loadb-mesh check-node -data-dir /var/lib/algorand -probe   # what the agent will advertise
     algod-loadb-mesh registry list -config ...                        # decrypted fleet view
     algod-loadb-mesh registry rm -config ... -id old-node             # retire a node
