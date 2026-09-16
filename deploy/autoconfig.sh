@@ -33,12 +33,16 @@ usage: $0 [options] [BUNDLE]
   --tier N              routing tier, lower is preferred (default: 1)
   --listen HOST:PORT    client listener (default: 0.0.0.0:4000)
   --mesh-port PORT      UDP heartbeat port (default: 4001)
+  --nodely              add Nodely's public API for the node's network as the
+                        last-resort external tier (asked on a terminal when
+                        neither --nodely nor --no-nodely is given)
+  --no-nodely           do not
 EOF
 }
 
 out="" force=0 id="" data_dir="" address="" app_id="" sync_address="" tier=1
 sync_key_file="" sync_key="" bundle="" client_token_file=""
-listen=0.0.0.0:4000 mesh_port=4001
+listen=0.0.0.0:4000 mesh_port=4001 nodely=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -54,6 +58,8 @@ while [ $# -gt 0 ]; do
 	--tier) tier=$2; shift ;;
 	--listen) listen=$2; shift ;;
 	--mesh-port) mesh_port=$2; shift ;;
+	--nodely) nodely=1 ;;
+	--no-nodely) nodely=0 ;;
 	-h | --help) usage; exit 0 ;;
 	-?*) usage >&2; exit 2 ;;
 	*) [ -z "$bundle" ] || { usage >&2; exit 2; }; bundle=$1 ;;
@@ -227,6 +233,24 @@ esac
 
 client_token_file=${client_token_file:-$data_dir/algod.token}
 
+# --- nodely fallback --------------------------------------------------------
+
+# Network from genesis.json ("mainnet", "testnet", "betanet", ...).
+network=$(sed -n 's/.*"network"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$data_dir/genesis.json" | head -n1)
+nodely_url=""
+case "$network" in
+mainnet | testnet | betanet) nodely_url=https://$network-api.4160.nodely.dev ;;
+esac
+if [ -z "$nodely" ] && [ -n "$nodely_url" ] && { : </dev/tty; } 2>/dev/null; then
+	printf 'Use Nodely (%s) as the last-resort fallback? [Y/n] ' "$nodely_url" >/dev/tty
+	read -r yn </dev/tty || yn=""
+	case "$yn" in [nN]*) nodely=0 ;; *) nodely=1 ;; esac
+fi
+if [ "$nodely" = 1 ] && [ -z "$nodely_url" ]; then
+	warn "no Nodely API for network \"${network:-unknown}\"; skipping --nodely"
+	nodely=0
+fi
+
 # --- checks -----------------------------------------------------------------
 
 [ -z "$sync_key_file" ] || [ -e "$sync_key_file" ] || warn "$sync_key_file does not exist yet (algod-loadb-mesh registry gen-key)"
@@ -268,6 +292,15 @@ EOF
 mesh:
   listen: $(hostport "$([[ "$address" == *:* ]] && echo :: || echo 0.0.0.0)" "$mesh_port")
   advertise: $(hostport "$address" "$mesh_port")
+EOF
+	[ "$nodely" = 1 ] || return 0
+	cat <<EOF
+
+tiers:
+  external:
+    - name: nodely
+      url: $nodely_url
+      capabilities: { archival: { kind: full } }
 EOF
 }
 
