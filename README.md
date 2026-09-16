@@ -21,9 +21,12 @@ Each host runs one agent next to its algod. The agent:
   in `fallback` mode, or the best-scoring node in `loadbalancer` mode, with
   tiers and static external RPCs (e.g. Nodely) as the last resort;
 - keeps v1's client-facing behaviour: `X-Algo-API-Token` auth,
-  wait-for-block coalescing, capability-aware routing, sequential pending
-  lookups, optional multi-broadcast, drain on shutdown, and the upstream
-  response header (now `X-Algod-Loadb-Mesh-Upstream`).
+  wait-for-block coalescing, capability-aware routing, optional
+  multi-broadcast, drain on shutdown, and the upstream response header (now
+  `X-Algod-Loadb-Mesh-Upstream`);
+- answers pending-transaction lookups from the node that accepted the txn,
+  otherwise asks every node at once and returns the most informative answer
+  (confirmed, then pool error, then still pending, then 404).
 
 ## Build and test
 

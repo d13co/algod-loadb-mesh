@@ -313,7 +313,7 @@ func (c *Config) Finish() error {
 		c.Local.WaitTimeout = 20 * time.Second
 	}
 	if c.Routing.PendingTTL == 0 {
-		c.Routing.PendingTTL = time.Minute
+		c.Routing.PendingTTL = 10 * time.Second
 	}
 	if c.Routing.DrainTimeout == 0 {
 		c.Routing.DrainTimeout = 10 * time.Second

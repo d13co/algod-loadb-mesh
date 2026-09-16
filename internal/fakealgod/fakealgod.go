@@ -31,6 +31,13 @@ type Options struct {
 	Version      string
 }
 
+// poolTxn is what a pending lookup reports for one txid.
+type poolTxn struct {
+	txn       json.RawMessage
+	poolError string
+	confirmed uint64
+}
+
 // Node is one fake algod behind an httptest server.
 type Node struct {
 	opts Options
@@ -43,7 +50,7 @@ type Node struct {
 	failing bool
 	latency time.Duration
 	boxes   map[uint64]map[string][]byte
-	pool    map[string]json.RawMessage
+	pool    map[string]poolTxn
 	hits    map[string]int
 }
 
@@ -59,7 +66,7 @@ func New(o Options) *Node {
 		o.Version = "3.99.0"
 	}
 	n := &Node{opts: o, round: o.StartRound, oldest: o.OldestRound, changed: make(chan struct{}),
-		boxes: map[uint64]map[string][]byte{}, pool: map[string]json.RawMessage{}, hits: map[string]int{}}
+		boxes: map[uint64]map[string][]byte{}, pool: map[string]poolTxn{}, hits: map[string]int{}}
 	n.srv = httptest.NewServer(http.HandlerFunc(n.handle))
 	return n
 }
@@ -127,6 +134,14 @@ func (n *Node) Hits(prefix string) int {
 		}
 	}
 	return total
+}
+
+// SetPendingTxn makes pending lookups of id answer with a pool error and/or
+// confirmed round, as if the node had seen the txn.
+func (n *Node) SetPendingTxn(id, poolError string, confirmed uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.pool[id] = poolTxn{txn: json.RawMessage(`{}`), poolError: poolError, confirmed: confirmed}
 }
 
 // PutBox stores a box value for an application.
@@ -217,18 +232,23 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		id := txID([]byte(buf.String()))
 		n.mu.Lock()
-		n.pool[id], _ = json.Marshal(map[string]any{"node": n.opts.ID, "size": buf.Len()})
+		raw, _ := json.Marshal(map[string]any{"node": n.opts.ID, "size": buf.Len()})
+		n.pool[id] = poolTxn{txn: raw}
 		n.mu.Unlock()
 		writeJSON(w, 200, map[string]string{"txId": id})
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
-		txn, ok := n.pool[seg(3)]
+		tx, ok := n.pool[seg(3)]
 		n.mu.Unlock()
 		if !ok {
 			writeJSON(w, 404, map[string]string{"message": "transaction not found"})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"pool-error": "", "txn": txn, "node": n.opts.ID})
+		body := map[string]any{"pool-error": tx.poolError, "txn": tx.txn, "node": n.opts.ID}
+		if tx.confirmed > 0 {
+			body["confirmed-round"] = tx.confirmed
+		}
+		writeJSON(w, 200, body)
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending":
 		n.mu.Lock()
 		total := len(n.pool)

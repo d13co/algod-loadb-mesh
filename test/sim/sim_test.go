@@ -306,12 +306,48 @@ func TestPendingLookupFollowsBroadcast(t *testing.T) {
 	if f.Nodes[1].Hits("/v2/transactions/pending/") != 0 {
 		t.Fatal("remembered node should be tried first, plain was asked")
 	}
-	// Other agent: sequential search finds it on arch; unknown id ends in 404.
+	// Other agent: asking every node finds it on arch; unknown id ends in 404.
 	if p := get(t, plain+"/v2/transactions/pending/"+tx.TxID); p.code != 200 || p.node != "arch" {
 		t.Fatalf("pending via other agent: %d %s %s", p.code, p.node, p.body)
 	}
 	if p := get(t, plain+"/v2/transactions/pending/NOPE"); p.code != 404 {
 		t.Fatalf("unknown pending: %d", p.code)
+	}
+}
+
+func TestPendingLookupPrefersPoolErrorAndConfirmation(t *testing.T) {
+	f := start(t, devfleet.Options{Nodes: threeNodes(), Mode: "fallback"})
+	arch, plain, devn := f.Nodes[0], f.Nodes[1], f.Nodes[2]
+	via := f.Servers[2].URL // devn's agent: its own node answers first in fallback mode
+
+	// Still pending on two nodes, dropped with an error on arch: the error wins.
+	devn.SetPendingTxn("DROPPED", "", 0)
+	plain.SetPendingTxn("DROPPED", "", 0)
+	arch.SetPendingTxn("DROPPED", "overspend", 0)
+	if p := get(t, via+"/v2/transactions/pending/DROPPED"); p.code != 200 || p.node != "arch" || !strings.Contains(string(p.body), "overspend") {
+		t.Fatalf("pool error: %d %s %s", p.code, p.node, p.body)
+	}
+	// The answering node is pinned: the next poll asks arch alone.
+	before := plain.Hits("/v2/transactions/pending/DROPPED")
+	if p := get(t, via+"/v2/transactions/pending/DROPPED"); p.code != 200 || p.node != "arch" {
+		t.Fatalf("pinned poll: %d %s", p.code, p.node)
+	}
+	if plain.Hits("/v2/transactions/pending/DROPPED") != before {
+		t.Fatal("pinned poll should not fan out")
+	}
+
+	// A confirmation beats a pool error elsewhere.
+	devn.SetPendingTxn("DONE", "", 0)
+	arch.SetPendingTxn("DONE", "txn dead", 0)
+	plain.SetPendingTxn("DONE", "", 5001)
+	if p := get(t, via+"/v2/transactions/pending/DONE"); p.code != 200 || p.node != "plain" || !strings.Contains(string(p.body), `"confirmed-round":5001`) {
+		t.Fatalf("confirmed: %d %s %s", p.code, p.node, p.body)
+	}
+
+	// Found on one node only, 404 elsewhere.
+	plain.SetPendingTxn("ONLY", "", 0)
+	if p := get(t, via+"/v2/transactions/pending/ONLY"); p.code != 200 || p.node != "plain" {
+		t.Fatalf("only on plain: %d %s %s", p.code, p.node, p.body)
 	}
 }
 

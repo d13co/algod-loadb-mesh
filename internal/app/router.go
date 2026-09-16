@@ -46,7 +46,7 @@ func (o *RouterOptions) defaults() {
 		o.WaitTimeout = 20 * time.Second
 	}
 	if o.PendingTTL == 0 {
-		o.PendingTTL = time.Minute
+		o.PendingTTL = 10 * time.Second
 	}
 }
 
@@ -69,8 +69,7 @@ type Router struct {
 	draining atomic.Bool
 	started  time.Time
 
-	mu      sync.Mutex
-	pending map[string]pendingEntry
+	pins *txnPins
 
 	// A balancer's coalesced wait-for-block-after: the latest status body
 	// and the fetch in flight, shared by every waiter.
@@ -89,11 +88,6 @@ type statusFetch struct {
 	err      error
 }
 
-type pendingEntry struct {
-	upstream string
-	at       time.Time
-}
-
 // NewRouter wires the router.
 func NewRouter(o RouterOptions, dir *Directory, monitor *Monitor, fwd ports.Forwarder, httpc *http.Client,
 	stats *StatsBook, clock ports.Clock, log ports.Logger, metric ports.Metrics, rnd domain.Rand, metricsText io.WriterTo) *Router {
@@ -102,7 +96,7 @@ func NewRouter(o RouterOptions, dir *Directory, monitor *Monitor, fwd ports.Forw
 		httpc = &http.Client{Timeout: o.UpstreamTimeout}
 	}
 	return &Router{opts: o, dir: dir, monitor: monitor, fwd: fwd, httpc: httpc, stats: stats, clock: clock,
-		log: log, metric: metric, rnd: rnd, metrics: metricsText, pending: map[string]pendingEntry{}, started: clock.Now()}
+		log: log, metric: metric, rnd: rnd, metrics: metricsText, pins: newTxnPins(o.PendingTTL, clock.Now()), started: clock.Now()}
 }
 
 // Draining marks the agent as shutting down; new requests are still served
@@ -457,28 +451,11 @@ func (r *Router) getStatus(u domain.Upstream, class domain.RequestClass) (uint64
 }
 
 func (r *Router) rememberTxn(txid, upstream string) {
-	if txid == "" {
-		return
-	}
-	now := r.clock.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for id, e := range r.pending {
-		if now.Sub(e.at) > r.opts.PendingTTL {
-			delete(r.pending, id)
-		}
-	}
-	r.pending[txid] = pendingEntry{upstream: upstream, at: now}
+	r.pins.remember(txid, upstream, r.clock.Now())
 }
 
 func (r *Router) recallTxn(txid string) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, ok := r.pending[txid]
-	if !ok || r.clock.Now().Sub(e.at) > r.opts.PendingTTL {
-		return "", false
-	}
-	return e.upstream, true
+	return r.pins.recall(txid, r.clock.Now())
 }
 
 // handleBroadcast sends POST /v2/transactions to one eligible non-follower
@@ -508,49 +485,17 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 		return
 	}
 	targets := dedupeByURL(append([]domain.Upstream{sel.Chosen}, sel.Alternates...))
-	type result struct {
-		u    domain.Upstream
-		resp *http.Response
-		body []byte
-		err  error
-	}
 	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
 	defer cancel()
-	results := make(chan result, len(targets))
-	for _, u := range targets {
-		go func(u domain.Upstream) {
-			start := r.clock.Now()
-			rq, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(u.BaseURL, "/")+req.URL.RequestURI(), bytes.NewReader(body))
-			rq.Header.Set("X-Algo-API-Token", u.Token)
-			rq.Header.Set("Content-Type", req.Header.Get("Content-Type"))
-			release := r.stats.Begin(u.ID)
-			resp, err := r.httpc.Do(rq)
-			release()
-			res := result{u: u, resp: resp, err: err}
-			if err == nil {
-				res.body, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-				resp.Body.Close()
-			}
-			out := ports.Outcome{Err: err, Duration: r.clock.Now().Sub(start)}
-			if resp != nil {
-				out.Status = resp.StatusCode
-			}
-			r.stats.Record(u.ID, class.StatKey(), out)
-			results <- res
-		}(u)
-	}
-	var fallback *result
+	results := r.fanOut(ctx, req, body, targets, class)
+	var fallback *fanResult
 	for range targets {
 		res := <-results
 		if res.err == nil && res.resp.StatusCode == 200 {
 			r.metric.Inc("loadb_multibroadcast", "outcome", "ok")
 			r.rememberTxn(txIDFrom(res.body), res.u.ID)
-			w.Header().Set("X-Algod-Loadb-Mesh-Upstream", res.u.ID)
-			w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(res.u.Tier))
-			w.Header().Set("Content-Type", res.resp.Header.Get("Content-Type"))
-			w.WriteHeader(200)
-			_, _ = w.Write(res.body)
 			cancel() // other broadcasts are best effort
+			writeFan(w, res)
 			return
 		}
 		if fallback == nil || (res.err == nil && fallback.err != nil) {
@@ -563,10 +508,69 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 		writeMessage(w, 502, "algod-loadb-mesh: broadcast failed on every node: "+fallback.err.Error())
 		return
 	}
-	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", fallback.u.ID)
-	w.Header().Set("Content-Type", fallback.resp.Header.Get("Content-Type"))
-	w.WriteHeader(fallback.resp.StatusCode)
-	_, _ = w.Write(fallback.body)
+	writeFan(w, *fallback)
+}
+
+// maxFanBody bounds one buffered upstream answer; pending lookups of
+// confirmed txns carry logs and inner txns.
+const maxFanBody = 16 << 20
+
+// fanResult is one upstream's buffered answer to a fanned-out request.
+type fanResult struct {
+	u    domain.Upstream
+	resp *http.Response // body already read into body and closed
+	body []byte
+	err  error
+}
+
+// fanOut sends the request to every target at once, buffering each answer.
+// Results arrive in completion order; the channel holds all of them, so a
+// caller may stop reading early.
+func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, targets []domain.Upstream, class domain.RequestClass) <-chan fanResult {
+	results := make(chan fanResult, len(targets))
+	for _, u := range targets {
+		go func(u domain.Upstream) {
+			start := r.clock.Now()
+			rq, _ := http.NewRequestWithContext(ctx, req.Method, strings.TrimSuffix(u.BaseURL, "/")+req.URL.RequestURI(), bytes.NewReader(body))
+			rq.Header.Set("X-Algo-API-Token", u.Token)
+			if ct := req.Header.Get("Content-Type"); ct != "" {
+				rq.Header.Set("Content-Type", ct)
+			}
+			release := r.stats.Begin(u.ID)
+			resp, err := r.httpc.Do(rq)
+			res := fanResult{u: u, resp: resp, err: err}
+			if err == nil {
+				res.body, res.err = io.ReadAll(io.LimitReader(resp.Body, maxFanBody))
+				resp.Body.Close()
+			}
+			release()
+			out := ports.Outcome{Err: res.err, Duration: r.clock.Now().Sub(start)}
+			if resp != nil {
+				out.Status = resp.StatusCode
+			}
+			if ctx.Err() == nil { // not cancelled by us or the client: the outcome is about the upstream
+				r.stats.Record(u.ID, class.StatKey(), out)
+			}
+			r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
+			results <- res
+		}(u)
+	}
+	return results
+}
+
+// writeFan relays a buffered upstream answer with its end-to-end headers.
+func writeFan(w http.ResponseWriter, res fanResult) {
+	for k, vs := range res.resp.Header {
+		switch k {
+		case "Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "Trailer", "Upgrade":
+			continue
+		}
+		w.Header()[k] = vs
+	}
+	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", res.u.ID)
+	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(res.u.Tier))
+	w.WriteHeader(res.resp.StatusCode)
+	_, _ = w.Write(res.body)
 }
 
 func dedupeByURL(us []domain.Upstream) []domain.Upstream {
@@ -589,47 +593,6 @@ func txIDFrom(body []byte) string {
 		return ""
 	}
 	return v.TxID
-}
-
-// handlePending looks a pending transaction up on the node that received it
-// first, then on the others by round, treating 404 as "try the next one".
-func (r *Router) handlePending(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
-	if !ok {
-		r.noUpstream(w, class, cands, best)
-		return
-	}
-	order := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
-	// Highest round first, then the remembered node ahead of everything.
-	sortByRoundDesc(order)
-	if id, ok := r.recallTxn(class.PendingID); ok {
-		for i, u := range order {
-			if u.ID == id && i > 0 {
-				copy(order[1:i+1], order[:i])
-				order[0] = u
-				break
-			}
-		}
-	}
-	notFound := map[int]bool{404: true}
-	var last ports.Outcome
-	for i, u := range order {
-		retry := notFound
-		if i == len(order)-1 {
-			retry = nil // the final answer streams through, 404 included
-		}
-		last = r.forward(w, req, u, class, retry)
-		if last.HeadersSent || req.Context().Err() != nil {
-			return
-		}
-		if last.Status == 404 {
-			continue
-		}
-		if !last.Failed() {
-			return
-		}
-	}
-	r.answerFailure(w, req, last)
 }
 
 func sortByRoundDesc(us []domain.Upstream) {

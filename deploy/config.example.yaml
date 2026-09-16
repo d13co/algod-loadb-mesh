@@ -84,7 +84,7 @@ routing:
   multi_broadcast: false              # POST /v2/transactions to every eligible node instead of one; default false
   retry_budget: 1                     # extra upstreams tried for a failed idempotent request; default 1
   upstream_timeout: 60s               # per upstream request; default 60s
-  pending_ttl: 60s                    # how long pending-txn lookups stick to the node that accepted the txn; default 1m
+  pending_ttl: 10s                    # pending-txn lookups stick to the node that accepted the txn for ttl..2*ttl; default 10s
   drain_timeout: 10s                  # grace for in-flight requests on shutdown; default 10s
   breaker:
     threshold: 5                      # consecutive failures that open an upstream's breaker; default 5
