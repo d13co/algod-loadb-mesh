@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/algorand/go-algorand-sdk/v2/client/v2/algod"
+	"github.com/algorand/go-algorand-sdk/v2/client/v2/common/models"
 	"github.com/algorand/go-algorand-sdk/v2/crypto"
 	"github.com/algorand/go-algorand-sdk/v2/transaction"
 	"github.com/algorand/go-algorand-sdk/v2/types"
@@ -224,11 +225,11 @@ func (r *Registry) ensureFunded(ctx context.Context, nameLen, valueLen int) erro
 	return err
 }
 
-// Create deploys a new registry application and funds its account. It
-// returns the application id. compileViaAlgod uses /v2/teal/compile when the
-// node allows it, so the bytecode is the node's own assembly of ApprovalTEAL.
-func (r *Registry) Create(ctx context.Context) (uint64, error) {
-	approval, clear := ApprovalProgram, ClearProgram
+// programs returns the approval and clear programs to deploy: the local
+// algod's own compilation of the embedded TEAL when its developer API is on,
+// the embedded bytecode otherwise.
+func (r *Registry) programs(ctx context.Context) (approval, clear []byte) {
+	approval, clear = ApprovalProgram, ClearProgram
 	if resp, err := r.sdk.TealCompile([]byte(ApprovalTEAL)).Do(ctx); err == nil {
 		if b, err := base64.StdEncoding.DecodeString(resp.Result); err == nil && len(b) > 0 {
 			approval = b
@@ -244,6 +245,29 @@ func (r *Registry) Create(ctx context.Context) (uint64, error) {
 	} else if r.Log != nil {
 		r.Log.Info("registry: algod cannot compile TEAL (developer API off); using embedded bytecode")
 	}
+	return approval, clear
+}
+
+// send signs a transaction, submits it and waits for confirmation.
+func (r *Registry) send(ctx context.Context, what string, tx types.Transaction) (models.PendingTransactionInfoResponse, error) {
+	txid, stx, err := crypto.SignTransaction(r.sk, tx)
+	if err != nil {
+		return models.PendingTransactionInfoResponse{}, err
+	}
+	if _, err := r.sdk.SendRawTransaction(stx).Do(ctx); err != nil {
+		return models.PendingTransactionInfoResponse{}, fmt.Errorf("registry: %s: %w", what, err)
+	}
+	info, err := transaction.WaitForConfirmation(r.sdk, txid, 8, ctx)
+	if err != nil {
+		return info, fmt.Errorf("registry: %s: confirm %s: %w", what, txid, err)
+	}
+	return info, nil
+}
+
+// Create deploys a new registry application and funds its account. It
+// returns the application id.
+func (r *Registry) Create(ctx context.Context) (uint64, error) {
+	approval, clear := r.programs(ctx)
 	sp, err := r.sdk.SuggestedParams().Do(ctx)
 	if err != nil {
 		return 0, err
@@ -253,14 +277,7 @@ func (r *Registry) Create(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	txid, stx, err := crypto.SignTransaction(r.sk, tx)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := r.sdk.SendRawTransaction(stx).Do(ctx); err != nil {
-		return 0, fmt.Errorf("registry: create app: %w", err)
-	}
-	info, err := transaction.WaitForConfirmation(r.sdk, txid, 8, ctx)
+	info, err := r.send(ctx, "create app", tx)
 	if err != nil {
 		return 0, err
 	}
@@ -269,4 +286,96 @@ func (r *Registry) Create(ctx context.Context) (uint64, error) {
 		return r.AppID, err
 	}
 	return r.AppID, nil
+}
+
+// AppState describes a deployed registry application.
+type AppState struct {
+	ID      uint64
+	Creator string
+	// UpToDate is true when the on-chain approval program is the embedded one.
+	UpToDate bool
+	// Boxes counts all boxes; Foreign those that are not record boxes of the
+	// current format, which the current program cannot remove.
+	Boxes, Foreign int
+	// Balance and MinBalance of the application account, in microalgos.
+	Balance, MinBalance uint64
+}
+
+// Inspect reads the state of application appID.
+func (r *Registry) Inspect(ctx context.Context, appID uint64) (AppState, error) {
+	app, err := r.sdk.GetApplicationByID(appID).Do(ctx)
+	if err != nil {
+		return AppState{}, fmt.Errorf("registry: app %d: %w", appID, err)
+	}
+	st := AppState{ID: appID, Creator: app.Params.Creator, UpToDate: string(app.Params.ApprovalProgram) == string(ApprovalProgram)}
+	boxes, err := r.sdk.GetApplicationBoxes(appID).Do(ctx)
+	if err != nil {
+		return st, fmt.Errorf("registry: app %d boxes: %w", appID, err)
+	}
+	st.Boxes = len(boxes.Boxes)
+	for _, b := range boxes.Boxes {
+		if !domain.IsRecordBox(b.Name) {
+			st.Foreign++
+		}
+	}
+	acct, err := r.sdk.AccountInformation(crypto.GetApplicationAddress(appID).String()).Do(ctx)
+	if err != nil {
+		return st, fmt.Errorf("registry: app %d account: %w", appID, err)
+	}
+	st.Balance, st.MinBalance = acct.Amount, acct.MinBalance
+	return st, nil
+}
+
+// Update replaces the programs of application appID with the embedded ones,
+// keeping its id, account and boxes. It refuses when the app holds boxes the
+// new program could not remove (records of an earlier format): remove those
+// with the build that wrote them first.
+func (r *Registry) Update(ctx context.Context, appID uint64) error {
+	st, err := r.Inspect(ctx, appID)
+	if err != nil {
+		return err
+	}
+	if st.Creator != r.sender.String() {
+		return fmt.Errorf("registry: app %d was created by %s, not the sync account %s", appID, st.Creator, r.sender)
+	}
+	if st.Foreign > 0 {
+		return fmt.Errorf("registry: app %d holds %d boxes of another format, which the new program cannot remove; remove them first", appID, st.Foreign)
+	}
+	approval, clear := r.programs(ctx)
+	sp, err := r.sdk.SuggestedParams().Do(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := transaction.MakeApplicationUpdateTx(appID, nil, nil, nil, nil, approval, clear, sp, r.sender, nil, types.Digest{}, [32]byte{}, types.Address{})
+	if err != nil {
+		return err
+	}
+	_, err = r.send(ctx, fmt.Sprintf("update app %d", appID), tx)
+	return err
+}
+
+// DeleteApp deletes application appID. It refuses while the app holds boxes,
+// whose minimum balance would otherwise stay locked forever. Whatever the
+// application account holds is stranded: the program cannot pay it out.
+func (r *Registry) DeleteApp(ctx context.Context, appID uint64) error {
+	st, err := r.Inspect(ctx, appID)
+	if err != nil {
+		return err
+	}
+	if st.Creator != r.sender.String() {
+		return fmt.Errorf("registry: app %d was created by %s, not the sync account %s", appID, st.Creator, r.sender)
+	}
+	if st.Boxes > 0 {
+		return fmt.Errorf("registry: app %d still holds %d boxes; remove them before deleting it", appID, st.Boxes)
+	}
+	sp, err := r.sdk.SuggestedParams().Do(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := transaction.MakeApplicationDeleteTx(appID, nil, nil, nil, nil, sp, r.sender, nil, types.Digest{}, [32]byte{}, types.Address{})
+	if err != nil {
+		return err
+	}
+	_, err = r.send(ctx, fmt.Sprintf("delete app %d", appID), tx)
+	return err
 }

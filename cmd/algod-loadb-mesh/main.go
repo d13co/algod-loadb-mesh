@@ -41,6 +41,9 @@ usage:
   algod-loadb-mesh registry   bundle -config FILE   print app id + sync key as one base64 string for deploy/autoconfig.sh
   algod-loadb-mesh registry   add   -config FILE -id ID -network NET -endpoint URL -token T -agent ADDR [-tier N]
   algod-loadb-mesh registry   rm    -config FILE -id ID
+  algod-loadb-mesh registry   status -config FILE [-app-id N]   show an app's build, boxes and balance (default registry.app_id)
+  algod-loadb-mesh registry   update -config FILE [-app-id N]   replace an app's programs with this build (default registry.app_id)
+  algod-loadb-mesh registry   delete-app -config FILE -app-id N delete a registry app that holds no records
   algod-loadb-mesh dev        [-nodes N] [-mode M]  run a fake fleet in-process
   algod-loadb-mesh version
 `
@@ -222,7 +225,7 @@ func checkNodeCmd(args []string) error {
 
 func registryCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("registry: subcommand required (gen-key, init, list, bundle, add, rm)")
+		return fmt.Errorf("registry: subcommand required (gen-key, init, list, bundle, add, rm, status, update, delete-app)")
 	}
 	sub, rest := args[0], args[1:]
 	if sub == "gen-key" {
@@ -243,6 +246,7 @@ func registryCmd(args []string) error {
 	agentAddr := fs.String("agent", "", "agent gossip address host:port")
 	tier := fs.Int("tier", 1, "tier")
 	showTokens := fs.Bool("show-tokens", false, "print algod tokens")
+	appIDFlag := fs.Uint64("app-id", 0, "application id for status, update and delete-app")
 	_ = fs.Parse(rest)
 
 	cfg, err := config.Load(*path)
@@ -279,7 +283,7 @@ func registryCmd(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if sub != "list" {
+	if sub != "list" && sub != "status" {
 		if err := reg.CheckAuth(ctx); err != nil {
 			return err
 		}
@@ -323,6 +327,41 @@ func registryCmd(args []string) error {
 			return err
 		}
 		fmt.Println("added", *id)
+	case "status", "update":
+		appID := *appIDFlag
+		if appID == 0 {
+			appID = cfg.Registry.AppID
+		}
+		if appID == 0 {
+			return fmt.Errorf("-app-id or registry.app_id is required")
+		}
+		if sub == "update" {
+			if err := reg.Update(ctx, appID); err != nil {
+				return err
+			}
+			fmt.Printf("registry app %d updated\n", appID)
+		}
+		st, err := reg.Inspect(ctx, appID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("app %d: creator %s, current build %v, %d boxes (%d of another format), account %d/%d microalgos (balance/min)\n",
+			st.ID, st.Creator, st.UpToDate, st.Boxes, st.Foreign, st.Balance, st.MinBalance)
+	case "delete-app":
+		if *appIDFlag == 0 {
+			return fmt.Errorf("-app-id is required")
+		}
+		if *appIDFlag == cfg.Registry.AppID {
+			return fmt.Errorf("app %d is registry.app_id in %s; point the config elsewhere before deleting it", *appIDFlag, *path)
+		}
+		st, err := reg.Inspect(ctx, *appIDFlag)
+		if err != nil {
+			return err
+		}
+		if err := reg.DeleteApp(ctx, *appIDFlag); err != nil {
+			return err
+		}
+		fmt.Printf("registry app %d deleted; %d microalgos stay in its account\n", st.ID, st.Balance)
 	case "rm":
 		if *id == "" {
 			return fmt.Errorf("-id is required")
