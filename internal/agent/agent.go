@@ -64,8 +64,10 @@ func New(d Deps) (*Agent, error) {
 	stats := app.NewStatsBook(app.BreakerOptions{Threshold: c.Routing.Breaker.Threshold, OpenFor: c.Routing.Breaker.OpenFor,
 		Window: 50, Alpha: 0.2}, d.Clock)
 
+	balancer := c.Balancer()
 	monitor := app.NewMonitor(app.MonitorOptions{NodeID: c.Local.ID, WaitTimeout: c.Local.WaitTimeout,
-		VerifyInterval: c.Local.VerifyInterval, Overrides: c.Local.Overrides}, d.Algod, d.ConfigReader, d.Clock, d.Log, d.Metrics)
+		VerifyInterval: c.Local.VerifyInterval, Overrides: c.Local.Overrides, Absent: balancer, Network: c.Local.Network},
+		d.Algod, d.ConfigReader, d.Clock, d.Log, d.Metrics)
 
 	var externals []app.ExternalUpstream
 	for _, e := range c.Tiers.External {
@@ -76,18 +78,22 @@ func New(d Deps) (*Agent, error) {
 	for id, o := range c.Mesh.PeerOverrides {
 		overrides[id] = app.PeerOverride{Tier: o.Tier}
 	}
-	dir := app.NewDirectory(app.DirectoryOptions{LocalID: c.Local.ID, LocalTier: c.Local.Tier,
+	dir := app.NewDirectory(app.DirectoryOptions{LocalID: c.Local.ID, LocalTier: c.Local.Tier, NoLocal: balancer,
 		SuspectAfter: c.Mesh.SuspectAfter, DownAfter: c.Mesh.DownAfter, ProbeInterval: c.Mesh.ProbeInterval,
 		KeepAlive: c.Mesh.KeepAlive, SyncTolerance: c.Routing.SyncTolerance, LagGrace: c.Routing.LagGrace, ReturnHysteresis: c.Routing.ReturnHysteresisRounds,
 		PeerOverrides: overrides, Externals: externals}, monitor, d.Gossip, d.Clients, stats, d.Clock, d.Log, d.Metrics, d.AgentKey)
 
-	router := app.NewRouter(app.RouterOptions{Mode: mode, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
+	router := app.NewRouter(app.RouterOptions{Mode: mode, Balancer: balancer, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
 		UpstreamTimeout: c.Routing.UpstreamTimeout, WaitTimeout: c.Local.WaitTimeout, PendingTTL: c.Routing.PendingTTL,
 		RetryBudget: *c.Routing.RetryBudget, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
 		dir, monitor, d.Forwarder, d.HTTPClient, stats, d.Clock, d.Log, d.Metrics, d.Rand, d.MetricsText)
 
 	pub := d.AgentKey.Public().(ed25519.PublicKey)
 	localRecord := func() (domain.NodeRecord, bool) {
+		if balancer {
+			return domain.NodeRecord{ID: c.Local.ID, Role: domain.RoleBalancer, Network: c.Local.Network,
+				Agent: domain.AgentInfo{Addr: c.Mesh.Advertise, PubKey: []byte(pub)}, Tags: c.Local.Tags}, true
+		}
 		st := monitor.State()
 		if !st.ConfigOK || st.Caps.GenesisID == "" {
 			return domain.NodeRecord{}, false
@@ -127,7 +133,7 @@ func (a *Agent) Serve(ctx context.Context) error {
 	errc := make(chan error, 2)
 	go func() { errc <- a.Run(ctx) }()
 	go func() {
-		a.deps.Log.Info("listening", "addr", srv.Addr, "mode", a.deps.Config.Mode, "id", a.deps.Config.Local.ID)
+		a.deps.Log.Info("listening", "addr", srv.Addr, "role", a.deps.Config.Role, "mode", a.deps.Config.Mode, "id", a.deps.Config.Local.ID)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- fmt.Errorf("listen %s: %w", srv.Addr, err)
 		}

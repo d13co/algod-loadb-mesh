@@ -39,6 +39,7 @@ type NodeSpec struct {
 // Options configures the fleet.
 type Options struct {
 	Nodes            []NodeSpec
+	Balancers        []string // ids of agents with no node; they come after the nodes in Agents and Servers
 	GenesisID        string
 	Mode             string
 	ClientToken      string
@@ -98,13 +99,15 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Fleet{Hub: gossipmem.NewHub(), Registry: &registryfile.Registry{}, cancel: cancel}
 	material := []byte("devfleet-shared-secret-material-32b")
-	for i, spec := range o.Nodes {
+	specs := o.Nodes
+	for _, id := range o.Balancers {
+		specs = append(specs, NodeSpec{ID: id})
+	}
+	for i, spec := range specs {
 		if spec.ID == "" {
 			spec.ID = fmt.Sprintf("n%d", i+1)
 		}
-		node := fakealgod.New(fakealgod.Options{ID: spec.ID, GenesisID: o.GenesisID, StartRound: spec.StartRound,
-			OldestRound: spec.OldestRound, DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode})
-		f.Nodes = append(f.Nodes, node)
+		balancer := i >= len(o.Nodes)
 		key, err := agent.AgentKey(material, spec.ID)
 		if err != nil {
 			f.Close()
@@ -112,9 +115,18 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		}
 		cfg := config.Config{Mode: o.Mode, Listen: "127.0.0.1:0", ClientToken: o.ClientToken, AdminToken: o.AdminToken}
 		cfg.Local.ID = spec.ID
-		cfg.Local.DataDir = "/dev/null"
-		cfg.Local.AdvertiseEndpoints = []string{node.URL()}
-		cfg.Local.Tier = spec.Tier
+		var node *fakealgod.Node
+		if balancer {
+			cfg.Role = "balancer"
+			cfg.Local.Network = o.GenesisID
+		} else {
+			node = fakealgod.New(fakealgod.Options{ID: spec.ID, GenesisID: o.GenesisID, StartRound: spec.StartRound,
+				OldestRound: spec.OldestRound, DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode})
+			f.Nodes = append(f.Nodes, node)
+			cfg.Local.DataDir = "/dev/null"
+			cfg.Local.AdvertiseEndpoints = []string{node.URL()}
+			cfg.Local.Tier = spec.Tier
+		}
 		cfg.Local.WaitTimeout = o.Timing.WaitTimeout
 		cfg.Registry.Type = "memory"
 		cfg.Registry.Refresh = o.RegistryRefresh
@@ -133,11 +145,13 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		}
 		m := metrics.New()
 		factory := algodhttp.Factory{}
-		deps := agent.Deps{Config: cfg, Algod: factory.NewAlgodClient(node.URL(), node.Token()),
-			ConfigReader: fakealgod.ConfigReader{Node: node, Archival: spec.Archival, Lookback: spec.Lookback,
-				DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode},
-			Clients: factory, Gossip: f.Hub.Join("mem:" + spec.ID), Registry: f.Registry, Forwarder: proxy.New(nil),
+		deps := agent.Deps{Config: cfg, Clients: factory, Gossip: f.Hub.Join("mem:" + spec.ID), Registry: f.Registry, Forwarder: proxy.New(nil),
 			Clock: clock.Real{}, Log: o.Log, Metrics: m, MetricsText: m, AgentKey: key, HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+		if node != nil {
+			deps.Algod = factory.NewAlgodClient(node.URL(), node.Token())
+			deps.ConfigReader = fakealgod.ConfigReader{Node: node, Archival: spec.Archival, Lookback: spec.Lookback,
+				DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode}
+		}
 		a, err := agent.New(deps)
 		if err != nil {
 			f.Close()

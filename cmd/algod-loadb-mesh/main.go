@@ -32,7 +32,7 @@ const usage = `algod-loadb-mesh - mesh load balancer for algod
 
 usage:
   algod-loadb-mesh run        -config FILE          run the agent
-  algod-loadb-mesh config     example [-static] [-o FILE] [-force]  print an example config
+  algod-loadb-mesh config     example [-static|-balancer] [-o FILE] [-force]  print an example config
   algod-loadb-mesh config     check -config FILE     load a config and report what it resolves to
   algod-loadb-mesh check-node -data-dir DIR [-probe] report the local node's capabilities
   algod-loadb-mesh registry   gen-key               create a sync account (mnemonic + address)
@@ -40,11 +40,12 @@ usage:
   algod-loadb-mesh registry   list  -config FILE [-show-tokens]
   algod-loadb-mesh registry   bundle -config FILE   print app id + sync key as one base64 string for deploy/autoconfig.sh
   algod-loadb-mesh registry   add   -config FILE -id ID -network NET -endpoint URL -token T -agent ADDR [-tier N]
+  algod-loadb-mesh registry   add   -config FILE -role balancer -id ID -network NET -agent ADDR
   algod-loadb-mesh registry   rm    -config FILE -id ID
   algod-loadb-mesh registry   status -config FILE [-app-id N]   show an app's build, boxes and balance (default registry.app_id)
   algod-loadb-mesh registry   update -config FILE [-app-id N]   replace an app's programs with this build (default registry.app_id)
   algod-loadb-mesh registry   delete-app -config FILE -app-id N delete a registry app that holds no records
-  algod-loadb-mesh dev        [-nodes N] [-mode M]  run a fake fleet in-process
+  algod-loadb-mesh dev        [-nodes N] [-balancers N] [-mode M]  run a fake fleet in-process
   algod-loadb-mesh version
 `
 
@@ -113,12 +114,18 @@ func configCmd(args []string) error {
 	}
 	fs := flag.NewFlagSet("config example", flag.ExitOnError)
 	static := fs.Bool("static", false, "static peer list instead of the on-chain registry")
+	balancer := fs.Bool("balancer", false, "a balancer: an agent on a host without algod")
 	out := fs.String("o", "", "write to FILE instead of stdout")
 	force := fs.Bool("force", false, "overwrite FILE if it exists")
 	_ = fs.Parse(args[1:])
 	text := deploy.ConfigExample
-	if *static {
+	switch {
+	case *static && *balancer:
+		return fmt.Errorf("config example: -static and -balancer are separate examples")
+	case *static:
 		text = deploy.ConfigStaticExample
+	case *balancer:
+		text = deploy.ConfigBalancerExample
 	}
 	if *out == "" {
 		_, err := fmt.Print(text)
@@ -164,6 +171,11 @@ func configCheckCmd(args []string) error {
 	tokens := "no tokens: open to anyone"
 	if c.ClientToken != "" || c.AdminToken != "" {
 		tokens = fmt.Sprintf("client token %s, admin token %s", have(c.ClientToken), have(c.AdminToken))
+	}
+	if c.Balancer() {
+		fmt.Printf("%s: ok\nid %s, role balancer, mode %s, network %s\nlisten %s, gossip %s, heartbeats to %s\nregistry %s via %s, %s\n",
+			*path, c.Local.ID, c.Mode, c.Local.Network, c.Listen, c.Mesh.Listen, c.Mesh.Advertise, reg, c.Registry.AlgodURL, tokens)
+		return nil
 	}
 	fmt.Printf("%s: ok\nid %s, mode %s, data dir %s\nlisten %s, gossip %s, advertising %s\nregistry %s, %s\n",
 		*path, c.Local.ID, c.Mode, c.Local.DataDir, c.Listen, c.Mesh.Listen,
@@ -245,6 +257,7 @@ func registryCmd(args []string) error {
 	token := fs.String("token", "", "algod API token")
 	agentAddr := fs.String("agent", "", "agent gossip address host:port")
 	tier := fs.Int("tier", 1, "tier")
+	role := fs.String("role", "node", "node | balancer (a balancer needs only -id, -network and -agent)")
 	showTokens := fs.Bool("show-tokens", false, "print algod tokens")
 	appIDFlag := fs.Uint64("app-id", 0, "application id for status, update and delete-app")
 	_ = fs.Parse(rest)
@@ -313,7 +326,16 @@ func registryCmd(args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(map[string]any{"round": round, "records": recs})
 	case "add":
-		if *id == "" || *network == "" || *endpoint == "" {
+		r, err := domain.ParseRole(*role)
+		if err != nil {
+			return err
+		}
+		switch {
+		case r == domain.RoleBalancer && (*id == "" || *network == "" || *agentAddr == ""):
+			return fmt.Errorf("-id, -network and -agent are required for a balancer")
+		case r == domain.RoleBalancer && (*endpoint != "" || *token != ""):
+			return fmt.Errorf("a balancer has no algod: drop -endpoint and -token")
+		case r == domain.RoleNode && (*id == "" || *network == "" || *endpoint == ""):
 			return fmt.Errorf("-id, -network and -endpoint are required")
 		}
 		material, _ := cfg.KeyMaterial()
@@ -321,8 +343,13 @@ func registryCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		rec := domain.NodeRecord{ID: *id, Network: *network, Endpoints: strings.Split(*endpoint, ","), Token: *token,
+		rec := domain.NodeRecord{ID: *id, Network: *network, Token: *token,
 			Agent: domain.AgentInfo{Addr: *agentAddr, PubKey: []byte(key.Public().(ed25519.PublicKey))}, Tier: *tier, Version: 1}
+		if r == domain.RoleBalancer {
+			rec.Role, rec.Tier = domain.RoleBalancer, 0
+		} else {
+			rec.Endpoints = strings.Split(*endpoint, ",")
+		}
 		if err := reg.Put(ctx, rec); err != nil {
 			return err
 		}
@@ -386,6 +413,7 @@ func mask(s string) string {
 func devCmd(args []string) error {
 	fs := flag.NewFlagSet("dev", flag.ExitOnError)
 	n := fs.Int("nodes", 3, "number of fake nodes")
+	nb := fs.Int("balancers", 0, "number of balancer agents with no node")
 	mode := fs.String("mode", "fallback", "fallback | loadbalancer")
 	roundTime := fs.Duration("round-time", 2800*time.Millisecond, "fake block time")
 	_ = fs.Parse(args)
@@ -399,10 +427,14 @@ func devCmd(args []string) error {
 		}
 		specs = append(specs, spec)
 	}
+	var bals []string
+	for i := 0; i < *nb; i++ {
+		bals = append(bals, fmt.Sprintf("lb%d", i+1))
+	}
 	ctx, cancel := signalContext()
 	defer cancel()
 	cfg := config.Config{Log: config.Log{Level: "debug"}}
-	f, err := devfleet.Start(ctx, devfleet.Options{Nodes: specs, Mode: *mode, Log: agent.Logger(cfg),
+	f, err := devfleet.Start(ctx, devfleet.Options{Nodes: specs, Balancers: bals, Mode: *mode, Log: agent.Logger(cfg),
 		KeepAlive: 2 * time.Second, SuspectAfter: 10 * time.Second, ProbeInterval: 5 * time.Second, RegistryRefresh: 5 * time.Second,
 		ReturnHysteresis: 3})
 	if err != nil {
@@ -410,6 +442,10 @@ func devCmd(args []string) error {
 	}
 	defer f.Close()
 	for i, s := range f.Servers {
+		if i >= len(f.Nodes) {
+			fmt.Printf("agent %-6s %s   (balancer, no node)\n", bals[i-len(f.Nodes)], s.URL)
+			continue
+		}
 		fmt.Printf("agent %-6s %s   (fake algod %s, token %s)\n", f.Nodes[i].ID(), s.URL, f.Nodes[i].URL(), f.Nodes[i].Token())
 	}
 	fmt.Println("rounds advance every", *roundTime, "- try: curl", f.Servers[0].URL+"/loadb/status")

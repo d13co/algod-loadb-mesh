@@ -93,11 +93,35 @@ type AgentInfo struct {
 	PubKey []byte `json:"pubkey"` // ed25519 public key that signs heartbeats
 }
 
-// NodeRecord is the static description of a node. It lives encrypted in the
-// registry and changes rarely.
+// Role is what an agent in the registry is.
+type Role string
+
+const (
+	// RoleNode is an agent next to an algod; the empty string means the same,
+	// so records written before roles existed are nodes.
+	RoleNode Role = "node"
+	// RoleBalancer is an agent with no algod of its own. It serves clients
+	// from the fleet and receives heartbeats, but is never an upstream.
+	RoleBalancer Role = "balancer"
+)
+
+// ParseRole validates a role string; empty is RoleNode.
+func ParseRole(s string) (Role, error) {
+	switch Role(s) {
+	case "", RoleNode:
+		return RoleNode, nil
+	case RoleBalancer:
+		return RoleBalancer, nil
+	}
+	return "", fmt.Errorf("unknown role %q (want node or balancer)", s)
+}
+
+// NodeRecord is the static description of an agent and, for nodes, its
+// algod. It lives encrypted in the registry and changes rarely.
 type NodeRecord struct {
 	ID        string               `json:"id"`
-	Network   string               `json:"network"` // genesis id, e.g. mainnet-v1.0
+	Role      Role                 `json:"role,omitempty"` // empty: node
+	Network   string               `json:"network"`        // genesis id, e.g. mainnet-v1.0
 	Endpoints []string             `json:"endpoints"`
 	Token     string               `json:"token"`
 	Agent     AgentInfo            `json:"agent"`
@@ -120,8 +144,15 @@ func (r NodeRecord) Validate() error {
 	if r.Network == "" {
 		return fmt.Errorf("node record %q: empty network", r.ID)
 	}
-	if len(r.Endpoints) == 0 {
+	role, err := ParseRole(string(r.Role))
+	if err != nil {
+		return fmt.Errorf("node record %q: %w", r.ID, err)
+	}
+	switch {
+	case role == RoleNode && len(r.Endpoints) == 0:
 		return fmt.Errorf("node record %q: no endpoints", r.ID)
+	case role == RoleBalancer && r.Agent.Addr == "":
+		return fmt.Errorf("balancer record %q: no agent address to send heartbeats to", r.ID)
 	}
 	if r.Tier < 0 {
 		return fmt.Errorf("node record %q: negative tier", r.ID)
@@ -129,10 +160,13 @@ func (r NodeRecord) Validate() error {
 	return nil
 }
 
+// IsBalancer reports whether the record is a balancer, which has no algod.
+func (r NodeRecord) IsBalancer() bool { return r.Role == RoleBalancer }
+
 // StaticEqual reports whether two records describe the same static facts,
 // ignoring Version and UpdatedAt. Used to decide whether a write is needed.
 func (r NodeRecord) StaticEqual(o NodeRecord) bool {
-	if r.ID != o.ID || r.Network != o.Network || r.Token != o.Token || r.Tier != o.Tier {
+	if r.ID != o.ID || r.IsBalancer() != o.IsBalancer() || r.Network != o.Network || r.Token != o.Token || r.Tier != o.Tier {
 		return false
 	}
 	if r.Agent.Addr != o.Agent.Addr || string(r.Agent.PubKey) != string(o.Agent.PubKey) {

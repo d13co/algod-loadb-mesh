@@ -22,6 +22,7 @@ import (
 // RouterOptions configures request routing.
 type RouterOptions struct {
 	Mode            domain.Mode
+	Balancer        bool // no local node
 	ClientToken     string
 	AdminToken      string // required for /loadb/* except health; also a valid client token
 	SyncTolerance   uint64
@@ -70,6 +71,22 @@ type Router struct {
 
 	mu      sync.Mutex
 	pending map[string]pendingEntry
+
+	// A balancer's coalesced wait-for-block-after: the latest status body
+	// and the fetch in flight, shared by every waiter.
+	statusMu    sync.Mutex
+	status      *statusFetch // last completed fetch
+	statusFetch *statusFetch // in flight
+}
+
+// statusFetch is one GET /v2/status for all balancer waiters.
+type statusFetch struct {
+	done     chan struct{}
+	want     uint64 // round the fetch was started for; fixed
+	round    uint64 // last-round in body; set before done closes
+	upstream domain.Upstream
+	body     []byte
+	err      error
 }
 
 type pendingEntry struct {
@@ -237,6 +254,10 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Stats.BreakerOpen, u.Draining))
 	}
 	r.log.Warn("no eligible upstream", "class", class.String(), "best", best, "candidates", strings.Join(summary, " "))
+	if class.LocalOnly && r.opts.Balancer {
+		writeMessage(w, 503, "algod-loadb-mesh: this agent is a balancer with no local node, and this request is only answered by one")
+		return
+	}
 	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
 }
 
@@ -285,10 +306,15 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out por
 }
 
 // handleWait coalesces wait-for-block-after on the local monitor whenever the
-// local node may serve it; otherwise it is an ordinary forwarded request.
+// local node may serve it, and on heartbeats on a balancer; otherwise it is an
+// ordinary forwarded request.
 func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	local := cands[0]
-	if local.Kind == domain.KindLocal && domain.Eligible(local, class, best, r.opts.SyncTolerance) {
+	if r.opts.Balancer {
+		r.handleBalancerWait(w, req, class, cands, best)
+		return
+	}
+	if len(cands) > 0 && cands[0].Kind == domain.KindLocal && domain.Eligible(cands[0], class, best, r.opts.SyncTolerance) {
+		local := cands[0]
 		ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
 		defer cancel()
 		r.metric.Inc("loadb_wait_coalesced")
@@ -309,6 +335,125 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 		return
 	}
 	r.handleDefault(w, req, class, cands, best)
+}
+
+// handleBalancerWait holds the request until a heartbeat reports a round past
+// the requested one (or the wait times out, as algod's own does), then answers
+// with the status of a node at that round. The status is fetched once for all
+// waiters, so any number of them cost one algod request per round.
+func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
+	ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
+	defer cancel()
+	r.metric.Inc("loadb_wait_coalesced")
+	round, _ := r.dir.WaitForHeartbeatRound(ctx, *class.WaitAfter)
+	if req.Context().Err() != nil {
+		return
+	}
+	f := r.statusAt(round)
+	if f.err != nil {
+		// No node known at that round answered: an ordinary forward.
+		r.log.Debug("coalesced status unavailable, forwarding", "round", round, "err", f.err)
+		cands, best = r.dir.Snapshot()
+		r.handleDefault(w, req, class, cands, best)
+		return
+	}
+	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", f.upstream.ID)
+	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, _ = w.Write(f.body)
+}
+
+// statusAt returns a status body at round or later: the last one when it is
+// recent enough, else the result of a fetch shared with concurrent callers.
+func (r *Router) statusAt(round uint64) *statusFetch {
+	r.statusMu.Lock()
+	if last := r.status; last != nil && last.round >= round {
+		r.statusMu.Unlock()
+		return last
+	}
+	f := r.statusFetch
+	if f == nil || f.want < round {
+		f = &statusFetch{done: make(chan struct{}), want: round}
+		r.statusFetch = f
+		go r.fetchStatus(f)
+	}
+	r.statusMu.Unlock()
+	<-f.done
+	return f
+}
+
+// fetchStatus asks eligible nodes at f.round or later for /v2/status, best
+// first, within the retry budget.
+func (r *Router) fetchStatus(f *statusFetch) {
+	defer close(f.done)
+	want := f.want
+	class := domain.Classify(http.MethodGet, "/v2/status")
+	cands, best := r.dir.Snapshot()
+	at := cands[:0:0]
+	for _, u := range cands {
+		if u.Kind != domain.KindExternal && u.LastRound >= want {
+			at = append(at, u)
+		}
+	}
+	f.err = errors.New("no eligible node at that round")
+	if sel, ok := r.sel(at, class, best); ok {
+		tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
+		if len(tries) > 1+r.opts.RetryBudget {
+			tries = tries[:1+r.opts.RetryBudget]
+		}
+		for _, u := range tries {
+			if f.round, f.body, f.err = r.getStatus(u, class); f.err == nil {
+				f.upstream = u
+				break
+			}
+		}
+	}
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	if r.statusFetch == f {
+		r.statusFetch = nil
+	}
+	if f.err == nil && (r.status == nil || f.round > r.status.round) {
+		r.status = f
+	}
+}
+
+func (r *Router) getStatus(u domain.Upstream, class domain.RequestClass) (uint64, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.opts.UpstreamTimeout)
+	defer cancel()
+	rq, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(u.BaseURL, "/")+"/v2/status", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	rq.Header.Set("X-Algo-API-Token", u.Token)
+	start := r.clock.Now()
+	release := r.stats.Begin(u.ID)
+	resp, err := r.httpc.Do(rq)
+	release()
+	out := ports.Outcome{Err: err}
+	var body []byte
+	if err == nil {
+		out.Status = resp.StatusCode
+		body, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if err == nil && resp.StatusCode != 200 {
+			err = fmt.Errorf("%s answered %d", u.ID, resp.StatusCode)
+		}
+	}
+	out.Duration = r.clock.Now().Sub(start)
+	r.stats.Record(u.ID, class.StatKey(), out)
+	r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed() || err != nil))
+	if err != nil {
+		return 0, nil, err
+	}
+	var st struct {
+		LastRound uint64 `json:"last-round"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		return 0, nil, fmt.Errorf("%s status: %w", u.ID, err)
+	}
+	return st.LastRound, body, nil
 }
 
 func (r *Router) rememberTxn(txid, upstream string) {
@@ -512,11 +657,15 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 		}
 		writeMessage(w, 503, "no eligible upstream")
 	case "/loadb/status":
-		local := r.monitor.State()
+		role := domain.RoleNode
+		var local any = r.monitor.State()
+		if r.opts.Balancer {
+			role, local = domain.RoleBalancer, nil
+		}
 		writeJSON(w, 200, map[string]any{
-			"version": r.opts.Version, "mode": r.opts.Mode, "draining": r.draining.Load(),
+			"version": r.opts.Version, "role": role, "mode": r.opts.Mode, "draining": r.draining.Load(),
 			"uptime_s": int(r.clock.Now().Sub(r.started).Seconds()), "inflight": r.inflight.Load(),
-			"best_round": best, "local": local, "upstreams": cands,
+			"best_round": best, "local": local, "upstreams": cands, "balancers": r.dir.Balancers(),
 		})
 	case "/loadb/peers":
 		writeJSON(w, 200, cands)

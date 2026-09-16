@@ -30,6 +30,7 @@ type PeerOverride struct {
 type DirectoryOptions struct {
 	LocalID          string
 	LocalTier        int
+	NoLocal          bool          // balancer: no local upstream, no heartbeats of its own
 	SuspectAfter     time.Duration // no heartbeat for this long: probe directly
 	DownAfter        time.Duration // no heartbeat and no probe success: offline
 	ProbeInterval    time.Duration // direct /v2/status probing of a silent peer
@@ -106,6 +107,9 @@ type Directory struct {
 	mu         sync.Mutex
 	network    string
 	peers      map[string]*peerState
+	balancers  map[string]bool // registry balancers: heartbeat destinations, never upstreams
+	hbRound    uint64          // highest round an accepted, online heartbeat reported
+	hbChanged  chan struct{}   // closed when hbRound rises
 	externals  map[string]*extState
 	localJudge domain.SyncJudge
 	localSeq   uint64
@@ -118,7 +122,7 @@ func NewDirectory(o DirectoryOptions, monitor *Monitor, gossip ports.Gossip, cli
 	stats *StatsBook, clock ports.Clock, log ports.Logger, metric ports.Metrics, priv ed25519.PrivateKey) *Directory {
 	o.defaults()
 	d := &Directory{opts: o, monitor: monitor, gossip: gossip, clients: clients, stats: stats, clock: clock,
-		log: log, metric: metric, priv: priv, peers: map[string]*peerState{}, externals: map[string]*extState{},
+		log: log, metric: metric, priv: priv, peers: map[string]*peerState{}, balancers: map[string]bool{}, hbChanged: make(chan struct{}), externals: map[string]*extState{},
 		localJudge: o.judge()}
 	for _, e := range o.Externals {
 		if e.HealthCheck == 0 {
@@ -142,16 +146,25 @@ func (d *Directory) SetDraining(v bool) {
 }
 
 // SetRecords replaces the static peer set. Records for other networks and
-// for the local node itself are ignored.
+// for the local node itself are ignored. Balancers become heartbeat
+// destinations only; a balancer sends no heartbeats at all.
 func (d *Directory) SetRecords(recs []domain.NodeRecord) {
 	local := d.monitor.State()
 	network := local.Caps.GenesisID
 	d.mu.Lock()
 	d.network = network
 	seen := map[string]bool{}
+	balancers := map[string]bool{}
 	var addrs []string
 	for _, r := range recs {
 		if r.ID == d.opts.LocalID || (network != "" && r.Network != network) {
+			continue
+		}
+		if r.IsBalancer() {
+			balancers[r.ID] = true
+			if r.Agent.Addr != "" {
+				addrs = append(addrs, r.Agent.Addr)
+			}
 			continue
 		}
 		if ov, ok := d.opts.PeerOverrides[r.ID]; ok && ov.Tier != nil {
@@ -173,9 +186,14 @@ func (d *Directory) SetRecords(recs []domain.NodeRecord) {
 			delete(d.peers, id)
 		}
 	}
+	d.balancers = balancers
 	d.mu.Unlock()
+	if d.opts.NoLocal {
+		addrs = nil
+	}
 	d.gossip.SetPeers(addrs)
 	d.metric.Gauge("loadb_peers", float64(len(seen)))
+	d.metric.Gauge("loadb_balancers", float64(len(balancers)))
 }
 
 // Run drives gossip send/receive and maintenance until ctx is done. The
@@ -217,6 +235,9 @@ func (d *Directory) onLocalChange(st LocalState) {
 }
 
 func (d *Directory) sendHeartbeat(ctx context.Context, st LocalState) {
+	if d.opts.NoLocal {
+		return
+	}
 	d.mu.Lock()
 	d.hbSeq++
 	hb := domain.Heartbeat{NodeID: d.opts.LocalID, Seq: d.hbSeq, LastRound: st.LastRound, Online: st.Online,
@@ -263,6 +284,11 @@ func (d *Directory) handle(msg ports.GossipMessage) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	p, ok := d.peers[hb.NodeID]
+	if !ok && d.balancers[hb.NodeID] {
+		d.metric.Inc("loadb_heartbeats_rejected", "reason", "balancer")
+		logMsg("balancer")
+		return
+	}
 	if !ok {
 		d.metric.Inc("loadb_heartbeats_rejected", "reason", "unknown")
 		logMsg("unknown_node")
@@ -283,6 +309,11 @@ func (d *Directory) handle(msg ports.GossipMessage) {
 	d.metric.Inc("loadb_heartbeats_received")
 	logMsg("accepted")
 	p.hb, p.seenAt, p.hasHB = hb, now, true
+	if hb.Online && hb.LastRound > d.hbRound {
+		d.hbRound = hb.LastRound
+		close(d.hbChanged)
+		d.hbChanged = make(chan struct{})
+	}
 	p.judge.Judge(now, hb.Online, hb.LastRound, d.bestRoundLocked(d.monitor.State()))
 }
 
@@ -417,10 +448,12 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 	best := d.bestRoundLocked(local)
 	out := make([]domain.Upstream, 0, 1+len(d.peers)+len(d.externals))
 
-	lh := d.localJudge.Judge(now, local.Online, local.LastRound, best)
-	out = append(out, domain.Upstream{ID: d.opts.LocalID, Kind: domain.KindLocal, Tier: d.opts.LocalTier,
-		BaseURL: local.Endpoint, Token: local.Config.Token, Health: lh, LastRound: local.LastRound,
-		Caps: local.Caps, Draining: d.draining, Stats: d.stats.Snapshot(d.opts.LocalID), Source: "local"})
+	if !d.opts.NoLocal {
+		lh := d.localJudge.Judge(now, local.Online, local.LastRound, best)
+		out = append(out, domain.Upstream{ID: d.opts.LocalID, Kind: domain.KindLocal, Tier: d.opts.LocalTier,
+			BaseURL: local.Endpoint, Token: local.Config.Token, Health: lh, LastRound: local.LastRound,
+			Caps: local.Caps, Draining: d.draining, Stats: d.stats.Snapshot(d.opts.LocalID), Source: "local"})
+	}
 
 	ids := make([]string, 0, len(d.peers))
 	for id := range d.peers {
@@ -473,6 +506,36 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 		out = append(out, u)
 	}
 	return out, best
+}
+
+// WaitForHeartbeatRound blocks until a heartbeat reports a round past round,
+// or ctx is done, and returns the highest heartbeat round seen.
+func (d *Directory) WaitForHeartbeatRound(ctx context.Context, round uint64) (uint64, error) {
+	for {
+		d.mu.Lock()
+		best, ch := d.hbRound, d.hbChanged
+		d.mu.Unlock()
+		if best > round {
+			return best, nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return best, ctx.Err()
+		}
+	}
+}
+
+// Balancers lists the balancer ids this agent sends heartbeats to.
+func (d *Directory) Balancers() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ids := make([]string, 0, len(d.balancers))
+	for id := range d.balancers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // PeerCount is for status output.

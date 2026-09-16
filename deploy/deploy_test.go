@@ -18,13 +18,14 @@ import (
 // The examples must keep up with the config schema: every key known, and
 // valid once the placeholders a real host fills in are set.
 func TestExamplesLoad(t *testing.T) {
-	for name, text := range map[string]string{"config.example.yaml": ConfigExample, "config.static.example.yaml": ConfigStaticExample} {
+	for name, text := range map[string]string{"config.example.yaml": ConfigExample, "config.static.example.yaml": ConfigStaticExample,
+		"config.balancer.example.yaml": ConfigBalancerExample} {
 		c, err := config.Decode([]byte(text))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		c.ClientToken = "t" // instead of reading client_token_file
-		c.AdminToken = "a"  // instead of reading algod.admin.token from data_dir
+		c.AdminToken = "a"  // instead of reading algod.admin.token from data_dir or admin_token_file
 		if c.Registry.SyncKeyFile != "" {
 			c.Registry.SyncKey = "00000000000000000000000000000000000000000000000000000000000000ff"
 		}

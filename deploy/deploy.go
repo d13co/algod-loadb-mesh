@@ -13,3 +13,8 @@ var ConfigExample string
 //
 //go:embed config.static.example.yaml
 var ConfigStaticExample string
+
+// ConfigBalancerExample is a balancer config: an agent with no algod.
+//
+//go:embed config.balancer.example.yaml
+var ConfigBalancerExample string

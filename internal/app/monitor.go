@@ -19,6 +19,10 @@ type MonitorOptions struct {
 	VerifyInterval time.Duration // empirical re-check of oldest round
 	ConfigRecheck  time.Duration // how often config.json's mtime is polled
 	Overrides      *domain.CapabilityOverrides
+	// Absent means there is no co-located node (a balancer): the monitor
+	// only reports Network as the genesis id and never goes online.
+	Absent  bool
+	Network string
 }
 
 func (o *MonitorOptions) defaults() {
@@ -72,8 +76,13 @@ type Monitor struct {
 // NewMonitor wires the monitor; nothing runs until Run.
 func NewMonitor(o MonitorOptions, algod ports.AlgodClient, cfgr ports.NodeConfigReader, clock ports.Clock, log ports.Logger, metric ports.Metrics) *Monitor {
 	o.defaults()
-	return &Monitor{opts: o, algod: algod, cfgr: cfgr, clock: clock, log: log, metric: metric,
+	m := &Monitor{opts: o, algod: algod, cfgr: cfgr, clock: clock, log: log, metric: metric,
 		changed: make(chan struct{}), verify: make(chan struct{}, 1)}
+	if o.Absent {
+		m.state.Caps.GenesisID = o.Network
+		m.state.LastError = "no local node"
+	}
+	return m
 }
 
 // State returns a copy of the current state.
@@ -119,6 +128,10 @@ func (m *Monitor) WaitForBlockAfter(ctx context.Context, round uint64) ([]byte, 
 
 // Run blocks until ctx is done.
 func (m *Monitor) Run(ctx context.Context) error {
+	if m.opts.Absent {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	m.readConfig()
 	go m.configLoop(ctx)
 	go m.verifyLoop(ctx)

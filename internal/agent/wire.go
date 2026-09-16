@@ -39,13 +39,19 @@ func FromConfig(c config.Config) (Deps, error) {
 		return Deps{}, err
 	}
 	log := Logger(c)
-	reader := datadir.Reader{Dir: c.Local.DataDir}
-	nc, err := reader.Read()
-	if err != nil {
-		return Deps{}, err
-	}
 	factory := algodhttp.Factory{}
-	local := factory.NewAlgodClient(nc.Endpoint, nc.Token)
+	// A balancer has no node: no data dir, no local client.
+	var reader ports.NodeConfigReader
+	var local ports.AlgodClient
+	var nc ports.NodeConfig
+	if !c.Balancer() {
+		dr := datadir.Reader{Dir: c.Local.DataDir}
+		var err error
+		if nc, err = dr.Read(); err != nil {
+			return Deps{}, err
+		}
+		reader, local = dr, factory.NewAlgodClient(nc.Endpoint, nc.Token)
+	}
 
 	material, err := c.KeyMaterial()
 	if err != nil {
@@ -65,13 +71,13 @@ func FromConfig(c config.Config) (Deps, error) {
 			return Deps{}, err
 		}
 		url, token := c.Registry.AlgodURL, c.Registry.AlgodToken
-		reader := local
+		regReader := local
 		if url == "" {
 			url, token = nc.Endpoint, nc.Token
 		} else {
-			reader = factory.NewAlgodClient(url, token)
+			regReader = factory.NewAlgodClient(url, token)
 		}
-		r, err := registryalgo.New(c.Registry.AppID, seed, c.Registry.SyncAddress, reader, url, token, log)
+		r, err := registryalgo.New(c.Registry.AppID, seed, c.Registry.SyncAddress, regReader, url, token, log)
 		if err != nil {
 			return Deps{}, err
 		}

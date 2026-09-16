@@ -4,6 +4,7 @@ package sim
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"encoding/json"
@@ -446,5 +447,121 @@ func TestAgentEndpointsClosedWithoutAdminToken(t *testing.T) {
 	}
 	if r := call(t, "GET", u+"/loadb/health", "", ""); r.code == 401 || r.code == 403 {
 		t.Fatalf("health must stay open: %d", r.code)
+	}
+}
+
+// A balancer registers itself, nodes push heartbeats to it, and it routes
+// every request to the fleet without being an upstream itself.
+func TestBalancerReceivesHeartbeatsAndRoutes(t *testing.T) {
+	f := start(t, devfleet.Options{Nodes: threeNodes(), Balancers: []string{"lb"}, Mode: "loadbalancer"})
+	lb, arch := f.Servers[3].URL, f.Servers[0].URL
+
+	// start() already waited for the balancer to see every node by heartbeat.
+	st, ups := status(t, lb)
+	if st["role"] != "balancer" || st["local"] != nil || len(ups) != 3 {
+		t.Fatalf("balancer status: role %v, local %v, %d upstreams", st["role"], st["local"], len(ups))
+	}
+	for _, u := range ups {
+		if u.Kind != domain.KindPeer || u.Source != "heartbeat" {
+			t.Fatalf("balancer upstream %s: kind %s, source %s", u.ID, u.Kind, u.Source)
+		}
+	}
+	_, ups = status(t, arch)
+	for _, u := range ups {
+		if u.ID == "lb" {
+			t.Fatal("a balancer must never be an upstream")
+		}
+	}
+
+	// Rounds reach the balancer by heartbeat, not by probing.
+	f.Advance(1)
+	want := f.Nodes[0].Round()
+	waitFor(t, 2*time.Second, "balancer sees the new round", func() bool {
+		_, ups := status(t, lb)
+		for _, u := range ups {
+			if u.LastRound != want || u.Source != "heartbeat" {
+				return false
+			}
+		}
+		return true
+	})
+
+	counts := map[string]int{}
+	for i := 0; i < 40; i++ {
+		r := get(t, lb+"/v2/status")
+		if r.code != 200 {
+			t.Fatalf("status via balancer: %d %s", r.code, r.body)
+		}
+		counts[r.node]++
+	}
+	if len(counts) < 2 || counts["devn"] != 0 {
+		t.Fatalf("balancer should spread across tier 1: %v", counts)
+	}
+	if r := call(t, "POST", lb+"/v2/teal/compile", "", "int 1"); r.code != 200 || r.node != "devn" {
+		t.Fatalf("teal via balancer: %d %s", r.code, r.node)
+	}
+	if r := get(t, lb+"/v2/blocks/100"); r.code != 200 || r.node != "arch" {
+		t.Fatalf("archival via balancer: %d %s", r.code, r.node)
+	}
+	if r := get(t, lb+"/v2/transactions/pending"); r.code != 503 || !strings.Contains(string(r.body), "balancer") {
+		t.Fatalf("local-only request on a balancer: %d %s", r.code, r.body)
+	}
+	if r := agentGet(t, lb+"/loadb/health"); r.code != 200 {
+		t.Fatalf("balancer health: %d %s", r.code, r.body)
+	}
+	if recs, _, _ := f.Registry.List(context.Background()); len(recs) != 4 {
+		t.Fatalf("registry should hold 3 nodes and the balancer, got %d", len(recs))
+	}
+}
+
+// On a balancer, wait-for-block-after is held until a heartbeat reports a
+// later round, and every waiter shares one status request.
+func TestBalancerWaitForBlockAfterWaitsForHeartbeat(t *testing.T) {
+	f := start(t, devfleet.Options{Nodes: threeNodes(), Balancers: []string{"lb"}, Mode: "loadbalancer"})
+	lb := f.Servers[3].URL
+	statusHits := func() int {
+		n := 0
+		for _, node := range f.Nodes {
+			n += node.Hits("/v2/status") - node.Hits("/v2/status/wait-for-block-after")
+		}
+		return n
+	}
+	round := f.Nodes[0].Round()
+	path := fmt.Sprintf("%s/v2/status/wait-for-block-after/%d", lb, round)
+	before := statusHits()
+	results := make(chan resp, 8)
+	for i := 0; i < 8; i++ {
+		go func() { results <- get(t, path) }()
+	}
+	select {
+	case r := <-results:
+		t.Fatalf("answered before the round advanced: %d %s", r.code, r.body)
+	case <-time.After(500 * time.Millisecond):
+	}
+	waits := 0
+	for _, node := range f.Nodes {
+		waits += node.Hits(fmt.Sprintf("/v2/status/wait-for-block-after/%d", round))
+	}
+	if waits > len(f.Nodes) { // each node's own monitor long-polls once
+		t.Fatalf("the balancer long-polled nodes instead of waiting for heartbeats (%d polls)", waits)
+	}
+	f.Advance(1)
+	want := fmt.Sprintf(`"last-round":%d`, round+1)
+	for i := 0; i < 8; i++ {
+		select {
+		case r := <-results:
+			if r.code != 200 || r.up == "" || !strings.Contains(string(r.body), want) {
+				t.Fatalf("wait result: %d %s %s", r.code, r.up, r.body)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("waiters not released after the round advanced")
+		}
+	}
+	if extra := statusHits() - before; extra > 1 {
+		t.Fatalf("8 balancer waits cost %d status requests", extra)
+	}
+	// A round already passed answers at once.
+	if r := get(t, lb+"/v2/status/wait-for-block-after/10"); r.code != 200 || !strings.Contains(string(r.body), want) {
+		t.Fatalf("stale wait: %d %s", r.code, r.body)
 	}
 }

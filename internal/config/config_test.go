@@ -131,3 +131,35 @@ func TestAdminToken(t *testing.T) {
 		}
 	}
 }
+
+func TestBalancerRole(t *testing.T) {
+	const base = "role: balancer\nlocal: {id: lb1, network: mainnet-v1.0}\nmesh: {advertise: 10.112.0.9:4001}\n"
+	c, err := load(t, base+"registry: {type: memory}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Balancer() || c.Mode != "loadbalancer" || c.AdminToken != "" || !*c.Registry.AutoRegister {
+		t.Fatalf("balancer defaults: %+v", c)
+	}
+	if c, err = load(t, base+"mode: fallback\nregistry: {type: memory}\n"); err != nil || c.Mode != "fallback" {
+		t.Fatalf("explicit mode is kept: %q %v", c.Mode, err)
+	}
+	if _, err := load(t, "role: balancer\nlocal: {id: lb1}\nregistry: {type: memory, auto_register: false}\n"); err == nil || !strings.Contains(err.Error(), "local.network") {
+		t.Fatalf("balancer needs a network: %v", err)
+	}
+	if _, err := load(t, base+"registry: {app_id: 5, sync_key: k}\n"); err == nil || !strings.Contains(err.Error(), "algod_url") {
+		t.Fatalf("on-chain registry needs algod_url on a balancer: %v", err)
+	}
+	if _, err := load(t, base+"registry: {app_id: 5, sync_key: k, algod_url: 10.112.0.44:8080}\n"); err != nil {
+		t.Fatalf("balancer with algod_url: %v", err)
+	}
+	if _, err := load(t, "role: balancer\nlocal: {id: lb1, network: n}\nregistry: {type: memory}\n"); err == nil || !strings.Contains(err.Error(), "mesh.advertise") {
+		t.Fatalf("a registering balancer needs mesh.advertise: %v", err)
+	}
+	if _, err := load(t, "local: {id: a, data_dir: /x, network: n}\nregistry: {type: static}\n"); err == nil || !strings.Contains(err.Error(), "role balancer") {
+		t.Fatalf("local.network on a node must fail: %v", err)
+	}
+	if _, err := load(t, "role: router\nlocal: {id: a, data_dir: /x}\n"); err == nil {
+		t.Fatal("unknown role must fail")
+	}
+}

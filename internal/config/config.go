@@ -25,6 +25,7 @@ import (
 
 // Config is the whole file.
 type Config struct {
+	Role            string  `yaml:"role"` // node | balancer
 	Mode            string  `yaml:"mode"`
 	Listen          string  `yaml:"listen"`
 	ClientToken     string  `yaml:"client_token"`
@@ -47,6 +48,7 @@ type Log struct {
 type Local struct {
 	ID                 string                      `yaml:"id"`
 	DataDir            string                      `yaml:"data_dir"`
+	Network            string                      `yaml:"network"` // balancer: genesis id of the fleet it serves
 	AdvertiseEndpoints []string                    `yaml:"advertise_endpoints"`
 	Tier               int                         `yaml:"tier"`
 	Tags               []string                    `yaml:"tags"`
@@ -145,8 +147,17 @@ func Decode(b []byte) (Config, error) {
 
 // Finish applies defaults, resolves file-backed secrets and validates.
 func (c *Config) Finish() error {
+	role, err := domain.ParseRole(c.Role)
+	if err != nil {
+		return err
+	}
+	c.Role = string(role)
+	balancer := role == domain.RoleBalancer
 	if _, err := domain.ParseMode(c.Mode); err != nil {
 		return err
+	}
+	if c.Mode == "" && balancer {
+		c.Mode = string(domain.ModeLoadBalancer)
 	}
 	if c.Mode == "" {
 		c.Mode = string(domain.ModeFallback)
@@ -171,7 +182,12 @@ func (c *Config) Finish() error {
 		}
 		c.Local.ID = h
 	}
-	if c.Local.DataDir == "" {
+	switch {
+	case balancer && c.Local.Network == "":
+		return errors.New("local.network (the genesis id, e.g. mainnet-v1.0) is required for role balancer")
+	case !balancer && c.Local.Network != "":
+		return errors.New("local.network is only for role balancer; a node's network comes from its genesis")
+	case !balancer && c.Local.DataDir == "":
 		return errors.New("local.data_dir is required")
 	}
 	// URLs without a scheme are a common slip (host:port copied from
@@ -188,7 +204,8 @@ func (c *Config) Finish() error {
 	for i := range c.Tiers.External {
 		c.Tiers.External[i].URL = withScheme(c.Tiers.External[i].URL)
 	}
-	if c.AdminToken == "" {
+	// A balancer has no data dir, so no default admin token file.
+	if c.AdminToken == "" && (c.AdminTokenFile != "" || c.Local.DataDir != "") {
 		path, explicit := c.AdminTokenFile, c.AdminTokenFile != ""
 		if !explicit {
 			path = filepath.Join(c.Local.DataDir, "algod.admin.token")
@@ -220,6 +237,9 @@ func (c *Config) Finish() error {
 		}
 		if c.Registry.SyncKey == "" && c.Registry.SyncKeyFile == "" {
 			return errors.New("registry.sync_key or sync_key_file is required for type algorand")
+		}
+		if balancer && c.Registry.AlgodURL == "" {
+			return errors.New("registry.algod_url is required for role balancer, which has no local node to read the registry through")
 		}
 		if c.Registry.SyncAddress != "" {
 			if _, err := types.DecodeAddress(c.Registry.SyncAddress); err != nil {
@@ -255,7 +275,7 @@ func (c *Config) Finish() error {
 		v := c.Registry.Type != "static"
 		c.Registry.AutoRegister = &v
 	}
-	if *c.Registry.AutoRegister && c.Registry.Type != "static" && len(c.Local.AdvertiseEndpoints) == 0 {
+	if *c.Registry.AutoRegister && c.Registry.Type != "static" && !balancer && len(c.Local.AdvertiseEndpoints) == 0 {
 		return errors.New("local.advertise_endpoints is required when registry.auto_register is on")
 	}
 	if c.Mesh.Listen == "" {
@@ -306,6 +326,9 @@ func (c *Config) Finish() error {
 	}
 	return nil
 }
+
+// Balancer reports whether the agent runs without a local node.
+func (c *Config) Balancer() bool { return c.Role == string(domain.RoleBalancer) }
 
 // withScheme prefixes http:// to a non-empty URL that has no scheme.
 func withScheme(u string) string {

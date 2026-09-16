@@ -109,6 +109,28 @@ Without a chain registry, `registry.type: static` lists peers in the config
 and `mesh.shared_secret` replaces the sync key as key material
 ([deploy/config.static.example.yaml](deploy/config.static.example.yaml)).
 
+## Run without a node (balancer)
+
+A host without algod can run the agent as a balancer: it serves clients from
+the fleet in `loadbalancer` mode and is never an upstream itself. It
+registers a `role: balancer` record, and every node sends its heartbeats to
+the balancer's `mesh.advertise` as it does to other nodes, so the balancer
+sees each round as quickly as a node does. `wait-for-block-after` is held
+until a heartbeat reports a later round, then answered with one
+`/v2/status` fetch from a node at that round, shared by all waiters.
+
+    algod-loadb-mesh config example -balancer -o /etc/algod-loadb-mesh/config.yaml
+
+It needs `local.network` (the genesis id), `mesh.advertise`, and, with the
+on-chain registry, `registry.algod_url` and `algod_token` of any synced node
+to read the registry and register through. No algod data dir means no
+default admin token: set `admin_token_file`. Requests only a local node can
+answer (for example the pending transaction pool) get a 503. Nodes must run a
+build that knows roles before they send heartbeats to balancers.
+With a static registry, list the balancer on the nodes as
+`{id: lb1, role: balancer, network: mainnet-v1.0, agent: {addr: 10.112.0.9:4001}}`.
+`algod-loadb-mesh dev -balancers 1` adds one to the fake fleet.
+
 ## Layout
 
     cmd/algod-loadb-mesh        CLI: run, check-node, registry, dev

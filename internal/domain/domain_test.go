@@ -386,3 +386,27 @@ func TestOpenRecordChecksID(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestBalancerRecords(t *testing.T) {
+	bal := NodeRecord{ID: "lb1", Role: RoleBalancer, Network: "n", Agent: AgentInfo{Addr: "10.0.0.9:4001"}}
+	if err := bal.Validate(); err != nil || !bal.IsBalancer() {
+		t.Fatalf("a balancer needs no endpoints: %v", err)
+	}
+	if err := (NodeRecord{ID: "lb1", Role: RoleBalancer, Network: "n"}).Validate(); err == nil {
+		t.Fatal("a balancer without an agent address must fail")
+	}
+	if err := (NodeRecord{ID: "x", Role: "router", Network: "n", Endpoints: []string{"http://x"}}).Validate(); err == nil {
+		t.Fatal("unknown role must fail")
+	}
+	node := NodeRecord{ID: "k", Network: "n", Endpoints: []string{"http://x"}, Agent: AgentInfo{Addr: "a:1"}}
+	named := node
+	named.Role = RoleNode
+	if node.IsBalancer() || !node.StaticEqual(named) {
+		t.Fatal(`role "" and "node" are the same`)
+	}
+	moved := node
+	moved.Role = RoleBalancer
+	if node.StaticEqual(moved) {
+		t.Fatal("a role change is a static change")
+	}
+}
