@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Installs algod-loadb-mesh on a linux/amd64 host:
 #
-#   curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
 #
 # It fetches the release binary and the deploy scripts, and installs them as
 # algod-loadb-mesh, algod-loadb-mesh-autoconfig and algod-loadb-mesh-setup.
+# Run it as your user: it downloads and verifies as you, and uses sudo only to
+# install the files (and to run the setup).
 # Nothing is configured or started; that is algod-loadb-mesh-setup, which you
 # can run straight away by ending this command with --setup:
 #
-#   curl -fsSL .../install.sh | sudo bash -s -- --setup BUNDLE
+#   curl -fsSL .../install.sh | bash -s -- --setup BUNDLE
 #
 # Options (also settable as environment variables):
 #
@@ -130,7 +132,7 @@ EOF
 }
 
 # help prints this file's header comment, without the hashes.
-help() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+help() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 say() { echo "algod-loadb-mesh: $*" >&2; }
 die() { say "$*"; exit 1; }

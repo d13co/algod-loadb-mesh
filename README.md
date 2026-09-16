@@ -39,14 +39,15 @@ Each host runs one agent next to its algod. The agent:
 
 On a linux/amd64 host, this fetches the release binary and the deploy scripts
 into `/usr/local/bin` as `algod-loadb-mesh`, `algod-loadb-mesh-autoconfig` and
-`algod-loadb-mesh-setup`, and configures nothing:
+`algod-loadb-mesh-setup`, and configures nothing. Run it as your user; it
+downloads and verifies as you and uses sudo only to copy the files into place:
 
-    curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | sudo bash
+    curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
 
-Setup is a second, privileged step: it writes the config, installs the systemd
-unit and starts the service. On a host that already runs the mesh, print the
-registry bundle (app id, sync key, and the sync address when it is rekeyed) and
-paste it into the setup on the new host:
+Setup is a separate step that configures the host: it writes the config,
+installs the systemd unit and starts the service. On a host that already runs
+the mesh, print the registry bundle (app id, sync key, and the sync address when
+it is rekeyed) and paste it into the setup on the new host:
 
     algod-loadb-mesh registry bundle -config /etc/algod-loadb-mesh/config.yaml
 

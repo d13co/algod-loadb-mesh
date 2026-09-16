@@ -29,7 +29,7 @@ usage: $0 [options] [BUNDLE]
   --sync-key-file FILE  registry sync key, instead of BUNDLE (default: /etc/algod-loadb-mesh/sync.key)
   --sync-address ADDR   sync account, when it is rekeyed to the sync key (default: from BUNDLE)
   --client-token-file FILE
-                        token clients must send (default: /etc/algod-loadb-mesh/client.token)
+                        token clients must send (default: algod.token in the data dir)
   --tier N              routing tier, lower is preferred (default: 1)
   --listen HOST:PORT    client listener (default: 0.0.0.0:4000)
   --mesh-port PORT      UDP heartbeat port (default: 4001)
@@ -37,8 +37,7 @@ EOF
 }
 
 out="" force=0 id="" data_dir="" address="" app_id="" sync_address="" tier=1
-sync_key_file="" sync_key="" bundle=""
-client_token_file=/etc/algod-loadb-mesh/client.token
+sync_key_file="" sync_key="" bundle="" client_token_file=""
 listen=0.0.0.0:4000 mesh_port=4001
 
 while [ $# -gt 0 ]; do
@@ -225,6 +224,8 @@ case "$algod_host" in
 	fi
 	;;
 esac
+
+client_token_file=${client_token_file:-$data_dir/algod.token}
 
 # --- checks -----------------------------------------------------------------
 
