@@ -172,15 +172,26 @@ func configCheckCmd(args []string) error {
 	if c.ClientToken != "" || c.AdminToken != "" {
 		tokens = fmt.Sprintf("client token %s, admin token %s", have(c.ClientToken), have(c.AdminToken))
 	}
+	// setup.sh takes the first client address off the "listen" line.
 	if c.Balancer() {
-		fmt.Printf("%s: ok\nid %s, role balancer, mode %s, network %s\nlisten %s, gossip %s, heartbeats to %s\nregistry %s via %s, %s\n",
-			*path, c.Local.ID, c.Mode, c.Local.Network, c.Listen, c.Mesh.Listen, c.Mesh.Advertise, reg, c.Registry.AlgodURL, tokens)
-		return nil
+		fmt.Printf("%s: ok\nid %s, role balancer, mode %s, network %s\nlisten %s\ngossip on %s, heartbeats to %s\nregistry %s via %s, %s\n",
+			*path, c.Local.ID, c.Mode, c.Local.Network, c.Listen, c.Mesh.Listen, orNone(c.Mesh.Advertise), reg, c.Registry.AlgodURL, tokens)
+	} else {
+		fmt.Printf("%s: ok\nid %s, mode %s, data dir %s\nlisten %s, advertising %s\ngossip on %s, heartbeats to %s\nregistry %s, %s\n",
+			*path, c.Local.ID, c.Mode, c.Local.DataDir, c.Listen, strings.Join(c.Local.AdvertiseEndpoints, ", "),
+			c.Mesh.Listen, orNone(c.Mesh.Advertise), reg, tokens)
 	}
-	fmt.Printf("%s: ok\nid %s, mode %s, data dir %s\nlisten %s, gossip %s, advertising %s\nregistry %s, %s\n",
-		*path, c.Local.ID, c.Mode, c.Local.DataDir, c.Listen, c.Mesh.Listen,
-		strings.Join(c.Local.AdvertiseEndpoints, ", "), reg, tokens)
+	for _, w := range c.Warnings() {
+		fmt.Printf("warning: %s\n", w)
+	}
 	return nil
+}
+
+func orNone(a config.Addrs) string {
+	if len(a) == 0 {
+		return "none"
+	}
+	return a.String()
 }
 
 func have(tok string) string {
@@ -255,7 +266,7 @@ func registryCmd(args []string) error {
 	network := fs.String("network", "", "genesis id, e.g. mainnet-v1.0")
 	endpoint := fs.String("endpoint", "", "algod REST base URL (repeatable with commas)")
 	token := fs.String("token", "", "algod API token")
-	agentAddr := fs.String("agent", "", "agent gossip address host:port")
+	agentAddr := fs.String("agent", "", "agent gossip addresses host:port, comma-separated, preferred first")
 	tier := fs.Int("tier", 1, "tier")
 	role := fs.String("role", "node", "node | balancer (a balancer needs only -id, -network and -agent)")
 	showTokens := fs.Bool("show-tokens", false, "print algod tokens")
@@ -344,7 +355,7 @@ func registryCmd(args []string) error {
 			return err
 		}
 		rec := domain.NodeRecord{ID: *id, Network: *network, Token: *token,
-			Agent: domain.AgentInfo{Addr: *agentAddr, PubKey: []byte(key.Public().(ed25519.PublicKey))}, Tier: *tier, Version: 1}
+			Agent: domain.AgentInfo{Addrs: splitAddrs(*agentAddr), PubKey: []byte(key.Public().(ed25519.PublicKey))}, Tier: *tier, Version: 1}
 		if r == domain.RoleBalancer {
 			rec.Role, rec.Tier = domain.RoleBalancer, 0
 		} else {
@@ -459,4 +470,15 @@ func devCmd(args []string) error {
 			f.Advance(1)
 		}
 	}
+}
+
+// splitAddrs turns a comma-separated flag into a list, dropping blanks.
+func splitAddrs(s string) []string {
+	var out []string
+	for _, a := range strings.Split(s, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }

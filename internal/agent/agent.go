@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"time"
 
@@ -80,7 +81,7 @@ func New(d Deps) (*Agent, error) {
 	}
 	dir := app.NewDirectory(app.DirectoryOptions{LocalID: c.Local.ID, LocalTier: c.Local.Tier, NoLocal: balancer,
 		SuspectAfter: c.Mesh.SuspectAfter, DownAfter: c.Mesh.DownAfter, ProbeInterval: c.Mesh.ProbeInterval,
-		KeepAlive: c.Mesh.KeepAlive, SyncTolerance: c.Routing.SyncTolerance, LagGrace: c.Routing.LagGrace, ReturnHysteresis: c.Routing.ReturnHysteresisRounds,
+		KeepAlive: c.Mesh.KeepAlive, PathProbeInterval: c.Mesh.PathProbeInterval, PathTimeout: c.Mesh.PathTimeout, SyncTolerance: c.Routing.SyncTolerance, LagGrace: c.Routing.LagGrace, ReturnHysteresis: c.Routing.ReturnHysteresisRounds,
 		PeerOverrides: overrides, Externals: externals}, monitor, d.Gossip, d.Clients, stats, d.Clock, d.Log, d.Metrics, d.AgentKey)
 
 	router := app.NewRouter(app.RouterOptions{Mode: mode, Balancer: balancer, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
@@ -92,14 +93,14 @@ func New(d Deps) (*Agent, error) {
 	localRecord := func() (domain.NodeRecord, bool) {
 		if balancer {
 			return domain.NodeRecord{ID: c.Local.ID, Role: domain.RoleBalancer, Network: c.Local.Network,
-				Agent: domain.AgentInfo{Addr: c.Mesh.Advertise, PubKey: []byte(pub)}, Tags: c.Local.Tags}, true
+				Agent: domain.AgentInfo{Addrs: c.Mesh.Advertise, PubKey: []byte(pub)}, Tags: c.Local.Tags}, true
 		}
 		st := monitor.State()
 		if !st.ConfigOK || st.Caps.GenesisID == "" {
 			return domain.NodeRecord{}, false
 		}
 		return domain.NodeRecord{ID: c.Local.ID, Network: st.Caps.GenesisID, Endpoints: c.Local.AdvertiseEndpoints,
-			Token: st.Config.Token, Agent: domain.AgentInfo{Addr: c.Mesh.Advertise, PubKey: []byte(pub)},
+			Token: st.Config.Token, Agent: domain.AgentInfo{Addrs: c.Mesh.Advertise, PubKey: []byte(pub)},
 			Tier: c.Local.Tier, Tags: c.Local.Tags, Declared: c.Local.Overrides}, true
 	}
 	reg := app.NewRegistrySync(app.RegistrySyncOptions{Refresh: c.Registry.Refresh, AutoRegister: *c.Registry.AutoRegister},
@@ -127,17 +128,27 @@ func (a *Agent) Run(ctx context.Context) error {
 	return err
 }
 
-// Serve runs the agent and its HTTP listener until ctx is done, then drains.
+// Serve runs the agent and its HTTP listeners until ctx is done, then drains.
+// One handler is served on every config.Listen address; binding comes first,
+// so a bad address fails before any service starts.
 func (a *Agent) Serve(ctx context.Context) error {
-	srv := &http.Server{Addr: a.deps.Config.Listen, Handler: a.Handler, ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 2)
+	addrs := a.deps.Config.Listen
+	lns, err := listenAll(addrs)
+	if err != nil {
+		return err
+	}
+	defer closeAll(lns)
+	srv := &http.Server{Handler: a.Handler, ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 1+len(lns))
 	go func() { errc <- a.Run(ctx) }()
-	go func() {
-		a.deps.Log.Info("listening", "addr", srv.Addr, "role", a.deps.Config.Role, "mode", a.deps.Config.Mode, "id", a.deps.Config.Local.ID)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errc <- fmt.Errorf("listen %s: %w", srv.Addr, err)
-		}
-	}()
+	a.deps.Log.Info("listening", "addr", addrs.String(), "role", a.deps.Config.Role, "mode", a.deps.Config.Mode, "id", a.deps.Config.Local.ID)
+	for _, ln := range lns {
+		go func() {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errc <- fmt.Errorf("listen %s: %w", ln.Addr(), err)
+			}
+		}()
+	}
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
@@ -149,7 +160,28 @@ func (a *Agent) Serve(ctx context.Context) error {
 	a.deps.Log.Info("draining", "inflight", a.Router.Inflight(), "timeout", a.deps.Config.Routing.DrainTimeout)
 	dctx, cancel := context.WithTimeout(context.Background(), a.deps.Config.Routing.DrainTimeout)
 	defer cancel()
-	err := srv.Shutdown(dctx)
+	// Shutdown closes every listener Serve was given.
+	err = srv.Shutdown(dctx)
 	_ = a.deps.Gossip.Close()
 	return err
+}
+
+// listenAll binds every address, closing what it opened if one fails.
+func listenAll(addrs config.Addrs) ([]net.Listener, error) {
+	lns := make([]net.Listener, 0, len(addrs))
+	for _, addr := range addrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			closeAll(lns)
+			return nil, fmt.Errorf("listen %s: %w", addr, err)
+		}
+		lns = append(lns, ln)
+	}
+	return lns, nil
+}
+
+func closeAll(lns []net.Listener) {
+	for _, ln := range lns {
+		_ = ln.Close()
+	}
 }

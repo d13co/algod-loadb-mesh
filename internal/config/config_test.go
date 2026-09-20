@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func load(t *testing.T, yaml string) (Config, error) {
@@ -21,7 +22,7 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Mode != "fallback" || c.Listen != "127.0.0.1:4000" || c.Registry.Refresh.Minutes() != 5 || *c.Routing.RetryBudget != 1 {
+	if c.Mode != "fallback" || c.Listen.String() != "127.0.0.1:4000" || c.Registry.Refresh.Minutes() != 5 || *c.Routing.RetryBudget != 1 {
 		t.Fatalf("defaults: %+v", c)
 	}
 	if _, err := load(t, "local:\n  data_dir: /tmp/x\nregistry: {app_id: 5}\n"); err == nil || !strings.Contains(err.Error(), "sync_key") {
@@ -40,6 +41,48 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	_, err = load(t, "local: {id: a, data_dir: /x}\nregistry: {type: memory}\nmesh: {}\n")
 	if err == nil || !strings.Contains(err.Error(), "advertise") {
 		t.Fatalf("expected advertise error, got %v", err)
+	}
+}
+
+func TestListenAddresses(t *testing.T) {
+	base := "local: {id: a, data_dir: /x}\nregistry: {type: memory, auto_register: false}\n"
+	for _, tc := range []struct{ name, listen, want string }{
+		{"one address", "listen: 10.112.0.44:4000\n", "10.112.0.44:4000"},
+		{"comma separated", "listen: 10.112.0.44:4000, 10.114.0.44:4000\n", "10.112.0.44:4000, 10.114.0.44:4000"},
+		{"flow list", "listen: [10.112.0.44:4000, 10.114.0.44:4000]\n", "10.112.0.44:4000, 10.114.0.44:4000"},
+		{"block list", "listen:\n  - 10.112.0.44:4000\n  - \"[fd00::1]:4000\"\n", "10.112.0.44:4000, [fd00::1]:4000"},
+		{"duplicates collapse", "listen: [10.112.0.44:4000, 10.112.0.44:4000]\n", "10.112.0.44:4000"},
+		{"empty list defaults", "listen: []\n", "127.0.0.1:4000"},
+		{"ipv4 wildcard beside an ipv6 address", "listen: [0.0.0.0:4000, \"[fd00::1]:4000\"]\n", "0.0.0.0:4000, [fd00::1]:4000"},
+	} {
+		c, err := load(t, tc.listen+base)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if c.Listen.String() != tc.want {
+			t.Errorf("%s: listen %q, want %q", tc.name, c.Listen, tc.want)
+		}
+		// Finish runs again on the agent's copy of the config.
+		if err := c.Finish(); err != nil || c.Listen.String() != tc.want {
+			t.Errorf("%s: Finish must be idempotent: %v %q", tc.name, err, c.Listen)
+		}
+	}
+	for _, tc := range []struct{ name, listen, want string }{
+		{"no port", "listen: 10.112.0.44\n", "port"},
+		{"wildcard covers an address", "listen: [0.0.0.0:4000, 10.112.0.44:4000]\n", "every interface"},
+		{"address covered by a later wildcard", "listen: [10.112.0.44:4000, 0.0.0.0:4000]\n", "every interface"},
+		{"two wildcards", "listen: [0.0.0.0:4000, \"[::]:4000\"]\n", "every interface"},
+		{"dual-stack wildcard covers an ipv6 address", "listen: [\"[::]:4000\", \"[fd00::1]:4000\"]\n", "every interface"},
+		{"bare port covers an ipv6 address", "listen: [\":4000\", \"[fd00::1]:4000\"]\n", "every interface"},
+	} {
+		_, err := load(t, tc.listen+base)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want an error mentioning %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	// Different ports on the same wildcard are fine.
+	if c, err := load(t, "listen: [0.0.0.0:4000, 0.0.0.0:4002]\n"+base); err != nil || len(c.Listen) != 2 {
+		t.Errorf("two wildcard ports: %v %q", err, c.Listen)
 	}
 }
 
@@ -161,5 +204,51 @@ func TestBalancerRole(t *testing.T) {
 	}
 	if _, err := load(t, "role: router\nlocal: {id: a, data_dir: /x}\n"); err == nil {
 		t.Fatal("unknown role must fail")
+	}
+}
+
+func TestMeshAddresses(t *testing.T) {
+	base := "local: {id: a, data_dir: /x}\nregistry: {type: memory, auto_register: false}\n"
+	c, err := load(t, base+"mesh:\n  listen: 10.112.0.1:4001, 10.114.0.1:4001\n  advertise: [10.112.0.1:4001, 10.114.0.1:4001, 10.112.0.1:4001]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mesh.Listen.String() != "10.112.0.1:4001, 10.114.0.1:4001" || c.Mesh.Advertise.String() != "10.112.0.1:4001, 10.114.0.1:4001" {
+		t.Fatalf("mesh lists: %q / %q", c.Mesh.Listen, c.Mesh.Advertise)
+	}
+	if c.Mesh.PathProbeInterval != 30*time.Second || c.Mesh.PathTimeout != 2*time.Second {
+		t.Fatalf("path defaults: %v %v", c.Mesh.PathProbeInterval, c.Mesh.PathTimeout)
+	}
+	if len(c.Warnings()) != 0 {
+		t.Fatalf("private mesh addresses must not warn: %v", c.Warnings())
+	}
+	c, err = load(t, base)
+	if err != nil || c.Mesh.Listen.String() != "0.0.0.0:4001" {
+		t.Fatalf("default mesh.listen: %q %v", c.Mesh.Listen, err)
+	}
+	if w := c.Warnings(); len(w) != 1 || !strings.Contains(w[0], "every interface") {
+		t.Fatalf("a wildcard mesh.listen warns: %v", w)
+	}
+	c, err = load(t, base+"mesh: {listen: 10.112.0.1:4001, advertise: 203.0.113.7:4001}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := c.Warnings(); len(w) != 1 || !strings.Contains(w[0], "public") {
+		t.Fatalf("a public mesh.advertise warns: %v", w)
+	}
+	c, err = load(t, base+"mesh: {listen: 10.112.0.1:4001, suspect_after: 10s}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := c.Warnings(); len(w) != 1 || !strings.Contains(w[0], "three keepalives") {
+		t.Fatalf("suspect_after under three keepalives warns: %v", w)
+	}
+	for _, bad := range []string{"mesh: {advertise: 0.0.0.0:4001}\n", "mesh: {advertise: 10.112.0.1}\n", "mesh: {listen: [0.0.0.0:4001, 10.112.0.1:4001]}\n"} {
+		if _, err := load(t, base+bad); err == nil {
+			t.Errorf("%q must fail", bad)
+		}
+	}
+	if _, err := load(t, "local: {id: a, data_dir: /x, advertise_endpoints: [http://x]}\nregistry: {type: memory}\nmesh: {advertise: [' ']}\n"); err == nil || !strings.Contains(err.Error(), "mesh.advertise") {
+		t.Fatalf("auto_register with no advertise address: %v", err)
 	}
 }

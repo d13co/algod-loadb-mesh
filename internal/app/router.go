@@ -628,7 +628,7 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, 200, map[string]any{
 			"version": r.opts.Version, "role": role, "mode": r.opts.Mode, "draining": r.draining.Load(),
 			"uptime_s": int(r.clock.Now().Sub(r.started).Seconds()), "inflight": r.inflight.Load(),
-			"best_round": best, "local": local, "upstreams": cands, "balancers": r.dir.Balancers(),
+			"best_round": best, "local": local, "upstreams": cands, "balancers": r.dir.Balancers(), "links": r.dir.LinkSnapshot(),
 		})
 	case "/loadb/peers":
 		writeJSON(w, 200, cands)

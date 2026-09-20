@@ -21,8 +21,8 @@ registry:
   cache: /var/lib/algod-loadb-mesh/registry.cache
 
 mesh:
-  listen: 0.0.0.0:4001
-  advertise: 10.112.0.9:4001          # where nodes send heartbeats; required
+  listen: [10.112.0.9:4001, 10.114.0.9:4001]      # one socket per mesh interface
+  advertise: [10.112.0.9:4001, 10.114.0.9:4001]   # where nodes send heartbeats, preferred first; required
 
 # Optional last resort when no node is eligible.
 # tiers:

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ import (
 type Config struct {
 	Role            string  `yaml:"role"` // node | balancer
 	Mode            string  `yaml:"mode"`
-	Listen          string  `yaml:"listen"`
+	Listen          Addrs   `yaml:"listen"`
 	ClientToken     string  `yaml:"client_token"`
 	ClientTokenFile string  `yaml:"client_token_file"`
 	AdminToken      string  `yaml:"admin_token"`      // required for /loadb/*; also accepted as a client token
@@ -39,6 +40,154 @@ type Config struct {
 	Tiers           Tiers   `yaml:"tiers"`
 	Routing         Routing `yaml:"routing"`
 }
+
+// Addrs is a list of addresses to listen on. YAML accepts one address, a
+// comma-separated string, or a sequence:
+//
+//	listen: 10.112.0.44:4000
+//	listen: 10.112.0.44:4000, 10.114.0.44:4000
+//	listen:
+//	  - 10.112.0.44:4000
+//	  - 10.114.0.44:4000
+type Addrs []string
+
+// UnmarshalYAML accepts a scalar or a sequence.
+func (a *Addrs) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		*a = strings.Split(s, ",")
+		return nil
+	}
+	var ss []string
+	if err := n.Decode(&ss); err != nil {
+		return err
+	}
+	*a = ss
+	return nil
+}
+
+func (a Addrs) String() string { return strings.Join(a, ", ") }
+
+// resolve trims, defaults and deduplicates the list, and rejects an address
+// that could not be bound: one without a port, or one on a port a wildcard
+// address already covers (the second bind would fail at startup).
+func (a Addrs) resolve(what, def string) (Addrs, error) {
+	out := make(Addrs, 0, len(a))
+	seen := map[string]bool{}
+	wild := map[string]string{} // port -> the wildcard address on it
+	for _, s := range a {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(s)
+		if err != nil {
+			return nil, fmt.Errorf("%s %q: %w (want host:port, [::1]:port for IPv6)", what, s, err)
+		}
+		if port == "" {
+			return nil, fmt.Errorf("%s %q: no port", what, s)
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		if wildcardHost(host) {
+			if prev, ok := wild[port]; ok {
+				return nil, fmt.Errorf("%s %s: %s already listens on port %s of every interface", what, s, prev, port)
+			}
+			wild[port] = s
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return Addrs{def}, nil
+	}
+	for _, s := range out {
+		host, port, _ := net.SplitHostPort(s)
+		if prev, ok := wild[port]; ok && !wildcardHost(host) && wildcardCovers(prev, host) {
+			return nil, fmt.Errorf("%s %s: %s already listens on port %s of every interface", what, s, prev, port)
+		}
+	}
+	return out, nil
+}
+
+// wildcardCovers reports whether binding the wildcard address wild takes
+// the port away from host: 0.0.0.0 is IPv4 only, so a specific IPv6 address
+// beside it binds fine; [::] (dual-stack) and a bare port cover both.
+func wildcardCovers(wild, host string) bool {
+	wh, _, _ := net.SplitHostPort(wild)
+	if wh != "0.0.0.0" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || ip.To4() != nil
+}
+
+// resolvePeers trims and deduplicates a list of addresses others send to: a
+// port is required and a wildcard host is rejected, since 0.0.0.0 means
+// nothing as a destination.
+func (a Addrs) resolvePeers(what string) (Addrs, error) {
+	out := make(Addrs, 0, len(a))
+	seen := map[string]bool{}
+	for _, s := range a {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(s)
+		if err != nil {
+			return nil, fmt.Errorf("%s %q: %w (want host:port, [::1]:port for IPv6)", what, s, err)
+		}
+		if port == "" {
+			return nil, fmt.Errorf("%s %q: no port", what, s)
+		}
+		if wildcardHost(host) {
+			return nil, fmt.Errorf("%s %q: peers cannot send to a wildcard address", what, s)
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// Public lists the addresses that are neither private, loopback, link-local
+// nor wildcard: ones the public internet could reach. Hostnames are not
+// judged.
+func (a Addrs) Public() Addrs {
+	var out Addrs
+	for _, s := range a {
+		host, _, err := net.SplitHostPort(s)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// Wildcard lists the addresses that mean every interface.
+func (a Addrs) Wildcard() Addrs {
+	var out Addrs
+	for _, s := range a {
+		if host, _, err := net.SplitHostPort(s); err == nil && wildcardHost(host) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// wildcardHost reports whether a listen host means every interface.
+func wildcardHost(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
 
 type Log struct {
 	Level string `yaml:"level"`
@@ -73,14 +222,16 @@ type Reg struct {
 }
 
 type Mesh struct {
-	Listen        string                  `yaml:"listen"`
-	Advertise     string                  `yaml:"advertise"`
-	SharedSecret  string                  `yaml:"shared_secret"` // key material when there is no sync key
-	SuspectAfter  time.Duration           `yaml:"suspect_after"`
-	DownAfter     time.Duration           `yaml:"down_after"`
-	ProbeInterval time.Duration           `yaml:"probe_interval"`
-	KeepAlive     time.Duration           `yaml:"keepalive"`
-	PeerOverrides map[string]PeerOverride `yaml:"peer_overrides"`
+	Listen            Addrs                   `yaml:"listen"`        // UDP sockets, one per mesh interface
+	Advertise         Addrs                   `yaml:"advertise"`     // what the registry tells peers, preferred first
+	SharedSecret      string                  `yaml:"shared_secret"` // key material when there is no sync key
+	SuspectAfter      time.Duration           `yaml:"suspect_after"`
+	DownAfter         time.Duration           `yaml:"down_after"`
+	ProbeInterval     time.Duration           `yaml:"probe_interval"`
+	KeepAlive         time.Duration           `yaml:"keepalive"`
+	PathProbeInterval time.Duration           `yaml:"path_probe_interval"` // periodic ping of every path to a peer
+	PathTimeout       time.Duration           `yaml:"path_timeout"`        // an unanswered ping is a loss after this
+	PeerOverrides     map[string]PeerOverride `yaml:"peer_overrides"`
 }
 
 type PeerOverride struct {
@@ -162,9 +313,11 @@ func (c *Config) Finish() error {
 	if c.Mode == "" {
 		c.Mode = string(domain.ModeFallback)
 	}
-	if c.Listen == "" {
-		c.Listen = "127.0.0.1:4000"
+	listen, err := c.Listen.resolve("listen", "127.0.0.1:4000")
+	if err != nil {
+		return err
 	}
+	c.Listen = listen
 	if c.ClientToken == "" && c.ClientTokenFile != "" {
 		t, err := readSecret(c.ClientTokenFile)
 		if err != nil {
@@ -278,11 +431,25 @@ func (c *Config) Finish() error {
 	if *c.Registry.AutoRegister && c.Registry.Type != "static" && !balancer && len(c.Local.AdvertiseEndpoints) == 0 {
 		return errors.New("local.advertise_endpoints is required when registry.auto_register is on")
 	}
-	if c.Mesh.Listen == "" {
-		c.Mesh.Listen = "0.0.0.0:4001"
+	// The wildcard-plus-specific rule is exactly UDP's EADDRINUSE case.
+	meshListen, err := c.Mesh.Listen.resolve("mesh.listen", "0.0.0.0:4001")
+	if err != nil {
+		return err
 	}
-	if c.Mesh.Advertise == "" && *c.Registry.AutoRegister && c.Registry.Type != "static" {
-		return errors.New("mesh.advertise (the address peers send heartbeats to) is required for auto_register")
+	c.Mesh.Listen = meshListen
+	advertise, err := c.Mesh.Advertise.resolvePeers("mesh.advertise")
+	if err != nil {
+		return err
+	}
+	c.Mesh.Advertise = advertise
+	if len(c.Mesh.Advertise) == 0 && *c.Registry.AutoRegister && c.Registry.Type != "static" {
+		return errors.New("mesh.advertise (the addresses peers send heartbeats to) is required for auto_register")
+	}
+	if c.Mesh.PathProbeInterval == 0 {
+		c.Mesh.PathProbeInterval = 30 * time.Second
+	}
+	if c.Mesh.PathTimeout == 0 {
+		c.Mesh.PathTimeout = 2 * time.Second
 	}
 	for i := range c.Tiers.External {
 		e := &c.Tiers.External[i]
@@ -329,6 +496,36 @@ func (c *Config) Finish() error {
 
 // Balancer reports whether the agent runs without a local node.
 func (c *Config) Balancer() bool { return c.Role == string(domain.RoleBalancer) }
+
+// Warnings lists deployment properties worth a look that are not errors: a
+// single-homed public host must still work, but gossip is meant to stay off
+// the public internet.
+func (c *Config) Warnings() []string {
+	var out []string
+	if w := c.Mesh.Listen.Wildcard(); len(w) > 0 {
+		out = append(out, fmt.Sprintf("mesh.listen %s answers on every interface, public ones included; list the mesh addresses to keep gossip off the internet", w))
+	}
+	if p := c.Mesh.Listen.Public(); len(p) > 0 {
+		out = append(out, fmt.Sprintf("mesh.listen %s is a public address", p))
+	}
+	if p := c.Mesh.Advertise.Public(); len(p) > 0 {
+		out = append(out, fmt.Sprintf("mesh.advertise %s is a public address: peers will send heartbeats over the internet", p))
+	}
+	// The same defaults as app.DirectoryOptions. A path is deaf once the
+	// peer has missed three keepalives, and it is the peer's silence ping at
+	// suspect_after that carries that news; sent earlier, it says nothing.
+	keepAlive, suspectAfter := c.Mesh.KeepAlive, c.Mesh.SuspectAfter
+	if keepAlive == 0 {
+		keepAlive = 5 * time.Second
+	}
+	if suspectAfter == 0 {
+		suspectAfter = 15 * time.Second
+	}
+	if suspectAfter < 3*keepAlive {
+		out = append(out, fmt.Sprintf("mesh.suspect_after %s is under three keepalives (%s): a silent peer's ping cannot mark a one-way path deaf, so that failover waits for path_probe_interval", suspectAfter, 3*keepAlive))
+	}
+	return out
+}
 
 // withScheme prefixes http:// to a non-empty URL that has no scheme.
 func withScheme(u string) string {

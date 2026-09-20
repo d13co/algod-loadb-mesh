@@ -410,3 +410,128 @@ func TestBalancerRecords(t *testing.T) {
 		t.Fatal("a role change is a static change")
 	}
 }
+
+func TestProbeCodec(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(crand.Reader)
+	pr := Probe{Type: ProbePing, NodeID: "k44", Nonce: 77, HeardMS: -1}
+	wire, err := EncodeProbe(priv, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := DecodeMessage(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !env.PubKey.Equal(pub) || env.NodeID != "k44" || env.HB != nil || env.Probe == nil || *env.Probe != pr {
+		t.Fatalf("mismatch %+v", env)
+	}
+	if _, err := EncodeProbe(priv, Probe{Type: "pang", NodeID: "k44"}); err == nil {
+		t.Fatal("bad probe type must fail to encode")
+	}
+	wire[len(wire)-1] ^= 1
+	if _, err := DecodeMessage(wire); err == nil {
+		t.Fatal("tampered probe must fail")
+	}
+}
+
+// A ping must never land as a heartbeat, and a heartbeat decodes as one.
+func TestDecodeMessageDiscriminates(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(crand.Reader)
+	ping, _ := EncodeProbe(priv, Probe{Type: ProbePing, NodeID: "k44", Nonce: 1})
+	if _, _, err := DecodeHeartbeat(ping); err == nil {
+		t.Fatal("a ping decoded as a heartbeat")
+	}
+	hb, _ := EncodeHeartbeat(priv, Heartbeat{NodeID: "k44", Seq: 3})
+	env, err := DecodeMessage(hb)
+	if err != nil || env.HB == nil || env.Probe != nil || env.HB.Seq != 3 {
+		t.Fatalf("heartbeat via DecodeMessage: %+v %v", env, err)
+	}
+}
+
+func TestAgentInfoGossipAddrs(t *testing.T) {
+	cases := []struct {
+		in   AgentInfo
+		want []string
+	}{
+		{AgentInfo{Addr: "a:1"}, []string{"a:1"}},
+		{AgentInfo{Addrs: []string{"a:1", "b:1"}}, []string{"a:1", "b:1"}},
+		{AgentInfo{Addrs: []string{"a:1", "b:1"}, Addr: "a:1"}, []string{"a:1", "b:1"}},
+		{AgentInfo{Addrs: []string{"b:1"}, Addr: "a:1"}, []string{"b:1", "a:1"}},
+		{AgentInfo{}, nil},
+	}
+	for _, c := range cases {
+		if got := c.in.GossipAddrs(); !equalStrings(got, c.want) {
+			t.Errorf("%+v: got %v want %v", c.in, got, c.want)
+		}
+	}
+	if err := (NodeRecord{ID: "lb", Role: RoleBalancer, Network: "n", Agent: AgentInfo{Addrs: []string{"a:1"}}}).Validate(); err != nil {
+		t.Fatalf("a balancer with addrs is valid: %v", err)
+	}
+}
+
+// An upgraded node that gains a second address must republish, and a legacy
+// record with the same single address must not.
+func TestStaticEqualAddrs(t *testing.T) {
+	legacy := NodeRecord{ID: "k", Network: "n", Endpoints: []string{"http://x"}, Agent: AgentInfo{Addr: "a:1"}}
+	single := legacy
+	single.Agent = AgentInfo{Addrs: []string{"a:1"}}
+	if !legacy.StaticEqual(single) {
+		t.Fatal("addr and addrs [addr] are the same record")
+	}
+	double := legacy
+	double.Agent = AgentInfo{Addrs: []string{"a:1", "b:1"}}
+	if legacy.StaticEqual(double) {
+		t.Fatal("a second address is a static change")
+	}
+	swapped := legacy
+	swapped.Agent = AgentInfo{Addrs: []string{"b:1", "a:1"}}
+	if double.StaticEqual(swapped) {
+		t.Fatal("address order is preference and must be compared")
+	}
+}
+
+func TestPathPolicyChoose(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	p := PathPolicy{ProbeInterval: 30 * time.Second}
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	check := func(name string, stats []PathStat, cur int, since time.Time, now time.Time, wantIdx int, wantWhy string) {
+		t.Helper()
+		if idx, why := p.Choose(now, stats, cur, since); idx != wantIdx || why != wantWhy {
+			t.Errorf("%s: got %d %q want %d %q", name, idx, why, wantIdx, wantWhy)
+		}
+	}
+	unmeasured := []PathStat{{Addr: "a", Alive: true}, {Addr: "b", Alive: true}}
+	check("nothing measured: registry order", unmeasured, -1, time.Time{}, t0, 0, "initial")
+	measuredSecond := []PathStat{{Addr: "a", Alive: true}, {Addr: "b", Alive: true, RTT: ms(5)}}
+	check("measured ranks first", measuredSecond, -1, time.Time{}, t0, 1, "initial")
+	check("current unmeasured is kept", measuredSecond, 0, t0, t0.Add(time.Hour), 0, "keep")
+
+	slightlyFaster := []PathStat{{Addr: "a", Alive: true, RTT: ms(10)}, {Addr: "b", Alive: true, RTT: ms(9)}}
+	check("10% faster does not win", slightlyFaster, 0, t0, t0.Add(time.Hour), 0, "keep")
+	muchFaster := []PathStat{{Addr: "a", Alive: true, RTT: ms(10)}, {Addr: "b", Alive: true, RTT: ms(3)}}
+	check("one probe is not enough", muchFaster, 0, t0, t0.Add(p.ProbeInterval), 0, "keep")
+	check("two probes agree", muchFaster, 0, t0, t0.Add(2*p.ProbeInterval), 1, "faster")
+
+	dead := []PathStat{{Addr: "a", Alive: false}, {Addr: "b", Alive: true, RTT: ms(50)}}
+	check("dead switches regardless of cooldown", dead, 0, t0, t0.Add(time.Second), 1, "dead")
+	deaf := []PathStat{{Addr: "a", Alive: false, Deaf: true}, {Addr: "b", Alive: true}}
+	check("deaf is its own reason", deaf, 0, t0, t0.Add(time.Second), 1, "deaf")
+	allDead := []PathStat{{Addr: "a"}, {Addr: "b"}}
+	check("all dead", allDead, 0, t0, t0, -1, "dead")
+	check("still none", allDead, -1, t0, t0, -1, "none")
+	check("vanished current", unmeasured[:1], 1, t0, t0, 0, "initial")
+}
+
+func TestNormalizeAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"[::ffff:10.0.0.1]:4001": "10.0.0.1:4001",
+		"10.0.0.1:4001":          "10.0.0.1:4001",
+		"[fd00::1]:4001":         "[fd00::1]:4001",
+		"mem:plain":              "mem:plain",
+		"garbage":                "garbage",
+	} {
+		if got := NormalizeAddr(in); got != want {
+			t.Errorf("%s: got %s want %s", in, got, want)
+		}
+	}
+}

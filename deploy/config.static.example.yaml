@@ -7,7 +7,7 @@ local:
   id: k44
   data_dir: /var/lib/algorand
 mesh:
-  listen: 0.0.0.0:4001
+  listen: [10.112.0.44:4001, 10.114.0.44:4001]   # one socket per mesh interface
   shared_secret: change-me-on-every-host-identically
 registry:
   type: static
@@ -16,11 +16,11 @@ registry:
       network: mainnet-v1.0
       endpoints: [http://10.112.0.45:8080]
       token: 0123456789abcdef...
-      agent: { addr: 10.112.0.45:4001 }
+      agent: { addrs: [10.112.0.45:4001, 10.114.0.45:4001] }   # every mesh address of its agent, preferred first
       tier: 1
     - id: bambi
       network: mainnet-v1.0
       endpoints: [http://10.112.0.50:8080]
       token: 0123456789abcdef...
-      agent: { addr: 10.112.0.50:4001 }
+      agent: { addr: 10.112.0.50:4001 }   # a single-homed agent: addr still works
       tier: 2
