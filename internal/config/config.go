@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,12 @@ func wildcardCovers(wild, host string) bool {
 // port is required and a wildcard host is rejected, since 0.0.0.0 means
 // nothing as a destination.
 func (a Addrs) resolvePeers(what string) (Addrs, error) {
+	return a.resolveSpecific(what, "peers cannot send to a wildcard address")
+}
+
+// resolveSpecific is resolvePeers with its own reason for refusing a
+// wildcard host.
+func (a Addrs) resolveSpecific(what, noWildcard string) (Addrs, error) {
 	out := make(Addrs, 0, len(a))
 	seen := map[string]bool{}
 	for _, s := range a {
@@ -145,7 +152,7 @@ func (a Addrs) resolvePeers(what string) (Addrs, error) {
 			return nil, fmt.Errorf("%s %q: no port", what, s)
 		}
 		if wildcardHost(host) {
-			return nil, fmt.Errorf("%s %q: peers cannot send to a wildcard address", what, s)
+			return nil, fmt.Errorf("%s %q: %s", what, s, noWildcard)
 		}
 		if seen[s] {
 			continue
@@ -189,6 +196,24 @@ func (a Addrs) Wildcard() Addrs {
 // wildcardHost reports whether a listen host means every interface.
 func wildcardHost(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
 
+// notIn lists the addresses whose host:port none of the endpoint URLs
+// carries, both sides normalised as domain.NormalizeAddr does.
+func (a Addrs) notIn(endpoints []string) Addrs {
+	have := map[string]bool{}
+	for _, e := range endpoints {
+		if u, err := url.Parse(withScheme(e)); err == nil && u.Host != "" {
+			have[domain.NormalizeAddr(u.Host)] = true
+		}
+	}
+	var out Addrs
+	for _, s := range a {
+		if !have[domain.NormalizeAddr(s)] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 type Log struct {
 	Level string `yaml:"level"`
 	JSON  bool   `yaml:"json"`
@@ -199,6 +224,7 @@ type Local struct {
 	DataDir            string                      `yaml:"data_dir"`
 	Network            string                      `yaml:"network"` // balancer: genesis id of the fleet it serves
 	AdvertiseEndpoints []string                    `yaml:"advertise_endpoints"`
+	Passthrough        Addrs                       `yaml:"passthrough"` // also bind these for algod and splice TCP through to it
 	Tier               int                         `yaml:"tier"`
 	Tags               []string                    `yaml:"tags"`
 	Overrides          *domain.CapabilityOverrides `yaml:"overrides"`
@@ -445,6 +471,28 @@ func (c *Config) Finish() error {
 	if len(c.Mesh.Advertise) == 0 && *c.Registry.AutoRegister && c.Registry.Type != "static" {
 		return errors.New("mesh.advertise (the addresses peers send heartbeats to) is required for auto_register")
 	}
+	passthrough, err := c.Local.Passthrough.resolveSpecific("local.passthrough", "a wildcard would take the port from algod")
+	if err != nil {
+		return err
+	}
+	c.Local.Passthrough = passthrough
+	if balancer && len(c.Local.Passthrough) > 0 {
+		return errors.New("local.passthrough: a balancer has no algod to pass through to")
+	}
+	// The pass-through must not fight the client listeners for a port:
+	// ports first, wildcardCovers ignores them on purpose.
+	for _, pt := range c.Local.Passthrough {
+		ph, pp, _ := net.SplitHostPort(pt)
+		for _, l := range c.Listen {
+			lh, lp, _ := net.SplitHostPort(l)
+			if lp != pp {
+				continue
+			}
+			if l == pt || (wildcardHost(lh) && wildcardCovers(l, ph)) {
+				return fmt.Errorf("local.passthrough %s: listen %s already binds it", pt, l)
+			}
+		}
+	}
 	if c.Mesh.PathProbeInterval == 0 {
 		c.Mesh.PathProbeInterval = 30 * time.Second
 	}
@@ -510,6 +558,12 @@ func (c *Config) Warnings() []string {
 	}
 	if p := c.Mesh.Advertise.Public(); len(p) > 0 {
 		out = append(out, fmt.Sprintf("mesh.advertise %s is a public address: peers will send heartbeats over the internet", p))
+	}
+	if p := c.Local.Passthrough.Public(); len(p) > 0 {
+		out = append(out, fmt.Sprintf("local.passthrough %s is a public address: it exposes algod to the internet", p))
+	}
+	if missing := c.Local.Passthrough.notIn(c.Local.AdvertiseEndpoints); len(missing) > 0 {
+		out = append(out, fmt.Sprintf("local.passthrough %s is not in local.advertise_endpoints: peers will never use it", missing))
 	}
 	// The same defaults as app.DirectoryOptions. A path is deaf once the
 	// peer has missed three keepalives, and it is the peer's silence ping at

@@ -115,6 +115,12 @@ const (
 
 func newHarness(t *testing.T, o DirectoryOptions) *harness {
 	t.Helper()
+	return newHarnessWith(t, o, nil)
+}
+
+// newHarnessWith also installs the factory the silent-peer probe dials with.
+func newHarnessWith(t *testing.T, o DirectoryOptions, clients ports.AlgodClientFactory) *harness {
+	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(crand.Reader)
 	peerPub, peerKey, _ := ed25519.GenerateKey(crand.Reader)
 	fc := clock.NewFake(time.Unix(1000, 0))
@@ -136,7 +142,7 @@ func newHarness(t *testing.T, o DirectoryOptions) *harness {
 		o.PathTimeout = time.Second
 	}
 	mon := NewMonitor(MonitorOptions{NodeID: o.LocalID, Absent: true, Network: "n"}, nil, nil, fc, logging.Nop{}, m)
-	d := NewDirectory(o, mon, g, nil, NewStatsBook(BreakerOptions{Threshold: 5, OpenFor: time.Second, Window: 10, Alpha: 0.2}, fc), fc, logging.Nop{}, m, priv)
+	d := NewDirectory(o, mon, g, clients, NewStatsBook(BreakerOptions{Threshold: 5, OpenFor: time.Second, Window: 10, Alpha: 0.2}, fc), fc, logging.Nop{}, m, priv)
 	h := &harness{t: t, d: d, g: g, fc: fc, m: m, peerKey: peerKey, peerPub: peerPub, opts: o, answers: map[string]bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -503,5 +509,84 @@ func TestBalancerAnswersPingsAndSendsNothing(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return h.g.count(pongsTo(addrA)) == 1 })
 	if l := h.link("b"); l.Path != "" {
 		t.Fatalf("still no path on a balancer: %+v", l)
+	}
+}
+
+// recordingClients records every base URL the directory dials a peer at.
+type recordingClients struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+type stubClient struct{ ports.AlgodClient }
+
+func (stubClient) Status(context.Context) (ports.Status, error) { return ports.Status{}, nil }
+
+func (f *recordingClients) NewAlgodClient(baseURL, _ string) ports.AlgodClient {
+	f.mu.Lock()
+	f.urls = append(f.urls, baseURL)
+	f.mu.Unlock()
+	return stubClient{}
+}
+
+func (f *recordingClients) last() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.urls) == 0 {
+		return ""
+	}
+	return f.urls[len(f.urls)-1]
+}
+
+// A peer's algod is reached at the advertised endpoint on the host of the
+// link's current heartbeat path, both by the proxy (Snapshot) and by the
+// silent-peer probe, so algod traffic fails over with the path.
+func TestEndpointFollowsThePath(t *testing.T) {
+	clients := &recordingClients{}
+	h := newHarnessWith(t, DirectoryOptions{ProbeInterval: 2 * time.Second}, clients)
+	epA, epB := "http://10.0.0.1:8080", "http://10.0.1.1:8080"
+	rec := h.peerRecord(addrA, addrB)
+	rec.Endpoints = []string{epB, epA} // the path decides, not the order
+	h.d.SetRecords([]domain.NodeRecord{rec})
+	h.answers[addrA], h.answers[addrB] = true, true
+	baseURL := func() string {
+		cands, _ := h.d.Snapshot()
+		for _, u := range cands {
+			if u.ID == "b" {
+				return u.BaseURL
+			}
+		}
+		t.Fatal("peer b missing from Snapshot")
+		return ""
+	}
+	if l := h.link("b"); l.Path != addrA {
+		t.Fatalf("expected the first path: %+v", l)
+	}
+	if got := baseURL(); got != epA {
+		t.Fatalf("path %s: BaseURL %q want %q", addrA, got, epA)
+	}
+	h.g.route(addrA, false)
+	for i := 0; i < 4 && h.link("b").Path != addrB; i++ {
+		h.tick()
+		h.answer(nil)
+	}
+	if l := h.link("b"); l.Path != addrB {
+		t.Fatalf("path did not move to B: %+v", l)
+	}
+	if got := baseURL(); got != epB {
+		t.Fatalf("path %s: BaseURL %q want %q", addrB, got, epB)
+	}
+	// The peer has never sent a heartbeat, so it is silent and probed every
+	// ProbeInterval; the next probe goes to the same endpoint.
+	for i := 0; i < 3; i++ {
+		h.tick()
+	}
+	if got := clients.last(); got != epB {
+		t.Fatalf("probe URL %q want %q (all: %v)", got, epB, clients.urls)
+	}
+	rec.Endpoints = []string{"mem:b"}
+	h.d.SetRecords([]domain.NodeRecord{rec})
+	if got := baseURL(); got != "mem:b" {
+		t.Fatalf("no IP to match: fall back to the first endpoint, got %q", got)
 	}
 }

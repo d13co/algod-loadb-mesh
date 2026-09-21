@@ -51,32 +51,50 @@ I/O under `d.mu`, every timestamp from `d.clock`, `KnownFields(true)` YAML.
 ### 1. Pure helpers — `internal/domain/endpoint.go` (new)
 
 ```go
-// EndpointFor picks the advertised endpoint whose host is the host of
-// pathAddr (the link's current heartbeat path), else the first one; "" when
-// there are none. Non-IP addresses (mem:x) never match and fall back.
-func EndpointFor(endpoints []string, pathAddr string) string
+// EndpointHosts returns, per advertised endpoint, its host normalised the way
+// NormalizeAddr normalises (IPv4-mapped IPv6 → IPv4); "" for an endpoint
+// whose host is not an IP (mem:x, hostnames). Computed once per record.
+func EndpointHosts(endpoints []string) []string
 
-// Covers reports whether an algod bound to algodNet (host:port verbatim from
-// algod.net) already answers on addr, so the agent must not bind it.
-func Covers(algodNet, addr string) bool
+// EndpointFor picks the endpoint whose precomputed host is the host of
+// pathAddr (the link's current heartbeat path, already normalised), else
+// endpoints[0]; "" when there are none. len(hosts) == len(endpoints).
+func EndpointFor(endpoints, hosts []string, pathAddr string) string
+
+// AlgodCovers reports whether an algod bound to algodNet (host:port verbatim
+// from algod.net) already answers on addr, so the agent must not bind it.
+func AlgodCovers(algodNet, addr string) bool
 ```
 
-`EndpointFor`: host of `NormalizeAddr(pathAddr)` (the existing IPv4-mapped
-helper, `internal/domain/path.go:85`, reused not duplicated); per endpoint
-`url.Parse` → `Hostname()` → `net.ParseIP`/`To4()` so `[::ffff:10.114.0.5]`
-matches `10.114.0.5`. `Covers`: ports must be equal, else false; `0.0.0.0`
-covers any IPv4 host; `::` and `""` cover both families (Go's
-`net.Listen("tcp", "[::]:p")` is dual-stack on Linux, and go-algorand listens
-with `net.Listen("tcp", …)`); a loopback algod covers only an equal address;
-otherwise equal normalised hosts. Same spirit as `config.wildcardCovers`
-(`config.go:120`), which stays: port handling differs.
+The parsing lives in `EndpointHosts` (`url.Parse` → `Hostname()` →
+`net.ParseIP`/`To4()`, so `[::ffff:10.114.0.5]` matches `10.114.0.5`; reuse
+the IPv4-mapped rule of `NormalizeAddr`, `internal/domain/path.go:85`), run
+once when a record is synced (§6). `EndpointFor` is `net.SplitHostPort` on
+`pathAddr` plus string compares: no `url.Parse`, no allocation, because it
+runs under `d.mu` inside `Snapshot`, which the router calls on every request
+(`router.go:208, 350, 386, 608`); today `Snapshot` parses nothing and that
+must stay true.
+
+Matching is by **host only**, on purpose: the path address carries the gossip
+port, the endpoint the REST port. Consequence: a record advertising two
+endpoints on one host (two REST ports) always gets the first one whatever the
+path. Fine for the current data model; a unit test pins it so nobody "fixes"
+it later.
+
+`AlgodCovers`: ports must be equal, else false; `0.0.0.0` covers any IPv4
+host; `::` and `""` cover both families (Go's `net.Listen("tcp", "[::]:p")`
+is dual-stack on Linux, and go-algorand listens with `net.Listen("tcp", …)`);
+a loopback algod covers only an equal address; otherwise equal normalised
+hosts. Same spirit as `config.wildcardCovers` (`config.go:120`), which stays:
+port handling differs.
 
 ### 2. NodeConfig — `internal/ports/ports.go`, `internal/adapters/datadir/datadir.go`, `internal/fakealgod`
 
 `endpointURL` rewrites a wildcard to `127.0.0.1`, so `NodeConfig.Endpoint`
 cannot tell `0.0.0.0:8080` from a loopback bind. Add one field,
 `NodeConfig.NetAddr string // algod.net verbatim (host:port)`. `datadir.Read`
-sets it from `netAddr` before `endpointURL` (`datadir.go:53-57`);
+sets it where `Endpoint` is assigned (`datadir.go:57`):
+`nc.NetAddr, nc.Endpoint = netAddr, endpointURL(netAddr)`;
 `fakealgod.ConfigReader.Read` (`fakealgod.go:369`) sets it to the host:port
 of the fake node's URL. `EndpointAddress` from `config.json` stays unused.
 
@@ -91,14 +109,22 @@ after `AdvertiseEndpoints`. In `Finish()`, next to the `mesh.advertise` block
   wildcard address", which is wrong here: give it a reason string (or a small
   wrapper) so the message reads "a wildcard would take the port from algod".
 - `balancer && len(Passthrough) > 0` → error: a balancer has no algod.
-- an entry equal to a `listen` address, or on a port a `listen` wildcard
-  covers (`wildcardCovers`) → error: the agent would fight itself for the port.
+- an entry equal to a `c.Listen` address (the TCP client listeners;
+  `mesh.listen` is UDP and cannot collide), or whose **port equals** a
+  `c.Listen` wildcard's port and whose host that wildcard covers → error: the
+  agent would fight itself for the port. `wildcardCovers` (`config.go:120`)
+  ignores the port on purpose and its callers compare ports first
+  (`config.go:108-113`); this check does the same, so `listen: 0.0.0.0:4000`
+  with `passthrough: 10.114.0.5:8080` passes.
 
 `Warnings()` (`config.go:503`) gains two: a public passthrough address
 (`Addrs.Public()`) "exposes algod to the internet"; a passthrough entry whose
 host:port is in none of `local.advertise_endpoints` (compare via `url.Parse` +
 `NormalizeAddr`) "peers will never use it". Warnings, not errors:
 `advertise_endpoints` is legitimately empty with `auto_register: false`.
+`Addrs.Public()` skips hostnames, so a pass-through given as a hostname that
+resolves publicly does not warn; accepted, the entries are mesh IPs by
+construction and autoconfig never writes a hostname.
 
 `config check` (`cmd/algod-loadb-mesh/main.go:175-183`): node branch adds a
 `passthrough %s` line via `orNone` **after** the `listen …, advertising …`
@@ -128,12 +154,23 @@ func Listen(addrs []string, target func() string, log ports.Logger, metric ports
 func (s *Server) Serve(ctx context.Context) error
 // Shutdown stops accepting, waits up to ctx for spliced connections, then closes them.
 func (s *Server) Shutdown(ctx context.Context) error
+// Close is Shutdown without a drain window, for a stop that does not drain.
+func (s *Server) Close() error
 func (s *Server) Addrs() []string // bound addresses, ln.Addr().String()
 func (s *Server) Active() int64
 
-// HostPort strips the scheme off a base URL (Monitor.State().Endpoint).
+// HostPort strips the scheme off a base URL (Monitor.State().Endpoint):
+// url.Parse(...).Host, so IPv6 brackets survive and the result is dialable
+// ("http://[::1]:8080" → "[::1]:8080", never "::1:8080").
 func HostPort(baseURL string) string
 ```
+
+`Serve` returns `nil` when ctx is cancelled, never `ctx.Err()`: it shares
+`errc` with the HTTP listeners in `Agent.Serve`, whose select
+(`agent.go:152-158`) treats any non-nil error as a failure and returns
+**before** draining, closing the listeners or closing gossip. A
+`context.Canceled` racing `case <-ctx.Done()` would skip the whole shutdown
+sequence on SIGTERM. `Serve` is never built with zero listeners (§5).
 
 Per connection: `Inc("loadb_passthrough_accepted", "addr", ln)`; `t :=
 target()`; empty → `Inc("loadb_passthrough_dial_failures", "reason",
@@ -141,15 +178,32 @@ target()`; empty → `Inc("loadb_passthrough_dial_failures", "reason",
 `reason=dial`, one debug log; then `active++` / `Gauge("loadb_passthrough_active")`,
 two `io.Copy` goroutines, each followed by `CloseWrite()` on the side it
 finished writing to (type-assert `interface{ CloseWrite() error }`, else
-`Close`); wait for both or `ctx.Done()`; deferred `Close` on both conns
-unblocks the copies on shutdown. Connections are tracked so `Shutdown` can
-close them after the drain window. Nothing logged per successful connection.
-`Accept` errors: temporary-error backoff, return when the listener is closed.
+`Close`); wait for both; on teardown `active--`, re-`Gauge`, delete from
+`conns`, `Close` both. Nothing logged per successful connection. `Accept`
+errors: `net.Error` timeouts back off (5 ms doubling to 1 s), `net.ErrClosed`
+returns `nil`, anything else returns the error.
+
+`Shutdown(ctx)`: close every listener, **wait for the accept loops to end**
+(a second `WaitGroup`, added to under the mutex so a `Serve` that starts
+after `Shutdown` does nothing), and only then wait until the connection
+`WaitGroup` drains or ctx is done. The order matters: an accept loop adds to
+the connection group, and `WaitGroup` forbids an `Add` from zero while a
+`Wait` is in progress; letting the loops end first puts every `Add` ahead of
+the `Wait`. Then `Close` every conn in `conns` (that, not the deferred
+`Close`, is what unblocks the two `io.Copy` goroutines of a connection the
+client keeps open), cancel the dial context so a splice still dialing algod
+gives up, and mark the cut so a pair tracked after it is closed on the spot
+(a splice that was dialing when the cut ran is not in `conns` yet; without
+this it outlives `Shutdown`, which then waits on it forever). Wait for the
+group, log the number cut at Info when it is non-zero, return `nil`.
+`Agent.Serve` keeps returning `srv.Shutdown`'s error as today; the
+pass-through never contributes one. Dials run under the server's own context,
+not `Serve`'s: a dial during the drain window still completes.
 
 `target` is read at accept time, so the splice follows `Monitor.State().Endpoint`
 as `configLoop` (`monitor.go:191-210`) re-reads `algod.net` every minute, and
 `endpointURL`'s wildcard→`127.0.0.1` rewrite is exactly the right dial target.
-`readConfig` runs first in `Monitor.Run` (`monitor.go:134`), so the target
+`readConfig` runs first in `Monitor.Run` (`monitor.go:135`), so the target
 exists before algod is even online.
 
 ### 5. Composition — `internal/agent/agent.go`
@@ -164,39 +218,68 @@ func filterPassthrough(pt config.Addrs, algodNet string, log ports.Logger) confi
 `Serve` (`agent.go:134`): after `listenAll(addrs)` and before any service
 starts, when `len(c.Local.Passthrough) > 0`: `nc, err :=
 a.deps.ConfigReader.Read()` (error fails `Serve`, the rule `FromConfig`
-already applies: algod must be running); `pt := filterPassthrough(...)`;
+already applies: algod must be running); `pt := filterPassthrough(...)`.
+**When `pt` is empty no `Server` is built and nothing is started**: a `Serve`
+with no listeners that returned `nil` would land on `errc`, and the select at
+`agent.go:152-158` takes a `nil` there as the signal to drain and exit, so
+the agent would die at startup with every entry redundant. Otherwise
 `ps, err := passthrough.Listen(pt, func() string { return
 passthrough.HostPort(a.Monitor.State().Endpoint) }, log, metric)` — on error
-`closeAll(lns)` and return. Run `ps.Serve(ctx)` on the same `errc` as the
-HTTP listeners; log `"passthrough"` with `addrs` and `target` once. `Agent`
-gains `passthrough *passthrough.Server`; `Router.SetPassthrough` (§6) is
-called here. Shutdown order: `Router.Draining(true)` → `srv.Shutdown(dctx)` →
-`ps.Shutdown(dctx)` (same `DrainTimeout` context) → `Gossip.Close()`. The
-decision lives in `Serve`, not `FromConfig`, so devfleet-built agents (fake
-`ConfigReader`) take the same code and `Deps.Config` is never mutated.
+return (the deferred `closeAll(lns)` closes the HTTP listeners). Run
+`ps.Serve(ctx)` on the same `errc` as the HTTP listeners, whose capacity
+becomes `2+len(lns)` (`agent.go:142` sizes it for exactly `a.Run` plus one
+per listener; one producer short and a late send blocks forever, a goroutine
+leak in tests); log `"passthrough"` with `addrs`, `skipped` and `target`
+once. `ps` stays a local of `Serve` (no new `Agent` field: only `Shutdown`
+and the status closure need it). `Router.SetPassthrough` (§6) is called
+whenever `local.passthrough` is non-empty, with an empty `Addrs` and the
+skipped entries when nothing was bound. Shutdown order: `Router.Draining(true)`
+→ `srv.Shutdown(dctx)` → `ps.Shutdown(dctx)` (same `DrainTimeout` context,
+returns nothing to propagate) → `Gossip.Close()`. On the error path (a
+listener or `Run` failed) `Serve` returns at once without draining: there
+`ps.Close()` releases the pass-through port and cuts its connections, as the
+deferred `closeAll` does for the client listeners.
+
+The decision lives in `Serve`, not `FromConfig`, because `FromConfig` wires
+and must neither bind sockets nor mutate `Deps.Config`. Note that devfleet
+calls `a.Run`, not `Serve` (`internal/devfleet/devfleet.go:185`), so nothing
+in devfleet or `test/sim` exercises the pass-through: coverage is the new
+`internal/agent` tests (including the empty-filter start) plus the manual run
+below.
 
 Runtime changes to `algod.net` (operator moves algod to a wildcard) are **not**
 acted on: the splice target follows automatically, but a port is never
-released at runtime. Documented: change `EndpointAddress` → remove the entry →
-restart the agent.
+released at runtime. The monitor cannot help either: editing `config.json`
+changes its `ModTime`, so `configLoop` (`monitor.go:204`) re-reads, but
+`endpointURL` maps `127.0.0.1:8080` and `0.0.0.0:8080` to the same
+`http://127.0.0.1:8080`, so nothing observable changes and the only symptom
+is algod's `EADDRINUSE`. Documented: change `EndpointAddress` → remove the
+entry → restart the agent.
 
 ### 6. Directory and router — `internal/app/directory.go`, `internal/app/router.go`
 
 `link` gains `func (l *link) curAddr() string` (`""` when `curPath()` is
-nil, `directory.go:313`). The two `p.rec.Endpoints[0]` sites become
-`domain.EndpointFor(p.rec.Endpoints, p.ln.curAddr())`: `Snapshot`
-(`directory.go:919-921`, under `d.mu`, pure call) and the silent-peer probe
-job (`directory.go:677-679`, collected under the lock; the
-`len(p.rec.Endpoints) > 0` guard stays). A balancer's links have `cur = -1`,
-so it keeps `Endpoints[0]`: correct, it has no path of its own.
+nil, `directory.go:313`; path addresses are already normalised). `peerState`
+gains `hosts []string`, set in `SetRecords` next to `p.rec = r`
+(`directory.go:244`) as `domain.EndpointHosts(r.Endpoints)`: parsed once per
+record, not per request. The two `p.rec.Endpoints[0]` sites become
+`domain.EndpointFor(p.rec.Endpoints, p.hosts, p.ln.curAddr())`: `Snapshot`
+(`directory.go:919-921`, under `d.mu`, string compares only) and the
+silent-peer probe job (`directory.go:677-679`, collected under the lock; the
+`len(p.rec.Endpoints) > 0` guard stays). Balancers are not in `d.peers` and
+are untouched.
 
-Router: `type PassthroughStatus struct { Addrs []string; Target string;
-Active int64 }` (json tags `addrs`, `target`, `active`) and `func (r *Router)
-SetPassthrough(f func() PassthroughStatus)` (an `atomic.Pointer`, set from
-`agent.Serve` after binding). `serveAgent`'s `/loadb/status` map
-(`router.go:632`) gains `"passthrough"` only when set, next to `"links"`.
-`app` never imports the adapter; the agent builds the closure from
-`ps.Addrs()`, the target func and `ps.Active()`.
+Router: `type PassthroughStatus struct { Addrs []string; Skipped []string;
+Target string; Active int64 }` (json tags `addrs`, `skipped,omitempty`,
+`target`, `active`) and `func (r *Router) SetPassthrough(f func()
+PassthroughStatus)` (an `atomic.Pointer`, set from `agent.Serve`).
+`serveAgent`'s `/loadb/status` map (`router.go:632`) gains `"passthrough"`
+only when set, next to `"links"`. It is set whenever `local.passthrough` is
+configured, even when every entry was skipped (`addrs: []`, `skipped` full,
+`target` still filled), so an operator can tell "configured, redundant" from
+"not configured" without the startup log. `app` never imports the adapter;
+the agent builds the closure from `ps.Addrs()`, the skipped list, the target
+func and `ps.Active()`.
 
 ### 7. autoconfig — `deploy/autoconfig.sh`
 
@@ -212,7 +295,8 @@ its own.
 | loopback (`127.*`, `::1`, `localhost`) | every mesh addr | every mesh addr (warn: "algod listens on X only; the agent passes A, B through to it") |
 | specific, in `mesh_addrs` | algod's own first, then the rest | the rest |
 | specific, not in `mesh_addrs` | algod's own first, then every mesh addr | every mesh addr (today's warning kept) |
-| public fallback, algod not wildcard | `address` at `algod_port` (unchanged) | none (today's warning stays) |
+| public fallback, algod loopback | `address` at `algod_port` (unchanged) | none (today's warning stays) |
+| public fallback, algod specific | algod's own host (unchanged; today's warning when it is not `address`) | none |
 
 Endpoints stay one `    - http://…` line each (`AdvertiseEndpoints` is
 `[]string`; `addr_list_yaml` is for `Addrs`); `passthrough` uses
@@ -221,8 +305,10 @@ Endpoints stay one `    - http://…` line each (`AdvertiseEndpoints` is
 every address.
 
 `deploy/deploy_test.go`: `autoconfigRun` (`:246`) hard-codes `algod.net` as
-`0.0.0.0:8080` (`:257`); add an `algodNet` argument (defaulted by the existing
-wrappers) so a table test can vary it.
+`0.0.0.0:8080` (`:257`). It is reached only through the two wrappers
+(`:235`, `:242`); add an `algodNet` argument to `autoconfigRun` and have both
+wrappers pass `0.0.0.0:8080`, so every existing test keeps the wildcard row
+(no pass-through), and the new table test calls `autoconfigRun` itself.
 
 ### 8. README
 
@@ -231,10 +317,19 @@ traffic keeps using the node's first endpoint"; say a peer proxies to the
 advertised endpoint on the host of its current heartbeat path, else the first;
 then the pass-through paragraph: what `local.passthrough` does, the startup
 skip and why, that algod moving to a wildcard needs the entry removed and a
-restart, the `/loadb/status` key and metrics, and that peers only use an
-address that is also in `advertise_endpoints`. The autoconfig recap
-(`README.md` ~83-92) replaces "the first one hosts the algod endpoint" with
-the table's rule in one sentence.
+restart, the `/loadb/status` key and metrics, that peers only use an
+address that is also in `advertise_endpoints`, and the exposure in one
+sentence: the splice publishes algod itself on those addresses, outside the
+agent's listener (no client token, no routing, breaker or retry, no `/loadb`
+view of those requests), so a host on the mesh holding the node's algod token
+reaches algod directly, as it already can on the address algod binds. The
+autoconfig recap (`README.md` ~83-92) replaces "the first one hosts the algod
+endpoint" with the table's rule in one sentence.
+
+`MULTI.md:22` states as settled that "proxied algod traffic keeps using
+`Endpoints[0]`, and the proxy path … are not touched"; this document reverses
+exactly that. Add one parenthetical there, "superseded by MULTI_ALGOD.md:
+proxied traffic follows the path too", rather than rewriting the old plan.
 
 ## Order of work
 
@@ -244,41 +339,79 @@ the table's rule in one sentence.
 4. `internal/adapters/passthrough` + tests.
 5. `internal/app`: `curAddr`, the two `EndpointFor` sites,
    `PassthroughStatus`/`SetPassthrough`, the status key; `directory_test.go`.
-6. `internal/agent`: `filterPassthrough`, `Serve`, tests; `main.go` `config check` line.
+6. `internal/agent`: `filterPassthrough`, `Serve`, tests; `main.go` `config check` line and its test.
 7. `deploy/autoconfig.sh`, `deploy_test.go`.
-8. `README.md`.
+8. `README.md`, the `MULTI.md:22` note.
 
 ## Tests
 
-- `internal/domain` — `TestEndpointFor`: matching host wins regardless of
-  position; IPv4-mapped path matches; no match → first; `mem:x` → first;
-  empty → `""`. `TestCovers`: same host:port → true; `0.0.0.0:8080` covers
+- `internal/domain` — `TestEndpointHosts`: IPv4, bracketed IPv6,
+  IPv4-mapped → IPv4, `mem:x` and hostnames → `""`. `TestEndpointFor`:
+  matching host wins regardless of position; IPv4-mapped path matches; no
+  match → first; `mem:x` → first; empty → `""`; two endpoints on the same
+  host with the path on that host → the first (§1, host-only matching).
+  `TestAlgodCovers`: same host:port → true; `0.0.0.0:8080` covers
   `10.114.0.5:8080`; `[::]:8080` covers `10.114.0.5:8080` and
   `[fd00::5]:8080`; `0.0.0.0:8080` does not cover `[fd00::5]:8080`; different
   port → false; `127.0.0.1:8080` covers only itself;
   `[::ffff:10.114.0.5]:8080` equals `10.114.0.5:8080`.
 - `internal/config/config_test.go` — `TestPassthrough`: dedupe and trim;
   `0.0.0.0:8080` and a port-less entry fail; a balancer with it fails; an
-  entry colliding with `listen` fails; a public entry warns; an entry absent
-  from `advertise_endpoints` warns; one present in both does not.
-- `internal/adapters/passthrough/passthrough_test.go` — `TestSplice`: an
-  `httptest.Server` on 127.0.0.1, pass-through on `127.0.0.2:0` (`t.Skipf`
-  if unbindable, as `gossipudp/udp_test.go:32`), `http.Get` through it
-  returns the body and `loadb_passthrough_accepted` is 1. `TestHalfClose`:
-  against a raw TCP echo server, the client `CloseWrite`s and still reads
-  everything back. `TestDialFailure`: closed target port → client sees EOF,
+  entry equal to a `listen` address fails; `listen: 0.0.0.0:8080` with
+  `passthrough: 10.114.0.5:8080` fails and `listen: 0.0.0.0:4000` with the
+  same entry passes (port first, then `wildcardCovers`); a public entry
+  warns; an entry absent from `advertise_endpoints` warns; one present in
+  both does not.
+- `internal/adapters/passthrough/passthrough_test.go` — a helper first
+  binds `127.0.0.2:0` bare and `t.Skipf`s only when *that* fails (as
+  `gossipudp/udp_test.go:30-33`), so a `Listen` failure for any other reason
+  is a real failure. `TestSplice`: an `httptest.Server` on 127.0.0.1,
+  pass-through on `127.0.0.2:0`, `http.Get` through it returns the body and
+  `loadb_passthrough_accepted` is 1. `TestHalfClose`: against a raw TCP echo
+  server, the client `CloseWrite`s and still reads everything back.
+  `TestDialFailure`: closed target port → client sees EOF,
   `dial_failures{reason="dial"}`; `target()` returning `""` →
-  `reason="no_target"`. `TestShutdownClosesIdleConnections`.
+  `reason="no_target"`. `TestTargetFollows`: the target func flips to a
+  second server between two connections and the second one reaches it.
+  `TestServeReturnsNilOnCancel`. `TestShutdownCutsOpenConnections`: a
+  client that never closes is cut when the drain ctx expires and the `active`
+  gauge returns to 0. `TestShutdownWaitsForAcceptLoops`: a scripted
+  `net.Listener` (an unexported `newServer` takes listeners already bound)
+  hands out one more connection after its `Close`, as an `Accept` that
+  returned just before the listener closed; with a live connection ending
+  during the wait, the wrong order is a `-race` report and the late
+  connection outlives `Shutdown`. `TestShutdownWhileAccepting`: four dialers
+  hammer the listener while `Close` runs, and every connection the server
+  echoed on is cut afterwards (one the kernel queued but the server never
+  accepted is not the server's to cut). `TestCloseThenServe`.
+  `TestHostPort` with `http://[::1]:8080`.
   `TestListenClosesOnFailure` (mirrors `agent_test.go` `TestListenAll`).
+  This package has real goroutines and a shared `conns` map: it is in the
+  `-race` run, not just `go test`.
 - `internal/app/directory_test.go` — `TestEndpointFollowsThePath`: record
   with `Addrs [addrA, addrB]` and endpoints on both hosts; `Snapshot` reports
   the first endpoint, then `addrA` is made unroutable, the fake clock advances
-  until the switch, and `BaseURL` is the `addrB` host's endpoint. A recording
-  `AlgodClientFactory` in the harness (today it passes `nil`) asserts the
-  silent-peer probe hits the same URL.
+  until the switch, and `BaseURL` is the `addrB` host's endpoint. The probe
+  half needs a recording `AlgodClientFactory` in the harness first:
+  `probeSilentPeers` calls `d.clients.NewAlgodClient` unconditionally
+  (`directory.go:687`) and the harness passes `nil` (`directory_test.go:139`),
+  so the probe path cannot run at all until that factory exists. With it, the
+  test asserts the probe hits the same URL as `Snapshot`.
 - `internal/agent/agent_test.go` — `TestFilterPassthrough`: covered entries
   dropped (wildcard, equal, `[::]`), uncovered kept, order preserved, one
-  warning per drop.
+  warning per drop. `TestServeSkipsCoveredPassthrough`: a fake
+  `ConfigReader` with `NetAddr` `0.0.0.0:8080` and `passthrough:
+  [127.0.0.2:8080]` → `Serve` is still running after the services have
+  started, `/loadb/status` shows `passthrough.addrs` empty and `skipped`
+  full, and cancelling returns `nil`; this is the regression the design most
+  needs. `TestServePassthrough`: `NetAddr` set to a loopback `httptest`
+  server, one pass-through entry on `127.0.0.2` at a free port → a GET through
+  it returns the body, then cancel returns `nil` and the port is free again.
+- `cmd/algod-loadb-mesh` — pull the node-branch summary of `config check`
+  into `func checkSummary(c config.Config) string` and add `main_test.go`:
+  the output's `listen` line, fed through the exact `sed` expression from
+  `deploy/setup.sh:136`, yields the first client address, and a
+  `passthrough` line follows it. The design depends on that line shape.
 - `deploy/deploy_test.go` — `TestAutoconfigPassthrough`, table over
   `algod.net` = `0.0.0.0:8080`, `[::]:8080`, `127.0.0.1:8080`,
   `10.114.0.44:8080`, `10.9.9.9:8080`, `10.112.0.44:8081` with the two-WG
@@ -322,7 +455,15 @@ the table's rule in one sentence.
   to `0.0.0.0:8080`, algod fails to bind. The startup skip catches it at agent
   start; the runtime case is documented (remove the entry, restart the
   agent). Not handled at runtime on purpose: it would put the pass-through
-  under the monitor's config loop for a change the operator makes by hand.
+  under the monitor's config loop for a change the operator makes by hand,
+  and that loop cannot even see the move (§5: same `Endpoint` after
+  `endpointURL`).
+- **Exposure.** Every pass-through address is algod itself, reachable by
+  anyone on that mesh net who holds the node's algod token, with none of the
+  agent's client-token check, routing or observability. That is already true
+  of the address algod binds; the splice adds interfaces, not a new class of
+  access. The README says so (§8), `Warnings()` flags public addresses, and
+  autoconfig never writes one.
 - **`NodeConfig` grows by one field** (`NetAddr`); `Endpoint`'s wildcard
   rewrite stays, it is what every dial wants.
 - **Rejected**: an HTTP reverse proxy (token handling, header rewriting, for

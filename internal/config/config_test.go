@@ -252,3 +252,43 @@ func TestMeshAddresses(t *testing.T) {
 		t.Fatalf("auto_register with no advertise address: %v", err)
 	}
 }
+
+func TestPassthrough(t *testing.T) {
+	base := "registry: {type: memory, auto_register: false}\nmesh: {listen: 10.112.0.1:4001}\n"
+	adv := "advertise_endpoints: [http://10.112.0.1:8080, 10.114.0.1:8080]"
+	c, err := load(t, base+"local: {id: a, data_dir: /x, "+adv+", passthrough: [' 10.114.0.1:8080 ', 10.114.0.1:8080]}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Local.Passthrough.String() != "10.114.0.1:8080" {
+		t.Fatalf("passthrough: %q", c.Local.Passthrough)
+	}
+	if w := c.Warnings(); len(w) != 0 {
+		t.Fatalf("a private entry that is advertised must not warn: %v", w)
+	}
+	for _, bad := range []string{
+		"local: {id: a, data_dir: /x, passthrough: 0.0.0.0:8080}\n",
+		"local: {id: a, data_dir: /x, passthrough: 10.114.0.1}\n",
+		"role: balancer\nlocal: {id: a, network: n, passthrough: 10.114.0.1:8080}\n",
+		"listen: 10.114.0.1:8080\nlocal: {id: a, data_dir: /x, passthrough: 10.114.0.1:8080}\n",
+		"listen: 0.0.0.0:8080\nlocal: {id: a, data_dir: /x, passthrough: 10.114.0.1:8080}\n",
+	} {
+		if _, err := load(t, base+bad); err == nil {
+			t.Errorf("%q must fail", bad)
+		}
+	}
+	if _, err := load(t, base+"listen: 0.0.0.0:4000\nlocal: {id: a, data_dir: /x, passthrough: 10.114.0.1:8080}\n"); err != nil {
+		t.Fatalf("a wildcard listen on another port must pass: %v", err)
+	}
+	if _, err := load(t, base+"local: {id: a, data_dir: /x, passthrough: 0.0.0.0:8080}\n"); err == nil || !strings.Contains(err.Error(), "take the port from algod") {
+		t.Fatalf("wildcard reason: %v", err)
+	}
+	c, err = load(t, base+"local: {id: a, data_dir: /x, advertise_endpoints: [http://203.0.113.7:8080], passthrough: [203.0.113.7:8080, 10.114.0.1:8080]}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := c.Warnings()
+	if len(w) != 2 || !strings.Contains(w[0], "203.0.113.7:8080 is a public address") || !strings.Contains(w[1], "10.114.0.1:8080 is not in local.advertise_endpoints") {
+		t.Fatalf("warnings: %v", w)
+	}
+}

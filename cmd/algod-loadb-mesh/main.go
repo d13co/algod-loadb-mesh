@@ -164,6 +164,17 @@ func configCheckCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("%s: ok\n%s", *path, checkSummary(c))
+	for _, w := range c.Warnings() {
+		fmt.Printf("warning: %s\n", w)
+	}
+	return nil
+}
+
+// checkSummary is what `config check` prints after the ok line. setup.sh
+// takes the first client address off the "listen" line, so that line keeps
+// its shape: "listen <first>[, <rest>]...".
+func checkSummary(c config.Config) string {
 	reg := c.Registry.Type
 	if reg == "algorand" {
 		reg = fmt.Sprintf("%s app %d", reg, c.Registry.AppID)
@@ -172,19 +183,13 @@ func configCheckCmd(args []string) error {
 	if c.ClientToken != "" || c.AdminToken != "" {
 		tokens = fmt.Sprintf("client token %s, admin token %s", have(c.ClientToken), have(c.AdminToken))
 	}
-	// setup.sh takes the first client address off the "listen" line.
 	if c.Balancer() {
-		fmt.Printf("%s: ok\nid %s, role balancer, mode %s, network %s\nlisten %s\ngossip on %s, heartbeats to %s\nregistry %s via %s, %s\n",
-			*path, c.Local.ID, c.Mode, c.Local.Network, c.Listen, c.Mesh.Listen, orNone(c.Mesh.Advertise), reg, c.Registry.AlgodURL, tokens)
-	} else {
-		fmt.Printf("%s: ok\nid %s, mode %s, data dir %s\nlisten %s, advertising %s\ngossip on %s, heartbeats to %s\nregistry %s, %s\n",
-			*path, c.Local.ID, c.Mode, c.Local.DataDir, c.Listen, strings.Join(c.Local.AdvertiseEndpoints, ", "),
-			c.Mesh.Listen, orNone(c.Mesh.Advertise), reg, tokens)
+		return fmt.Sprintf("id %s, role balancer, mode %s, network %s\nlisten %s\ngossip on %s, heartbeats to %s\nregistry %s via %s, %s\n",
+			c.Local.ID, c.Mode, c.Local.Network, c.Listen, c.Mesh.Listen, orNone(c.Mesh.Advertise), reg, c.Registry.AlgodURL, tokens)
 	}
-	for _, w := range c.Warnings() {
-		fmt.Printf("warning: %s\n", w)
-	}
-	return nil
+	return fmt.Sprintf("id %s, mode %s, data dir %s\nlisten %s, advertising %s\npassthrough %s\ngossip on %s, heartbeats to %s\nregistry %s, %s\n",
+		c.Local.ID, c.Mode, c.Local.DataDir, c.Listen, strings.Join(c.Local.AdvertiseEndpoints, ", "), orNone(c.Local.Passthrough),
+		c.Mesh.Listen, orNone(c.Mesh.Advertise), reg, tokens)
 }
 
 func orNone(a config.Addrs) string {

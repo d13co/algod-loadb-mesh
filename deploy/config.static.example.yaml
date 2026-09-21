@@ -6,6 +6,7 @@ client_token_file: /etc/algod-loadb-mesh/client.token
 local:
   id: k44
   data_dir: /var/lib/algorand
+  # passthrough: [10.114.0.44:8080]   # also bind these for algod and pass TCP straight through to it (algod binds one address; peers on the other mesh net use this); skipped with a warning when algod already listens there
 mesh:
   listen: [10.112.0.44:4001, 10.114.0.44:4001]   # one socket per mesh interface
   shared_secret: change-me-on-every-host-identically

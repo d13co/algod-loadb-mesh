@@ -21,7 +21,8 @@ once, so no mixed-version wire compatibility is required (cheap read-tolerance
 of old records is kept anyway); the chosen path carries **heartbeats only** —
 proxied algod traffic keeps using `Endpoints[0]`, and the proxy path, the
 selector and `domain.Upstream` are not touched (the router only gains a `links`
-key in `/loadb/status`, §7); it lands as **one change**.
+key in `/loadb/status`, §7) — superseded by MULTI_ALGOD.md: proxied traffic
+follows the path too; it lands as **one change**.
 
 Two invariants to protect, both verified as real constraints: `recordVersion`
 stays 1 (an older binary hard-errors and `Registry.List` logs a warning and

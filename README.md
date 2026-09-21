@@ -85,8 +85,10 @@ Add `--setup` to the install command to do both at once
    when there are several) and the addresses from every 10.112.* and 10.114.*
    interface, else a public one. Clients and gossip are served on all of
    them, peers are told all of them (`mesh.listen` and `mesh.advertise` are
-   the same list) and the first one hosts the algod endpoint; with no such
-   address everything is served on all interfaces. It also asks whether to
+   the same list) and algod is advertised on all of them too: the address it
+   binds (from `algod.net`) as is, the rest bound by the agent and passed
+   through to it (`local.passthrough`); with no such address everything is
+   served on all interfaces and algod is never passed through. It also asks whether to
    add Nodely as the last-resort fallback (`--nodely`/`--no-nodely` to skip
    the question; `--address`, `--listen`, `--client-port` and the rest of
    `-h` override the rest):
@@ -156,11 +158,33 @@ lowest measured RTT, re-checked by a ping on every address each
 go unanswered (three `mesh.path_timeout`s, 2s each), when the transport has
 no route to it, or when the peer's probes report that it has stopped hearing
 our heartbeats — the asymmetric case, where only the receiving side can see
-the break. Proxied algod traffic keeps using the node's first endpoint.
-`/loadb/status` lists every link under `links` with the chosen path and each
-candidate's RTT, and the metrics `loadb_path_rtt_ms`, `loadb_path_losses`
-and `loadb_path_switches{reason}` follow it. `config check` warns when a
-mesh address is public or a wildcard.
+the break. Proxied algod traffic follows the path: a peer sends to the
+advertised endpoint on the host of its current heartbeat path, else the
+first one. `/loadb/status` lists every link under `links` with the chosen
+path and each candidate's RTT, and the metrics `loadb_path_rtt_ms`,
+`loadb_path_losses` and `loadb_path_switches{reason}` follow it. `config
+check` warns when a mesh address is public or a wildcard.
+
+algod itself binds one address (`EndpointAddress`), so a node whose algod
+listens on 10.112.0.5:8080 would be unreachable for a peer that only shares
+the 10.114 net. `local.passthrough` lists the other `host:port`s to serve
+algod on: the agent binds each and splices every TCP connection straight
+through to the address in `algod.net`, tokens, long-polls and streams
+untouched. At start it reads `algod.net` and skips, with a warning, every
+entry algod already covers (same address, or a wildcard bind on that port),
+so it never takes a port from algod; the skipped entries show under
+`passthrough.skipped` in `/loadb/status` next to the bound `addrs`, the
+`target` and the `active` connections, and the metrics
+`loadb_passthrough_accepted{addr}`, `loadb_passthrough_dial_failures{reason}`
+and `loadb_passthrough_active` count them. Ports are only released at
+restart: to move algod itself onto a wildcard, remove the entry first and
+restart the agent, or algod fails to bind. A pass-through is only used by
+peers when the same address is in `local.advertise_endpoints` (`config
+check` warns otherwise), and it is algod itself on that address, outside the
+agent's listener: no client token, no routing, no `/loadb` view of those
+requests, so anyone on that mesh net holding the node's algod token reaches
+algod directly, as they already can on the address algod binds. `config
+check` warns when a pass-through address is public.
 
 ## Layout
 

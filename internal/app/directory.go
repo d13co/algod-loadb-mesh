@@ -89,6 +89,7 @@ type peerState struct {
 	probeRd uint64
 	judge   domain.SyncJudge
 	ln      *link
+	hosts   []string // domain.EndpointHosts(rec.Endpoints), parsed once per record
 }
 
 // pathState is one address of a link and what we have measured about it.
@@ -240,7 +241,7 @@ func (d *Directory) SetRecords(recs []domain.NodeRecord) {
 			p = &peerState{judge: d.opts.judge()}
 			d.peers[r.ID] = p
 		}
-		p.rec = r
+		p.rec, p.hosts = r, domain.EndpointHosts(r.Endpoints)
 		p.ln = syncLink(p.ln, r)
 		switched = d.chooseLocked(p.ln, now) || switched
 	}
@@ -315,6 +316,14 @@ func (l *link) curPath() *pathState {
 		return nil
 	}
 	return l.paths[l.cur]
+}
+
+// curAddr is the address of the path carrying heartbeats, "" when none.
+func (l *link) curAddr() string {
+	if p := l.curPath(); p != nil {
+		return p.addr
+	}
+	return ""
 }
 
 // chooseLocked runs the policy on a link and reports whether the chosen path
@@ -676,7 +685,7 @@ func (d *Directory) probeSilentPeers(ctx context.Context) {
 		}
 		if silent && now.Sub(p.probeAt) >= d.opts.ProbeInterval && len(p.rec.Endpoints) > 0 {
 			p.probeAt = now
-			jobs = append(jobs, job{id, p.rec.Endpoints[0], p.rec.Token})
+			jobs = append(jobs, job{id, domain.EndpointFor(p.rec.Endpoints, p.hosts, p.ln.curAddr()), p.rec.Token})
 		}
 	}
 	d.mu.Unlock()
@@ -916,9 +925,9 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 		p := d.peers[id]
 		u := domain.Upstream{ID: id, Kind: domain.KindPeer, Tier: p.rec.Tier, Token: p.rec.Token,
 			Stats: d.stats.Snapshot(id), Health: domain.HealthOffline}
-		if len(p.rec.Endpoints) > 0 {
-			u.BaseURL = p.rec.Endpoints[0]
-		}
+		// The endpoint on the host of the current heartbeat path, so algod
+		// traffic fails over with it; else the first.
+		u.BaseURL = domain.EndpointFor(p.rec.Endpoints, p.hosts, p.ln.curAddr())
 		fresh := p.hasHB && now.Sub(p.seenAt) <= d.opts.SuspectAfter
 		switch {
 		case fresh:

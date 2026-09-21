@@ -183,8 +183,43 @@ func TestAutoconfigListensOnEveryMeshAddress(t *testing.T) {
 	if c.Mesh.Advertise.String() != want || c.Mesh.Listen.String() != want {
 		t.Errorf("mesh listen %q, advertise %q", c.Mesh.Listen, c.Mesh.Advertise)
 	}
-	if c.Local.AdvertiseEndpoints[0] != "http://10.112.0.44:8080" {
+	if got := strings.Join(c.Local.AdvertiseEndpoints, ", "); got != "http://10.112.0.44:8080, http://10.114.0.44:8080" {
 		t.Errorf("endpoints = %v", c.Local.AdvertiseEndpoints)
+	}
+	if len(c.Local.Passthrough) != 0 {
+		t.Errorf("a wildcard algod needs no pass-through: %v", c.Local.Passthrough)
+	}
+}
+
+// algod is advertised on every mesh address: the one it binds as is, the
+// rest bound by the agent and passed through. Never on a public address.
+func TestAutoconfigPassthrough(t *testing.T) {
+	cases := []struct{ algodNet, endpoints, passthrough string }{
+		{"0.0.0.0:8080", "http://10.112.0.44:8080, http://10.114.0.44:8080", ""},
+		{"[::]:8080", "http://10.112.0.44:8080, http://10.114.0.44:8080", ""},
+		{"127.0.0.1:8080", "http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"10.114.0.44:8080", "http://10.114.0.44:8080, http://10.112.0.44:8080", "10.112.0.44:8080"},
+		{"10.9.9.9:8080", "http://10.9.9.9:8080, http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"10.112.0.44:8081", "http://10.112.0.44:8081, http://10.114.0.44:8081", "10.114.0.44:8081"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		env := fakeIP(t, dir,
+			"2: wg0    inet 10.112.0.44/16 brd 10.112.255.255 scope global wg0",
+			"3: wg1    inet 10.114.0.44/16 brd 10.114.255.255 scope global wg1",
+			"4: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0")
+		c := autoconfigRun(t, dir, "{}", tc.algodNet, "", env, "--no-nodely", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+		if got := strings.Join(c.Local.AdvertiseEndpoints, ", "); got != tc.endpoints {
+			t.Errorf("algod.net %s: endpoints %q want %q", tc.algodNet, got, tc.endpoints)
+		}
+		if got := c.Local.Passthrough.String(); got != tc.passthrough {
+			t.Errorf("algod.net %s: passthrough %q want %q", tc.algodNet, got, tc.passthrough)
+		}
+		for _, w := range c.Warnings() {
+			if strings.Contains(w, "passthrough") {
+				t.Errorf("algod.net %s: %s", tc.algodNet, w)
+			}
+		}
 	}
 }
 
@@ -199,6 +234,21 @@ func TestAutoconfigPublicFallback(t *testing.T) {
 	}
 	if c.Listen.String() != "0.0.0.0:4000" {
 		t.Errorf("listen = %q", c.Listen)
+	}
+	if strings.Join(c.Local.AdvertiseEndpoints, ", ") != "http://203.0.113.7:8080" || len(c.Local.Passthrough) != 0 {
+		t.Errorf("algod is never passed through on a public address: %v %v", c.Local.AdvertiseEndpoints, c.Local.Passthrough)
+	}
+}
+
+// In the public fallback an algod bound to a specific address is advertised
+// there, as before: the public address would point peers at a port algod
+// does not bind, and the agent never passes algod through on a public address.
+func TestAutoconfigPublicFallbackSpecificAlgod(t *testing.T) {
+	dir := t.TempDir()
+	env := fakeIP(t, dir, "4: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0")
+	c := autoconfigRun(t, dir, "{}", "10.9.9.9:8080", "", env, "--no-nodely", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if strings.Join(c.Local.AdvertiseEndpoints, ", ") != "http://10.9.9.9:8080" || len(c.Local.Passthrough) != 0 {
+		t.Errorf("advertise %v passthrough %v", c.Local.AdvertiseEndpoints, c.Local.Passthrough)
 	}
 }
 
@@ -232,18 +282,19 @@ func autoconfig(t *testing.T, dir, stdin string, args ...string) config.Config {
 // Nodely answer, so the caller can pass one.
 func autoconfigGenesis(t *testing.T, dir, genesis, stdin string, args ...string) config.Config {
 	t.Helper()
-	return autoconfigRun(t, dir, genesis, stdin, nil, append([]string{"--address", "10.112.0.44"}, args...)...)
+	return autoconfigRun(t, dir, genesis, "0.0.0.0:8080", stdin, nil, append([]string{"--address", "10.112.0.44"}, args...)...)
 }
 
 // autoconfigEnv is autoconfig with extra environment, and without the address
 // override, for the detection this host would do itself.
 func autoconfigEnv(t *testing.T, dir, stdin string, env []string, args ...string) config.Config {
 	t.Helper()
-	return autoconfigRun(t, dir, "{}", stdin, env, append([]string{"--no-nodely"}, args...)...)
+	return autoconfigRun(t, dir, "{}", "0.0.0.0:8080", stdin, env, append([]string{"--no-nodely"}, args...)...)
 }
 
-// autoconfigRun runs autoconfig.sh with exactly the arguments given.
-func autoconfigRun(t *testing.T, dir, genesis, stdin string, env []string, args ...string) config.Config {
+// autoconfigRun runs autoconfig.sh with exactly the arguments given, on a
+// data dir whose algod.net says algodNet.
+func autoconfigRun(t *testing.T, dir, genesis, algodNet, stdin string, env []string, args ...string) config.Config {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
@@ -254,7 +305,7 @@ func autoconfigRun(t *testing.T, dir, genesis, stdin string, env []string, args 
 	}
 	for name, content := range map[string]string{
 		"data/genesis.json": genesis,
-		"data/algod.net":    "0.0.0.0:8080",
+		"data/algod.net":    algodNet,
 		"client.token":      "t",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/d13co/algod-loadb-mesh/internal/adapters/passthrough"
 	"github.com/d13co/algod-loadb-mesh/internal/app"
 	"github.com/d13co/algod-loadb-mesh/internal/config"
 	"github.com/d13co/algod-loadb-mesh/internal/domain"
@@ -129,8 +130,9 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // Serve runs the agent and its HTTP listeners until ctx is done, then drains.
-// One handler is served on every config.Listen address; binding comes first,
-// so a bad address fails before any service starts.
+// One handler is served on every config.Listen address, and algod is passed
+// through on every local.passthrough address it does not bind itself;
+// binding comes first, so a bad address fails before any service starts.
 func (a *Agent) Serve(ctx context.Context) error {
 	addrs := a.deps.Config.Listen
 	lns, err := listenAll(addrs)
@@ -138,8 +140,13 @@ func (a *Agent) Serve(ctx context.Context) error {
 		return err
 	}
 	defer closeAll(lns)
+	ps, err := a.passthrough()
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{Handler: a.Handler, ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 1+len(lns))
+	// One slot per producer: Run, each listener, the pass-through.
+	errc := make(chan error, 2+len(lns))
 	go func() { errc <- a.Run(ctx) }()
 	a.deps.Log.Info("listening", "addr", addrs.String(), "role", a.deps.Config.Role, "mode", a.deps.Config.Mode, "id", a.deps.Config.Local.ID)
 	for _, ln := range lns {
@@ -149,10 +156,19 @@ func (a *Agent) Serve(ctx context.Context) error {
 			}
 		}()
 	}
+	if ps != nil {
+		// Returns nil on cancellation; anything else is a failed Accept.
+		go func() { errc <- ps.Serve(ctx) }()
+	}
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
 		if err != nil {
+			// Stopping without a drain: the deferred closeAll takes the
+			// client listeners, the pass-through must let go of its port too.
+			if ps != nil {
+				_ = ps.Close()
+			}
 			return err
 		}
 	}
@@ -162,8 +178,60 @@ func (a *Agent) Serve(ctx context.Context) error {
 	defer cancel()
 	// Shutdown closes every listener Serve was given.
 	err = srv.Shutdown(dctx)
+	if ps != nil {
+		_ = ps.Shutdown(dctx) // always nil; cut connections are logged
+	}
 	_ = a.deps.Gossip.Close()
 	return err
+}
+
+// passthrough binds local.passthrough minus what algod already covers, judged
+// from algod.net now, and publishes the outcome in /loadb/status. It returns
+// nil when nothing is configured or nothing is left to bind: a Server with no
+// listeners would return from Serve at once and stop the agent.
+func (a *Agent) passthrough() (*passthrough.Server, error) {
+	pt := a.deps.Config.Local.Passthrough
+	if len(pt) == 0 {
+		return nil, nil
+	}
+	nc, err := a.deps.ConfigReader.Read()
+	if err != nil {
+		return nil, err
+	}
+	keep, skipped := filterPassthrough(pt, nc.NetAddr, a.deps.Log)
+	// Read per connection, so the splice follows algod.net as the monitor
+	// re-reads it; the wildcard→loopback rewrite is the right dial target.
+	target := func() string { return passthrough.HostPort(a.Monitor.State().Endpoint) }
+	var ps *passthrough.Server
+	if len(keep) > 0 {
+		if ps, err = passthrough.Listen(keep, target, a.deps.Log, a.deps.Metrics); err != nil {
+			return nil, err
+		}
+	}
+	a.Router.SetPassthrough(func() app.PassthroughStatus {
+		st := app.PassthroughStatus{Addrs: []string{}, Skipped: skipped, Target: target()}
+		if ps != nil {
+			st.Addrs, st.Active = ps.Addrs(), ps.Active()
+		}
+		return st
+	})
+	a.deps.Log.Info("passthrough", "addrs", keep.String(), "skipped", skipped.String(), "target", passthrough.HostPort(nc.Endpoint))
+	return ps, nil
+}
+
+// filterPassthrough splits the entries into those to bind and those algod
+// already binds, warning about each of the latter: bound anyway, they would
+// take the port from an algod that restarts while the agent holds it.
+func filterPassthrough(pt config.Addrs, algodNet string, log ports.Logger) (keep, skipped config.Addrs) {
+	for _, addr := range pt {
+		if domain.AlgodCovers(algodNet, addr) {
+			log.Warn("passthrough address skipped: algod already listens there", "addr", addr, "algod", algodNet)
+			skipped = append(skipped, addr)
+			continue
+		}
+		keep = append(keep, addr)
+	}
+	return keep, skipped
 }
 
 // listenAll binds every address, closing what it opened if one fails.

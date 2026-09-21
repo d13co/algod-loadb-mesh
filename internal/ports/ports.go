@@ -47,7 +47,8 @@ type AlgodClientFactory interface {
 
 // NodeConfig is what the local data directory reveals about the node.
 type NodeConfig struct {
-	Endpoint                string // http://host:port from algod.net
+	Endpoint                string // http://host:port from algod.net, wildcard rewritten to loopback
+	NetAddr                 string // algod.net verbatim (host:port), to tell a wildcard bind apart
 	Token                   string
 	GenesisID               string
 	Archival                bool

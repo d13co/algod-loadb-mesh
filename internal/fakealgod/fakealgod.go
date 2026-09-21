@@ -367,7 +367,7 @@ type ConfigReader struct {
 
 // Read implements ports.NodeConfigReader.
 func (c ConfigReader) Read() (ports.NodeConfig, error) {
-	return ports.NodeConfig{Endpoint: c.Node.URL(), Token: c.Node.Token(), GenesisID: c.Node.opts.GenesisID,
+	return ports.NodeConfig{Endpoint: c.Node.URL(), NetAddr: strings.TrimPrefix(c.Node.URL(), "http://"), Token: c.Node.Token(), GenesisID: c.Node.opts.GenesisID,
 		Archival: c.Archival, MaxBlockHistoryLookback: c.Lookback, EnableDeveloperAPI: c.DeveloperAPI,
 		EnableFollowMode: c.FollowMode, MaxAcctLookback: 8, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
 }

@@ -276,17 +276,41 @@ if [ ${#listen_addrs[@]} = 0 ]; then
 	warn "no 10.112.* or 10.114.* address; serving clients on every interface (${listen_addrs[0]})"
 fi
 
-# algod bound to one specific address is only reachable there.
-endpoint_host=$address
+# algod binds one address. It is advertised on every mesh address anyway: the
+# one it binds as is, the others bound by the agent and passed through to it
+# (local.passthrough; the agent skips an entry algod turns out to cover).
+# mesh_hosts is where the agent may publish algod: never a public address.
+mesh_hosts=()
+[ "$mesh_bind" = 1 ] && mesh_hosts=("${mesh_addrs[@]}")
+endpoint_hosts=() passthrough_hosts=()
 case "$algod_host" in
-"" | 0.0.0.0 | :: | "*") ;;
+"" | 0.0.0.0 | :: | "*")
+	endpoint_hosts=("${mesh_hosts[@]}")
+	[ ${#endpoint_hosts[@]} -gt 0 ] || endpoint_hosts=("$address")
+	;;
 127.* | ::1 | localhost)
-	warn "algod listens on $algod_listen only; other agents cannot reach it at $address:$algod_port (set EndpointAddress in $data_dir/config.json)"
+	if [ ${#mesh_hosts[@]} -gt 0 ]; then
+		endpoint_hosts=("${mesh_hosts[@]}")
+		passthrough_hosts=("${mesh_hosts[@]}")
+		warn "algod listens on $algod_listen only; the agent passes $(printf '%s, ' "${mesh_hosts[@]}" | sed 's/, $//') through to it on port $algod_port"
+	else
+		endpoint_hosts=("$address")
+		warn "algod listens on $algod_listen only; other agents cannot reach it at $address:$algod_port (set EndpointAddress in $data_dir/config.json)"
+	fi
 	;;
 *)
-	if [ "$algod_host" != "$address" ]; then
+	endpoint_hosts=("$algod_host")
+	own=0
+	for a in "${mesh_hosts[@]}"; do
+		if [ "$a" = "$algod_host" ]; then
+			own=1
+		else
+			endpoint_hosts+=("$a")
+			passthrough_hosts+=("$a")
+		fi
+	done
+	if [ "$own" = 0 ] && [ "$algod_host" != "$address" ]; then
 		warn "algod listens on $algod_host, not $address; advertising $algod_host for algod"
-		endpoint_host=$algod_host
 	fi
 	;;
 esac
@@ -333,6 +357,20 @@ addr_list_yaml() {
 	fi
 }
 
+# passthrough_yaml prints local.passthrough when algod does not cover every
+# mesh address itself, then the line given (a command substitution cannot
+# end in an empty line).
+passthrough_yaml() {
+	if [ ${#passthrough_hosts[@]} -gt 0 ]; then
+		local addrs=()
+		for h in "${passthrough_hosts[@]}"; do
+			addrs+=("$(hostport "$h" "$algod_port")")
+		done
+		addr_list_yaml passthrough "  " "${addrs[@]}"
+	fi
+	echo "$1"
+}
+
 mesh_advertise=() mesh_listen=()
 for a in "${mesh_addrs[@]}"; do
 	mesh_advertise+=("$(hostport "$a" "$mesh_port")")
@@ -357,8 +395,8 @@ local:
   id: $id
   data_dir: $data_dir
   advertise_endpoints:
-    - http://$(hostport "$endpoint_host" "$algod_port")
-  tier: $tier
+$(for h in "${endpoint_hosts[@]}"; do echo "    - http://$(hostport "$h" "$algod_port")"; done)
+$(passthrough_yaml "  tier: $tier")
 
 registry:
   type: algorand
