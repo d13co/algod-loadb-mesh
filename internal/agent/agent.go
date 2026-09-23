@@ -67,7 +67,7 @@ func New(d Deps) (*Agent, error) {
 		Window: 50, Alpha: 0.2}, d.Clock)
 
 	balancer := c.Balancer()
-	monitor := app.NewMonitor(app.MonitorOptions{NodeID: c.Local.ID, WaitTimeout: c.Local.WaitTimeout,
+	monitor := app.NewMonitor(app.MonitorOptions{NodeID: c.Local.ID,
 		VerifyInterval: c.Local.VerifyInterval, Overrides: c.Local.Overrides, Absent: balancer, Network: c.Local.Network},
 		d.Algod, d.ConfigReader, d.Clock, d.Log, d.Metrics)
 

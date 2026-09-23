@@ -525,7 +525,7 @@ func (c *Config) Finish() error {
 		c.Routing.UpstreamTimeout = 60 * time.Second
 	}
 	if c.Local.WaitTimeout == 0 {
-		c.Local.WaitTimeout = 20 * time.Second
+		c.Local.WaitTimeout = 60 * time.Second
 	}
 	if c.Routing.PendingTTL == 0 {
 		c.Routing.PendingTTL = 10 * time.Second
