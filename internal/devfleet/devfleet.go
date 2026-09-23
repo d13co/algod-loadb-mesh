@@ -34,6 +34,7 @@ type NodeSpec struct {
 	DeveloperAPI bool
 	FollowMode   bool
 	Tier         int
+	Nets         []int // which of Options.Nets this agent is on; nil: all of them
 }
 
 // Options configures the fleet.
@@ -51,9 +52,14 @@ type Options struct {
 	KeepAlive        time.Duration
 	SuspectAfter     time.Duration
 	ProbeInterval    time.Duration
-	RegistryRefresh  time.Duration
-	Log              ports.Logger
-	Timing           Timing
+	// PathProbeInterval and PathTimeout drive per-path pings; the defaults
+	// are scaled like the rest of the timings.
+	PathProbeInterval time.Duration
+	PathTimeout       time.Duration
+	Nets              int // gossip nets every agent is on by default; net 0 is "mem:<id>"; default 1
+	RegistryRefresh   time.Duration
+	Log               ports.Logger
+	Timing            Timing
 }
 
 // Timing shortens service intervals so tests run in real time quickly.
@@ -87,6 +93,15 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 	if o.ProbeInterval == 0 {
 		o.ProbeInterval = 500 * time.Millisecond
 	}
+	if o.PathProbeInterval == 0 {
+		o.PathProbeInterval = 2 * time.Second
+	}
+	if o.PathTimeout == 0 {
+		o.PathTimeout = 200 * time.Millisecond
+	}
+	if o.Nets == 0 {
+		o.Nets = 1
+	}
 	if o.RegistryRefresh == 0 {
 		o.RegistryRefresh = time.Second
 	}
@@ -113,7 +128,7 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 			f.Close()
 			return nil, err
 		}
-		cfg := config.Config{Mode: o.Mode, Listen: "127.0.0.1:0", ClientToken: o.ClientToken, AdminToken: o.AdminToken}
+		cfg := config.Config{Mode: o.Mode, Listen: config.Addrs{"127.0.0.1:0"}, ClientToken: o.ClientToken, AdminToken: o.AdminToken}
 		cfg.Local.ID = spec.ID
 		var node *fakealgod.Node
 		if balancer {
@@ -130,8 +145,14 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		cfg.Local.WaitTimeout = o.Timing.WaitTimeout
 		cfg.Registry.Type = "memory"
 		cfg.Registry.Refresh = o.RegistryRefresh
-		cfg.Mesh.Advertise = "mem:" + spec.ID
+		addrs := NetAddrs(spec.ID, o.Nets, spec.Nets)
+		for _, a := range addrs {
+			if a != "" {
+				cfg.Mesh.Advertise = append(cfg.Mesh.Advertise, a)
+			}
+		}
 		cfg.Mesh.KeepAlive, cfg.Mesh.SuspectAfter, cfg.Mesh.ProbeInterval = o.KeepAlive, o.SuspectAfter, o.ProbeInterval
+		cfg.Mesh.PathProbeInterval, cfg.Mesh.PathTimeout = o.PathProbeInterval, o.PathTimeout
 		cfg.Mesh.DownAfter = 3 * o.SuspectAfter
 		cfg.Routing.SyncTolerance = o.SyncTolerance
 		cfg.Routing.ReturnHysteresisRounds = o.ReturnHysteresis
@@ -145,7 +166,7 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		}
 		m := metrics.New()
 		factory := algodhttp.Factory{}
-		deps := agent.Deps{Config: cfg, Clients: factory, Gossip: f.Hub.Join("mem:" + spec.ID), Registry: f.Registry, Forwarder: proxy.New(nil),
+		deps := agent.Deps{Config: cfg, Clients: factory, Gossip: f.Hub.Join(addrs...), Registry: f.Registry, Forwarder: proxy.New(nil),
 			Clock: clock.Real{}, Log: o.Log, Metrics: m, MetricsText: m, AgentKey: key, HTTPClient: &http.Client{Timeout: 10 * time.Second}}
 		if node != nil {
 			deps.Algod = factory.NewAlgodClient(node.URL(), node.Token())
@@ -164,6 +185,33 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		go func() { defer f.wg.Done(); _ = a.Run(ctx) }()
 	}
 	return f, nil
+}
+
+// NetAddrs is an agent's gossip address on each of nets nets, "" for one it
+// is not on (on is nil for all of them). Net 0 keeps the "mem:<id>" spelling
+// so single-net fleets and Partition("mem:<id>") read as before.
+func NetAddrs(id string, nets int, on []int) []string {
+	out := make([]string, nets)
+	for i := range out {
+		if on != nil && !contains(on, i) {
+			continue
+		}
+		if i == 0 {
+			out[i] = "mem:" + id
+		} else {
+			out[i] = fmt.Sprintf("mem%d:%s", i, id)
+		}
+	}
+	return out
+}
+
+func contains(xs []int, x int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 // Advance moves every fake node forward by k rounds.

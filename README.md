@@ -14,7 +14,9 @@ Each host runs one agent next to its algod. The agent:
   reads the node's data directory for capabilities (archival window,
   developer API, follow mode), verifying the archival window empirically;
 - gossips a signed heartbeat per round to the other agents over UDP (on the
-  WireGuard network), so nobody polls anybody else's node;
+  WireGuard networks), so nobody polls anybody else's node; with several
+  mesh interfaces each pair of agents settles on the path with the lowest
+  measured RTT and abandons it the moment it stops delivering;
 - discovers the fleet from an Algorand application whose boxes hold
   encrypted node records (or from a static list in the config);
 - routes client requests straight to the chosen algod: the local node first
@@ -72,16 +74,24 @@ Add `--setup` to the install command to do both at once
        algod-loadb-mesh registry gen-key
 
 2. Write a config from the example and edit it (at least `local`,
-   `registry.sync_key_file` and `mesh.advertise`; add `-static` for a static
+   `registry.sync_key_file` and `mesh.advertise`, the gossip addresses peers
+   reach this host on, one per mesh interface; add `-static` for a static
    peer list):
 
        algod-loadb-mesh config example -o /etc/algod-loadb-mesh/config.yaml
 
    Or let [deploy/autoconfig.sh](deploy/autoconfig.sh) fill those in from the
    host: id from the hostname (minus `.local`), the algod data dir (it asks
-   when there are several) and the address from a 10.112.* interface, then
-   10.114.*, then a public one, and asks whether to add Nodely as the last-resort
-   fallback (`--nodely`/`--no-nodely` to skip the question; `-h` for overrides):
+   when there are several) and the addresses from every 10.112.* and 10.114.*
+   interface, else a public one. Clients and gossip are served on all of
+   them, peers are told all of them (`mesh.listen` and `mesh.advertise` are
+   the same list) and algod is advertised on all of them too: the address it
+   binds (from `algod.net`) as is, the rest bound by the agent and passed
+   through to it (`local.passthrough`); with no such address everything is
+   served on all interfaces and algod is never passed through. It also asks whether to
+   add Nodely as the last-resort fallback (`--nodely`/`--no-nodely` to skip
+   the question; `--address`, `--listen`, `--client-port` and the rest of
+   `-h` override the rest):
 
        algod-loadb-mesh-autoconfig --app-id 1234 -o /etc/algod-loadb-mesh/config.yaml
 
@@ -133,8 +143,48 @@ default admin token: set `admin_token_file`. Requests only a local node can
 answer (for example the pending transaction pool) get a 503. Nodes must run a
 build that knows roles before they send heartbeats to balancers.
 With a static registry, list the balancer on the nodes as
-`{id: lb1, role: balancer, network: mainnet-v1.0, agent: {addr: 10.112.0.9:4001}}`.
+`{id: lb1, role: balancer, network: mainnet-v1.0, agent: {addrs: [10.112.0.9:4001, 10.114.0.9:4001]}}`.
 `algod-loadb-mesh dev -balancers 1` adds one to the fake fleet.
+
+## Several mesh interfaces
+
+Hosts on two WireGuard networks list both addresses in `mesh.listen` (one
+UDP socket each, so gossip never answers on a public interface) and
+`mesh.advertise` (what the registry tells peers, preferred first; a static
+registry lists them under `agent: {addrs: [...]}`). Every pair of agents
+picks **one** path for its heartbeats: registry order at first, then the
+lowest measured RTT, re-checked by a ping on every address each
+`mesh.path_probe_interval` (30s). A path is abandoned at once when its pings
+go unanswered (three `mesh.path_timeout`s, 2s each), when the transport has
+no route to it, or when the peer's probes report that it has stopped hearing
+our heartbeats — the asymmetric case, where only the receiving side can see
+the break. Proxied algod traffic follows the path: a peer sends to the
+advertised endpoint on the host of its current heartbeat path, else the
+first one. `/loadb/status` lists every link under `links` with the chosen
+path and each candidate's RTT, and the metrics `loadb_path_rtt_ms`,
+`loadb_path_losses` and `loadb_path_switches{reason}` follow it. `config
+check` warns when a mesh address is public or a wildcard.
+
+algod itself binds one address (`EndpointAddress`), so a node whose algod
+listens on 10.112.0.5:8080 would be unreachable for a peer that only shares
+the 10.114 net. `local.passthrough` lists the other `host:port`s to serve
+algod on: the agent binds each and splices every TCP connection straight
+through to the address in `algod.net`, tokens, long-polls and streams
+untouched. At start it reads `algod.net` and skips, with a warning, every
+entry algod already covers (same address, or a wildcard bind on that port),
+so it never takes a port from algod; the skipped entries show under
+`passthrough.skipped` in `/loadb/status` next to the bound `addrs`, the
+`target` and the `active` connections, and the metrics
+`loadb_passthrough_accepted{addr}`, `loadb_passthrough_dial_failures{reason}`
+and `loadb_passthrough_active` count them. Ports are only released at
+restart: to move algod itself onto a wildcard, remove the entry first and
+restart the agent, or algod fails to bind. A pass-through is only used by
+peers when the same address is in `local.advertise_endpoints` (`config
+check` warns otherwise), and it is algod itself on that address, outside the
+agent's listener: no client token, no routing, no `/loadb` view of those
+requests, so anyone on that mesh net holding the node's algod token reaches
+algod directly, as they already can on the address algod binds. `config
+check` warns when a pass-through address is public.
 
 ## Layout
 

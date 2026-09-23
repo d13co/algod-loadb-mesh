@@ -133,10 +133,42 @@ func newAEAD(key SyncKey) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// Heartbeat wire format: pubkey(32) || sig(64) || JSON(Heartbeat).
-// The receiver checks the pubkey against the registry record of the claimed
-// node id, so a heartbeat can only speak for the node whose key signed it.
+// Gossip wire format: pubkey(32) || sig(64) || JSON body, the signature over
+// the body. The receiver checks the pubkey against the registry record of
+// the claimed node id, so a message can only speak for the node whose key
+// signed it. The body is a Heartbeat, or a Probe when it carries "t" — a
+// field a heartbeat never has.
 const heartbeatHeader = ed25519.PublicKeySize + ed25519.SignatureSize
+
+// Probe is a per-path ping or its pong. HeardMS says how long ago the sender
+// last accepted a heartbeat from the recipient over any path (-1: never), so
+// the recipient learns whether its chosen path is being heard.
+type Probe struct {
+	Type    string `json:"t"` // "ping" | "pong"
+	NodeID  string `json:"id"`
+	Nonce   uint64 `json:"n"` // echoed verbatim by the pong
+	HeardMS int64  `json:"heard_ms"`
+}
+
+const (
+	ProbePing = "ping"
+	ProbePong = "pong"
+)
+
+// Envelope is one verified gossip message: exactly one of HB and Probe is set.
+type Envelope struct {
+	PubKey ed25519.PublicKey
+	NodeID string
+	HB     *Heartbeat
+	Probe  *Probe
+}
+
+func encodeSigned(priv ed25519.PrivateKey, body []byte) []byte {
+	out := make([]byte, 0, heartbeatHeader+len(body))
+	out = append(out, priv.Public().(ed25519.PublicKey)...)
+	out = append(out, ed25519.Sign(priv, body)...)
+	return append(out, body...)
+}
 
 // EncodeHeartbeat signs and serialises a heartbeat.
 func EncodeHeartbeat(priv ed25519.PrivateKey, hb Heartbeat) ([]byte, error) {
@@ -144,30 +176,76 @@ func EncodeHeartbeat(priv ed25519.PrivateKey, hb Heartbeat) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, heartbeatHeader+len(body))
-	out = append(out, priv.Public().(ed25519.PublicKey)...)
-	out = append(out, ed25519.Sign(priv, body)...)
-	return append(out, body...), nil
+	return encodeSigned(priv, body), nil
 }
 
-// DecodeHeartbeat verifies the signature and returns the heartbeat together
-// with the signing key. Trust of the key is the caller's decision.
-func DecodeHeartbeat(wire []byte) (Heartbeat, ed25519.PublicKey, error) {
-	var hb Heartbeat
+// EncodeProbe signs and serialises a ping or pong.
+func EncodeProbe(priv ed25519.PrivateKey, p Probe) ([]byte, error) {
+	if p.Type != ProbePing && p.Type != ProbePong {
+		return nil, fmt.Errorf("probe: bad type %q", p.Type)
+	}
+	body, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
+	return encodeSigned(priv, body), nil
+}
+
+// DecodeMessage verifies the signature once and returns the heartbeat or
+// probe it carries with the signing key. Trust of the key is the caller's
+// decision.
+func DecodeMessage(wire []byte) (Envelope, error) {
+	var env Envelope
 	if len(wire) < heartbeatHeader+2 {
-		return hb, nil, errors.New("heartbeat: too short")
+		return env, errors.New("gossip: too short")
 	}
 	pub := ed25519.PublicKey(wire[:ed25519.PublicKeySize])
 	sig := wire[ed25519.PublicKeySize:heartbeatHeader]
 	body := wire[heartbeatHeader:]
 	if !ed25519.Verify(pub, body, sig) {
-		return hb, nil, errors.New("heartbeat: bad signature")
+		return env, errors.New("gossip: bad signature")
 	}
-	if err := json.Unmarshal(body, &hb); err != nil {
-		return hb, nil, err
+	var kind struct {
+		Type string `json:"t"`
 	}
-	if hb.NodeID == "" {
-		return hb, nil, errors.New("heartbeat: empty node id")
+	if err := json.Unmarshal(body, &kind); err != nil {
+		return env, err
 	}
-	return hb, pub, nil
+	env.PubKey = pub
+	if kind.Type == "" {
+		var hb Heartbeat
+		if err := json.Unmarshal(body, &hb); err != nil {
+			return env, err
+		}
+		if hb.NodeID == "" {
+			return env, errors.New("heartbeat: empty node id")
+		}
+		env.HB, env.NodeID = &hb, hb.NodeID
+		return env, nil
+	}
+	var p Probe
+	if err := json.Unmarshal(body, &p); err != nil {
+		return env, err
+	}
+	if p.Type != ProbePing && p.Type != ProbePong {
+		return env, fmt.Errorf("probe: bad type %q", p.Type)
+	}
+	if p.NodeID == "" {
+		return env, errors.New("probe: empty node id")
+	}
+	env.Probe, env.NodeID = &p, p.NodeID
+	return env, nil
+}
+
+// DecodeHeartbeat verifies a heartbeat and returns it with the signing key.
+// A probe is an error here, so a ping can never land as a Seq 0 heartbeat.
+func DecodeHeartbeat(wire []byte) (Heartbeat, ed25519.PublicKey, error) {
+	env, err := DecodeMessage(wire)
+	if err != nil {
+		return Heartbeat{}, nil, err
+	}
+	if env.HB == nil {
+		return Heartbeat{}, nil, errors.New("heartbeat: message is a probe")
+	}
+	return *env.HB, env.PubKey, nil
 }

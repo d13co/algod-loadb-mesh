@@ -65,9 +65,10 @@ type Router struct {
 	rnd     domain.Rand
 	metrics io.WriterTo // Prometheus text, may be nil
 
-	inflight atomic.Int64
-	draining atomic.Bool
-	started  time.Time
+	inflight    atomic.Int64
+	draining    atomic.Bool
+	passthrough atomic.Pointer[func() PassthroughStatus]
+	started     time.Time
 
 	pins *txnPins
 
@@ -98,6 +99,20 @@ func NewRouter(o RouterOptions, dir *Directory, monitor *Monitor, fwd ports.Forw
 	return &Router{opts: o, dir: dir, monitor: monitor, fwd: fwd, httpc: httpc, stats: stats, clock: clock,
 		log: log, metric: metric, rnd: rnd, metrics: metricsText, pins: newTxnPins(o.PendingTTL, clock.Now()), started: clock.Now()}
 }
+
+// PassthroughStatus is the algod pass-through as /loadb/status shows it:
+// the addresses bound for algod, the configured ones algod already covered,
+// the address the splice dials and the connections open right now.
+type PassthroughStatus struct {
+	Addrs   []string `json:"addrs"`
+	Skipped []string `json:"skipped,omitempty"`
+	Target  string   `json:"target"`
+	Active  int64    `json:"active"`
+}
+
+// SetPassthrough adds a "passthrough" key to /loadb/status, read from f on
+// every request. The composition root sets it once the listeners are bound.
+func (r *Router) SetPassthrough(f func() PassthroughStatus) { r.passthrough.Store(&f) }
 
 // Draining marks the agent as shutting down; new requests are still served
 // until the listener closes, but health reports 503 and peers are told.
@@ -625,11 +640,15 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 		if r.opts.Balancer {
 			role, local = domain.RoleBalancer, nil
 		}
-		writeJSON(w, 200, map[string]any{
+		status := map[string]any{
 			"version": r.opts.Version, "role": role, "mode": r.opts.Mode, "draining": r.draining.Load(),
 			"uptime_s": int(r.clock.Now().Sub(r.started).Seconds()), "inflight": r.inflight.Load(),
-			"best_round": best, "local": local, "upstreams": cands, "balancers": r.dir.Balancers(),
-		})
+			"best_round": best, "local": local, "upstreams": cands, "balancers": r.dir.Balancers(), "links": r.dir.LinkSnapshot(),
+		}
+		if f := r.passthrough.Load(); f != nil {
+			status["passthrough"] = (*f)()
+		}
+		writeJSON(w, 200, status)
 	case "/loadb/peers":
 		writeJSON(w, 200, cands)
 	case "/loadb/metrics":

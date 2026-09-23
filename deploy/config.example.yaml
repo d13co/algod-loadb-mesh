@@ -6,7 +6,7 @@
 
 # role: node                          # node (next to an algod) | balancer (no algod: routes to the fleet, see `config example -balancer`); default node
 mode: fallback                        # fallback (local node first) | loadbalancer (best-scoring node); default fallback, loadbalancer for a balancer
-listen: 0.0.0.0:4000                  # clients connect here; default 127.0.0.1:4000
+listen: 0.0.0.0:4000                  # clients connect here; default 127.0.0.1:4000. Several interfaces: a YAML list of addresses, or one comma-separated string
 client_token_file: /var/lib/algorand/algod.token   # X-Algo-API-Token clients must send; here the node's own algod token
 # client_token: s3cret                  # the same, inline; wins over client_token_file. No token at all: no auth
 # admin_token_file: /var/lib/algorand/algod.admin.token   # token for /loadb/* (health excepted), also valid as a client token; default: algod.admin.token in local.data_dir
@@ -22,6 +22,7 @@ local:
   # network: mainnet-v1.0               # role balancer only, and required there: genesis id of the fleet it serves
   advertise_endpoints:                # how *other agents* reach this algod (WireGuard IPs); required with auto_register; http:// is assumed without a scheme
     - http://10.112.0.44:8080
+  # passthrough: [10.114.0.44:8080]   # also bind these for algod and pass TCP straight through to it (algod binds one address; peers on the other mesh net use this); skipped with a warning when algod already listens there
   tier: 1                             # lower is preferred; default 0
   tags: [dc-a]                        # free-form labels published in this node's record
   # wait_for_block_timeout: 20s         # timeout of the wait-for-block-after long-poll on the local node
@@ -50,20 +51,23 @@ registry:
   #     endpoints: [http://10.112.0.45:8080]
   #     token: 0123456789abcdef...      # the node's algod.token
   #     agent:
-  #       addr: 10.112.0.45:4001        # its mesh.advertise
+  #       addrs: [10.112.0.45:4001, 10.114.0.45:4001]   # its mesh.advertise, preferred first
+  #       addr: 10.112.0.45:4001        # the pre-multipath single address; addrs wins when both are set
   #       pubkey: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # ed25519 heartbeat key as 32 byte values; default: derived from mesh.shared_secret and id
   #     tier: 1
   #     tags: [dc-b]
   #     declared: { archival: { kind: full } }   # same fields as local.overrides
 
 mesh:
-  listen: 0.0.0.0:4001                # UDP heartbeats in; default 0.0.0.0:4001
-  advertise: 10.112.0.44:4001         # what peers send heartbeats to; required with auto_register
+  listen: 10.112.0.44:4001, 10.114.0.44:4001   # UDP sockets, one per mesh interface (list or comma-separated); default 0.0.0.0:4001, which also answers on public interfaces
+  advertise: 10.112.0.44:4001, 10.114.0.44:4001   # what peers may send heartbeats to, preferred first; required with auto_register. Each pair of agents settles on one of them by measured RTT
   # shared_secret: change-me            # key material for agent keys when there is no sync key (static registry)
-  suspect_after: 10s                  # no heartbeat for this long: probe the peer directly; default 10s
+  suspect_after: 15s                  # no heartbeat for this long: probe the peer directly; default 15s (three keepalives, so the probe's ping can mark a one-way path deaf)
   down_after: 30s                     # no heartbeat and no successful probe: offline; default 30s
   probe_interval: 10s                 # direct /v2/status probes of a silent peer; default 10s
   keepalive: 5s                       # heartbeat interval when nothing changed; default 5s
+  path_probe_interval: 30s            # ping every advertised address of a peer this often, to re-check the path choice; default 30s
+  path_timeout: 2s                    # an unanswered ping is a loss after this; three in a row and the path is abandoned; default 2s
   # peer_overrides:                     # local routing changes per peer id
   #   bambi:
   #     tier: 2

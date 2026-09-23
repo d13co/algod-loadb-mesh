@@ -89,8 +89,24 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 
 // AgentInfo is how other agents reach this node's agent on the control plane.
 type AgentInfo struct {
-	Addr   string `json:"addr"`   // gossip address, host:port on the VPN
-	PubKey []byte `json:"pubkey"` // ed25519 public key that signs heartbeats
+	Addrs  []string `json:"addrs,omitempty"` // gossip addresses, one per mesh interface, preferred first
+	Addr   string   `json:"addr,omitempty"`  // pre-multipath single address: read, never written
+	PubKey []byte   `json:"pubkey"`          // ed25519 public key that signs heartbeats
+}
+
+// GossipAddrs is every address peers may send to: Addrs, then the legacy
+// Addr when it is not already listed. Every consumer goes through it.
+func (a AgentInfo) GossipAddrs() []string {
+	out := append([]string(nil), a.Addrs...)
+	if a.Addr != "" {
+		for _, s := range out {
+			if s == a.Addr {
+				return out
+			}
+		}
+		out = append(out, a.Addr)
+	}
+	return out
 }
 
 // Role is what an agent in the registry is.
@@ -151,7 +167,7 @@ func (r NodeRecord) Validate() error {
 	switch {
 	case role == RoleNode && len(r.Endpoints) == 0:
 		return fmt.Errorf("node record %q: no endpoints", r.ID)
-	case role == RoleBalancer && r.Agent.Addr == "":
+	case role == RoleBalancer && len(r.Agent.GossipAddrs()) == 0:
 		return fmt.Errorf("balancer record %q: no agent address to send heartbeats to", r.ID)
 	}
 	if r.Tier < 0 {
@@ -169,7 +185,9 @@ func (r NodeRecord) StaticEqual(o NodeRecord) bool {
 	if r.ID != o.ID || r.IsBalancer() != o.IsBalancer() || r.Network != o.Network || r.Token != o.Token || r.Tier != o.Tier {
 		return false
 	}
-	if r.Agent.Addr != o.Agent.Addr || string(r.Agent.PubKey) != string(o.Agent.PubKey) {
+	// Order-sensitive like Endpoints: an upgraded node must republish when it
+	// gains a second address.
+	if !equalStrings(r.Agent.GossipAddrs(), o.Agent.GossipAddrs()) || string(r.Agent.PubKey) != string(o.Agent.PubKey) {
 		return false
 	}
 	if !equalStrings(r.Endpoints, o.Endpoints) || !equalStrings(r.Tags, o.Tags) {

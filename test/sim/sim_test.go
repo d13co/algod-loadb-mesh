@@ -9,6 +9,7 @@ import (
 
 	"encoding/json"
 	"github.com/d13co/algod-loadb-mesh/internal/agent"
+	"github.com/d13co/algod-loadb-mesh/internal/app"
 	"io"
 	"net/http"
 	"strings"
@@ -599,5 +600,135 @@ func TestBalancerWaitForBlockAfterWaitsForHeartbeat(t *testing.T) {
 	// A round already passed answers at once.
 	if r := get(t, lb+"/v2/status/wait-for-block-after/10"); r.code != 200 || !strings.Contains(string(r.body), want) {
 		t.Fatalf("stale wait: %d %s", r.code, r.body)
+	}
+}
+
+// links reads the mesh links an agent reports.
+func links(t *testing.T, agentURL string) []app.LinkStatus {
+	t.Helper()
+	r := agentGet(t, agentURL+"/loadb/status")
+	var st struct {
+		Links []app.LinkStatus `json:"links"`
+	}
+	if err := json.Unmarshal(r.body, &st); err != nil {
+		t.Fatalf("status decode: %v %s", err, r.body)
+	}
+	return st.Links
+}
+
+// allByHeartbeat reports whether every peer of every agent is synced and
+// heard by heartbeat, failing the test if any peer went offline.
+func allByHeartbeat(t *testing.T, f *devfleet.Fleet) bool {
+	t.Helper()
+	for i := range f.Agents {
+		_, ups := status(t, f.Servers[i].URL)
+		for _, u := range ups {
+			if u.Kind != domain.KindPeer {
+				continue
+			}
+			if u.Health == domain.HealthOffline {
+				t.Fatalf("agent %d sees %s offline: failover did not beat DownAfter", i, u.ID)
+			}
+			if u.Source != "heartbeat" || u.Health != domain.HealthSynced {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Three nodes on two nets; one node loses net 0. Every link to it moves to
+// net 1 and heartbeats resume, so the direct-probe ladder stops: the mirror
+// of TestSilentAgentDegradedProbing, where the hits keep climbing. The
+// ladder's first probe legitimately fires on the tick that detects the
+// silence, so what is asserted is that the hits stop growing.
+func TestMeshPathFailover(t *testing.T) {
+	f := start(t, devfleet.Options{Nodes: threeNodes(), Mode: "fallback", ReturnHysteresis: 1, Nets: 2})
+	arch, plain := f.Servers[0].URL, f.Servers[1].URL
+	for _, l := range links(t, arch) {
+		if l.Path != "mem:"+l.Peer || len(l.Paths) != 2 {
+			t.Fatalf("before the cut, registry order carries heartbeats: %+v", l)
+		}
+	}
+	f.Hub.Partition("mem:plain", true)
+	// Trust returns with a new synced round (hysteresis counts rounds), so
+	// the chain must keep moving, as it would.
+	waitFor(t, 8*time.Second, "every link to and from plain on net 1", func() bool {
+		f.Advance(1)
+		time.Sleep(100 * time.Millisecond)
+		for _, l := range links(t, arch) {
+			if l.Peer == "plain" && l.Path != "mem1:plain" {
+				return false
+			}
+		}
+		for _, l := range links(t, plain) {
+			if l.Path != "mem1:"+l.Peer {
+				return false
+			}
+		}
+		return allByHeartbeat(t, f)
+	})
+	m := agentGet(t, plain+"/loadb/metrics")
+	if !strings.Contains(string(m.body), `loadb_path_switches_total{reason="deaf"}`) {
+		t.Fatalf("plain must have learnt from the peers' HeardMS:\n%s", m.body)
+	}
+	// Healed: no more direct probes of anyone. The agents' own long-polls
+	// share the prefix and are not probes.
+	hits := func() int {
+		n := 0
+		for _, node := range f.Nodes {
+			n += node.Hits("/v2/status") - node.Hits("/v2/status/wait-for-block-after")
+		}
+		return n
+	}
+	before := hits()
+	time.Sleep(2 * time.Second) // several ProbeIntervals
+	if after := hits(); after != before {
+		t.Fatalf("/v2/status hits still growing after failover: %d -> %d", before, after)
+	}
+	if !allByHeartbeat(t, f) {
+		t.Fatal("not every peer stayed on heartbeats")
+	}
+	f.Hub.Partition("mem:plain", false)
+}
+
+// A on net 0 only, B on net 1 only, C on both: A and B fall back to probing
+// each other's node directly while C keeps heartbeats with both, and A's
+// link to B shows the candidate it has no route to.
+func TestMixedTopology(t *testing.T) {
+	nodes := threeNodes()
+	nodes[0].Nets, nodes[1].Nets = []int{0}, []int{1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f, err := devfleet.Start(ctx, devfleet.Options{Nodes: nodes, Mode: "fallback", ReturnHysteresis: 1, Nets: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	arch, plain, devn := f.Servers[0].URL, f.Servers[1].URL, f.Servers[2].URL
+	source := func(agentURL, id string) string {
+		_, ups := status(t, agentURL)
+		for _, u := range ups {
+			if u.ID == id && u.Health == domain.HealthSynced {
+				return u.Source
+			}
+		}
+		return ""
+	}
+	waitFor(t, 10*time.Second, "A and B probe each other, everyone hears C", func() bool {
+		return source(arch, "plain") == "probe" && source(plain, "arch") == "probe" &&
+			source(arch, "devn") == "heartbeat" && source(plain, "devn") == "heartbeat" &&
+			source(devn, "arch") == "heartbeat" && source(devn, "plain") == "heartbeat"
+	})
+	for _, l := range links(t, arch) {
+		if l.Peer == "plain" && (l.Path != "" || len(l.Paths) != 1 || !l.Paths[0].NoRoute) {
+			t.Fatalf("A's link to B must show its one candidate as unroutable: %+v", l)
+		}
+	}
+	for _, l := range links(t, devn) {
+		want := map[string]string{"arch": "mem:arch", "plain": "mem1:plain"}[l.Peer]
+		if l.Path != want {
+			t.Fatalf("C reaches %s via %s, not %s", l.Peer, want, l.Path)
+		}
 	}
 }

@@ -104,6 +104,9 @@ func FromConfig(c config.Config) (Deps, error) {
 		reg = registryfile.Static{Records: recs}
 	}
 
+	for _, w := range c.Warnings() {
+		log.Warn(w)
+	}
 	gossip, err := gossipudp.Listen(c.Mesh.Listen)
 	if err != nil {
 		return Deps{}, fmt.Errorf("mesh.listen: %w", err)

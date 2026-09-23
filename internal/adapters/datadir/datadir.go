@@ -54,7 +54,7 @@ func (r Reader) Read() (ports.NodeConfig, error) {
 	if err != nil {
 		return nc, fmt.Errorf("datadir: %w (is algod running?)", err)
 	}
-	nc.Endpoint = endpointURL(netAddr)
+	nc.NetAddr, nc.Endpoint = netAddr, endpointURL(netAddr)
 	if nc.Token, err = readTrimmed(filepath.Join(r.Dir, "algod.token")); err != nil {
 		return nc, fmt.Errorf("datadir: %w", err)
 	}

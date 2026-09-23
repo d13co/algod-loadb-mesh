@@ -81,12 +81,27 @@ func yamlKeys(t reflect.Type) []string {
 // autoconfig.sh output loads, with everything it would detect passed in.
 func TestAutoconfigLoads(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sync.key"), []byte("00000000000000000000000000000000000000000000000000000000000000ff"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c := autoconfig(t, dir, "", "--app-id", "7", "--sync-key-file", filepath.Join(dir, "sync.key"))
-	if c.Local.ID != "k44" || c.Local.AdvertiseEndpoints[0] != "http://10.112.0.44:8080" || c.Mesh.Advertise != "10.112.0.44:4001" || c.Registry.AppID != 7 {
+	c := autoconfig(t, dir, "", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if c.Local.ID != "k44" || c.Local.AdvertiseEndpoints[0] != "http://10.112.0.44:8080" || c.Mesh.Advertise.String() != "10.112.0.44:4001" || c.Registry.AppID != 7 {
 		t.Errorf("unexpected config: %+v", c)
+	}
+	// The mesh binds what it advertises.
+	if c.Mesh.Listen.String() != "10.112.0.44:4001" {
+		t.Errorf("mesh.listen = %q", c.Mesh.Listen)
+	}
+}
+
+// Several --address values: all bound and advertised, the first one hosts
+// the algod endpoint.
+func TestAutoconfigSeveralAddresses(t *testing.T) {
+	dir := t.TempDir()
+	c := autoconfigEnv(t, dir, "", nil, "--address", "10.112.0.44", "--address", "10.114.0.44,10.115.0.44", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	want := "10.112.0.44:4001, 10.114.0.44:4001, 10.115.0.44:4001"
+	if c.Mesh.Advertise.String() != want || c.Mesh.Listen.String() != want {
+		t.Errorf("mesh listen %q, advertise %q", c.Mesh.Listen, c.Mesh.Advertise)
+	}
+	if c.Local.AdvertiseEndpoints[0] != "http://10.112.0.44:8080" {
+		t.Errorf("endpoints = %v", c.Local.AdvertiseEndpoints)
 	}
 }
 
@@ -138,6 +153,124 @@ func TestAutoconfigBundle(t *testing.T) {
 	}
 }
 
+// fakeIP puts an `ip` earlier in PATH that reports the given IPv4 interfaces.
+func fakeIP(t *testing.T, dir string, lines ...string) []string {
+	t.Helper()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := "#!/usr/bin/env bash\ncase \"$*\" in *-6*) exit 0 ;; esac\ncat <<'OUT'\n" + strings.Join(lines, "\n") + "\nOUT\n"
+	if err := os.WriteFile(filepath.Join(bin, "ip"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
+}
+
+// The client listener and the mesh are every WireGuard address the host has,
+// so the agent is reachable over the mesh but not on a public interface.
+func TestAutoconfigListensOnEveryMeshAddress(t *testing.T) {
+	dir := t.TempDir()
+	env := fakeIP(t, dir,
+		"2: wg0    inet 10.112.0.44/16 brd 10.112.255.255 scope global wg0",
+		"3: wg1    inet 10.114.0.44/16 brd 10.114.255.255 scope global wg1",
+		"4: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0")
+	c := autoconfigEnv(t, dir, "", env, "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if got := c.Listen.String(); got != "10.112.0.44:4000, 10.114.0.44:4000" {
+		t.Errorf("listen = %q", got)
+	}
+	want := "10.112.0.44:4001, 10.114.0.44:4001"
+	if c.Mesh.Advertise.String() != want || c.Mesh.Listen.String() != want {
+		t.Errorf("mesh listen %q, advertise %q", c.Mesh.Listen, c.Mesh.Advertise)
+	}
+	if got := strings.Join(c.Local.AdvertiseEndpoints, ", "); got != "http://10.112.0.44:8080, http://10.114.0.44:8080" {
+		t.Errorf("endpoints = %v", c.Local.AdvertiseEndpoints)
+	}
+	if len(c.Local.Passthrough) != 0 {
+		t.Errorf("a wildcard algod needs no pass-through: %v", c.Local.Passthrough)
+	}
+}
+
+// algod is advertised on every mesh address: the one it binds as is, the
+// rest bound by the agent and passed through. Never on a public address.
+func TestAutoconfigPassthrough(t *testing.T) {
+	cases := []struct{ algodNet, endpoints, passthrough string }{
+		{"0.0.0.0:8080", "http://10.112.0.44:8080, http://10.114.0.44:8080", ""},
+		{"[::]:8080", "http://10.112.0.44:8080, http://10.114.0.44:8080", ""},
+		{"127.0.0.1:8080", "http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"10.114.0.44:8080", "http://10.114.0.44:8080, http://10.112.0.44:8080", "10.112.0.44:8080"},
+		{"10.9.9.9:8080", "http://10.9.9.9:8080, http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"10.112.0.44:8081", "http://10.112.0.44:8081, http://10.114.0.44:8081", "10.114.0.44:8081"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		env := fakeIP(t, dir,
+			"2: wg0    inet 10.112.0.44/16 brd 10.112.255.255 scope global wg0",
+			"3: wg1    inet 10.114.0.44/16 brd 10.114.255.255 scope global wg1",
+			"4: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0")
+		c := autoconfigRun(t, dir, "{}", tc.algodNet, "", env, "--no-nodely", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+		if got := strings.Join(c.Local.AdvertiseEndpoints, ", "); got != tc.endpoints {
+			t.Errorf("algod.net %s: endpoints %q want %q", tc.algodNet, got, tc.endpoints)
+		}
+		if got := c.Local.Passthrough.String(); got != tc.passthrough {
+			t.Errorf("algod.net %s: passthrough %q want %q", tc.algodNet, got, tc.passthrough)
+		}
+		for _, w := range c.Warnings() {
+			if strings.Contains(w, "passthrough") {
+				t.Errorf("algod.net %s: %s", tc.algodNet, w)
+			}
+		}
+	}
+}
+
+// Without a WireGuard address the fallback is the old shape: gossip on every
+// interface, the public address advertised.
+func TestAutoconfigPublicFallback(t *testing.T) {
+	dir := t.TempDir()
+	env := fakeIP(t, dir, "4: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0")
+	c := autoconfigEnv(t, dir, "", env, "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if c.Mesh.Listen.String() != "0.0.0.0:4001" || c.Mesh.Advertise.String() != "203.0.113.7:4001" {
+		t.Errorf("mesh listen %q, advertise %q", c.Mesh.Listen, c.Mesh.Advertise)
+	}
+	if c.Listen.String() != "0.0.0.0:4000" {
+		t.Errorf("listen = %q", c.Listen)
+	}
+	if strings.Join(c.Local.AdvertiseEndpoints, ", ") != "http://203.0.113.7:8080" || len(c.Local.Passthrough) != 0 {
+		t.Errorf("algod is never passed through on a public address: %v %v", c.Local.AdvertiseEndpoints, c.Local.Passthrough)
+	}
+}
+
+// In the public fallback an algod bound to a specific address is advertised
+// there, as before: the public address would point peers at a port algod
+// does not bind, and the agent never passes algod through on a public address.
+func TestAutoconfigPublicFallbackSpecificAlgod(t *testing.T) {
+	dir := t.TempDir()
+	env := fakeIP(t, dir, "4: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0")
+	c := autoconfigRun(t, dir, "{}", "10.9.9.9:8080", "", env, "--no-nodely", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if strings.Join(c.Local.AdvertiseEndpoints, ", ") != "http://10.9.9.9:8080" || len(c.Local.Passthrough) != 0 {
+		t.Errorf("advertise %v passthrough %v", c.Local.AdvertiseEndpoints, c.Local.Passthrough)
+	}
+}
+
+// --listen overrides detection; an address without a port gets --client-port.
+func TestAutoconfigListenFlag(t *testing.T) {
+	dir := t.TempDir()
+	c := autoconfig(t, dir, "", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir),
+		"--listen", "10.112.0.44,10.114.0.44:4444", "--listen", "127.0.0.1", "--client-port", "4100")
+	if got := c.Listen.String(); got != "10.112.0.44:4100, 10.114.0.44:4444, 127.0.0.1:4100" {
+		t.Errorf("listen = %q", got)
+	}
+}
+
+func writeSyncKey(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "sync.key")
+	if err := os.WriteFile(p, []byte("00000000000000000000000000000000000000000000000000000000000000ff"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // autoconfig runs autoconfig.sh for a fake data dir under dir and loads the
 // config it writes.
 func autoconfig(t *testing.T, dir, stdin string, args ...string) config.Config {
@@ -145,8 +278,23 @@ func autoconfig(t *testing.T, dir, stdin string, args ...string) config.Config {
 	return autoconfigGenesis(t, dir, "{}", stdin, append([]string{"--no-nodely"}, args...)...)
 }
 
-// autoconfigGenesis is autoconfig with the genesis.json content given.
+// autoconfigGenesis is autoconfig with the genesis.json content given and no
+// Nodely answer, so the caller can pass one.
 func autoconfigGenesis(t *testing.T, dir, genesis, stdin string, args ...string) config.Config {
+	t.Helper()
+	return autoconfigRun(t, dir, genesis, "0.0.0.0:8080", stdin, nil, append([]string{"--address", "10.112.0.44"}, args...)...)
+}
+
+// autoconfigEnv is autoconfig with extra environment, and without the address
+// override, for the detection this host would do itself.
+func autoconfigEnv(t *testing.T, dir, stdin string, env []string, args ...string) config.Config {
+	t.Helper()
+	return autoconfigRun(t, dir, "{}", "0.0.0.0:8080", stdin, env, append([]string{"--no-nodely"}, args...)...)
+}
+
+// autoconfigRun runs autoconfig.sh with exactly the arguments given, on a
+// data dir whose algod.net says algodNet.
+func autoconfigRun(t *testing.T, dir, genesis, algodNet, stdin string, env []string, args ...string) config.Config {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
@@ -157,7 +305,7 @@ func autoconfigGenesis(t *testing.T, dir, genesis, stdin string, args ...string)
 	}
 	for name, content := range map[string]string{
 		"data/genesis.json": genesis,
-		"data/algod.net":    "0.0.0.0:8080",
+		"data/algod.net":    algodNet,
 		"client.token":      "t",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
@@ -166,8 +314,9 @@ func autoconfigGenesis(t *testing.T, dir, genesis, stdin string, args ...string)
 	}
 	out := filepath.Join(dir, "config.yaml")
 	cmd := exec.Command("bash", append([]string{"autoconfig.sh", "-o", out, "--id", "k44", "--data-dir", dataDir,
-		"--address", "10.112.0.44", "--client-token-file", filepath.Join(dir, "client.token")}, args...)...)
+		"--client-token-file", filepath.Join(dir, "client.token")}, args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Env = append(os.Environ(), env...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("autoconfig.sh: %v\n%s", err, b)
 	}

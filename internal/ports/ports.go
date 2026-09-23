@@ -4,6 +4,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -46,7 +47,8 @@ type AlgodClientFactory interface {
 
 // NodeConfig is what the local data directory reveals about the node.
 type NodeConfig struct {
-	Endpoint                string // http://host:port from algod.net
+	Endpoint                string // http://host:port from algod.net, wildcard rewritten to loopback
+	NetAddr                 string // algod.net verbatim (host:port), to tell a wildcard bind apart
 	Token                   string
 	GenesisID               string
 	Archival                bool
@@ -79,20 +81,29 @@ type RegistryCache interface {
 	Save([]domain.NodeRecord) error
 }
 
-// GossipMessage is one datagram from a peer.
+// GossipMessage is one datagram from a peer. From is the source address the
+// transport saw: the path the datagram arrived on and where a reply goes,
+// never an identity.
 type GossipMessage struct {
-	From    string // transport address, informational
+	From    string
 	Payload []byte
 }
 
-// Gossip is the control-plane transport: fire-and-forget datagrams.
+// Gossip is the control-plane transport: fire-and-forget datagrams. Path
+// choice is policy and lives in the application; the transport only sends.
 type Gossip interface {
-	// SetPeers replaces the destination set for Broadcast.
-	SetPeers(addrs []string)
-	Broadcast(ctx context.Context, payload []byte) error
+	// Send hands one datagram to the network. A nil error means it was sent,
+	// not that it arrived: a black-holed peer still gets nil, liveness is the
+	// receiver's judgement. ErrNoRoute means the address is unusable from this
+	// host and the caller should try another.
+	Send(ctx context.Context, addr string, payload []byte) error
 	Receive() <-chan GossipMessage
 	Close() error
 }
+
+// ErrNoRoute is returned by Gossip.Send for an address this host cannot
+// reach: unparseable, or on a network it has no interface on.
+var ErrNoRoute = errors.New("gossip: no route")
 
 // Target is where the forwarder sends one request.
 type Target struct {

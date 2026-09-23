@@ -132,9 +132,14 @@ main() {
 	if systemctl is-active --quiet algod-loadb-mesh; then
 		local data_dir listen
 		data_dir=$(sed -n 's/^  data_dir: //p' "$target" | head -n1)
-		listen=$(sed -n 's/^listen: //p' "$target" | head -n1)
+		# `config check` prints the resolved listen addresses; take the first.
+		listen=$("$mesh" config check -config "$target" | sed -n 's/^listen \([^,]*\).*/\1/p' | head -n1)
+		case "$listen" in
+		0.0.0.0:*) listen=127.0.0.1:${listen##*:} ;;
+		\[::\]:*) listen=[::1]:${listen##*:} ;;
+		esac
 		say "algod-loadb-mesh is running"
-		say "peers: curl -H \"X-Algo-API-Token: \$(sudo cat $data_dir/algod.admin.token)\" http://${listen/0.0.0.0/127.0.0.1}/loadb/peers"
+		say "peers: curl -H \"X-Algo-API-Token: \$(sudo cat $data_dir/algod.admin.token)\" http://$listen/loadb/peers"
 	else
 		systemctl --no-pager --lines=20 status algod-loadb-mesh || true
 		die "the service did not start"

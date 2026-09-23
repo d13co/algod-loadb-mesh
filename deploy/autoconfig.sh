@@ -3,7 +3,12 @@
 #   local.id             hostname, without a trailing .local
 #   local.data_dir       the algod data dir (running algod -d, $ALGORAND_DATA,
 #                        common locations); asks when there are several
-#   advertise addresses  a 10.112.* interface, then 10.114.*, then a public one
+#   addresses            every 10.112.* and 10.114.* interface, else a public
+#                        one. Clients and gossip are served on all of them and
+#                        peers are told all of them (the mesh binds what it
+#                        advertises); the first hosts the algod endpoint. With
+#                        no such address clients and gossip are served on every
+#                        interface.
 # The registry app id and sync key come from flags or from a bundle printed by
 # `algod-loadb-mesh registry bundle` on a host that already runs.
 # Everything else keeps the agent's defaults; `algod-loadb-mesh config example`
@@ -24,14 +29,18 @@ usage: $0 [options] [BUNDLE]
   -f                    overwrite FILE if it exists
   --id ID               node id (default: hostname without .local)
   --data-dir DIR        algod data dir (default: detected)
-  --address IP          address other agents reach this host on (default: detected)
+  --address IP[,IP]     addresses other agents reach this host on, preferred
+                        first; repeatable (default: every 10.112.*/10.114.*
+                        address, else a public one)
   --app-id N            registry application id (default: from BUNDLE, else 0)
   --sync-key-file FILE  registry sync key, instead of BUNDLE (default: /etc/algod-loadb-mesh/sync.key)
   --sync-address ADDR   sync account, when it is rekeyed to the sync key (default: from BUNDLE)
   --client-token-file FILE
                         token clients must send (default: algod.token in the data dir)
   --tier N              routing tier, lower is preferred (default: 1)
-  --listen HOST:PORT    client listener (default: 0.0.0.0:4000)
+  --listen ADDR[,ADDR]  client listeners, each HOST or HOST:PORT; repeatable
+                        (default: the 10.112.*/10.114.* addresses, else 0.0.0.0)
+  --client-port PORT    port for listeners given without one (default: 4000)
   --mesh-port PORT      UDP heartbeat port (default: 4001)
   --nodely              add Nodely's public API for the node's network as the
                         last-resort external tier (asked on a terminal when
@@ -42,7 +51,7 @@ EOF
 
 out="" force=0 id="" data_dir="" address="" app_id="" sync_address="" tier=1
 sync_key_file="" sync_key="" bundle="" client_token_file=""
-listen=0.0.0.0:4000 mesh_port=4001 nodely=""
+listen="" client_port=4000 mesh_port=4001 nodely=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -50,13 +59,14 @@ while [ $# -gt 0 ]; do
 	-f) force=1 ;;
 	--id) id=$2; shift ;;
 	--data-dir) data_dir=$2; shift ;;
-	--address) address=$2; shift ;;
+	--address) address="${address:+$address,}$2"; shift ;;
 	--app-id) app_id=$2; shift ;;
 	--sync-key-file) sync_key_file=$2; shift ;;
 	--sync-address) sync_address=$2; shift ;;
 	--client-token-file) client_token_file=$2; shift ;;
 	--tier) tier=$2; shift ;;
-	--listen) listen=$2; shift ;;
+	--listen) listen="${listen:+$listen,}$2"; shift ;;
+	--client-port) client_port=$2; shift ;;
 	--mesh-port) mesh_port=$2; shift ;;
 	--nodely) nodely=1 ;;
 	--no-nodely) nodely=0 ;;
@@ -192,9 +202,12 @@ is_private4() {
 	esac
 }
 
+# global_v4 prints the IPv4 address of every global-scope interface.
+global_v4() { ip -4 -o addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'; }
+
 detect_address() {
 	local v4 v6 ip
-	v4=$(ip -4 -o addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }')
+	v4=$(global_v4)
 	for prefix in 10.112. 10.114.; do
 		ip=$(printf '%s\n' "$v4" | awk -v p="$prefix" 'index($0, p) == 1 { print; exit }')
 		[ -n "$ip" ] && { echo "$ip"; return; }
@@ -209,24 +222,95 @@ detect_address() {
 	done
 }
 
+# Every mesh address, 10.112.* before 10.114.*: what the client listener binds
+# when nothing is passed.
+detect_listen() {
+	local v4 a prefix found=""
+	v4=$(global_v4)
+	for prefix in 10.112. 10.114.; do
+		for a in $v4; do
+			case "$a" in "$prefix"*) found+="${found:+ }$a" ;; esac
+		done
+	done
+	echo "$found"
+}
+
+# The mesh binds what it advertises: every --address given, else every
+# detected mesh address. Only the no-WireGuard fallback (a public address)
+# differs: gossip listens on every interface and advertises that one.
+mesh_bind=1
 if [ -z "$address" ]; then
-	address=$(detect_address)
+	address=$(detect_listen | tr ' ' ',')
+	if [ -z "$address" ]; then
+		address=$(detect_address)
+		mesh_bind=0
+	fi
 	[ -n "$address" ] || die "no 10.112.*, 10.114.* or public address on any interface; pass --address"
 fi
+# Addresses hold no spaces, so splitting the list on them is safe.
+mesh_addrs=()
+for a in $(printf '%s' "$address" | tr ',' ' '); do
+	mesh_addrs+=("$a")
+done
+address=${mesh_addrs[0]}
 
 hostport() { case "$1" in *:*) echo "[$1]:$2" ;; *) echo "$1:$2" ;; esac; }
 
-# algod bound to one specific address is only reachable there.
-endpoint_host=$address
+# with_port ADDR PORT appends the port to an address that has none.
+with_port() {
+	case "$1" in
+	\[*\]:*) echo "$1" ;;          # [fd00::1]:4000
+	\[*\]) echo "$1:$2" ;;         # [fd00::1]
+	*:*:*) hostport "$1" "$2" ;; # a bare IPv6
+	*:*) echo "$1" ;;              # host:port
+	*) echo "$1:$2" ;;             # a bare IPv4 or hostname
+	esac
+}
+
+listen_addrs=()
+for a in $(printf '%s' "${listen:-$(detect_listen)}" | tr ',' ' '); do
+	listen_addrs+=("$(with_port "$a" "$client_port")")
+done
+if [ ${#listen_addrs[@]} = 0 ]; then
+	listen_addrs=("$(hostport 0.0.0.0 "$client_port")")
+	warn "no 10.112.* or 10.114.* address; serving clients on every interface (${listen_addrs[0]})"
+fi
+
+# algod binds one address. It is advertised on every mesh address anyway: the
+# one it binds as is, the others bound by the agent and passed through to it
+# (local.passthrough; the agent skips an entry algod turns out to cover).
+# mesh_hosts is where the agent may publish algod: never a public address.
+mesh_hosts=()
+[ "$mesh_bind" = 1 ] && mesh_hosts=("${mesh_addrs[@]}")
+endpoint_hosts=() passthrough_hosts=()
 case "$algod_host" in
-"" | 0.0.0.0 | :: | "*") ;;
+"" | 0.0.0.0 | :: | "*")
+	endpoint_hosts=("${mesh_hosts[@]}")
+	[ ${#endpoint_hosts[@]} -gt 0 ] || endpoint_hosts=("$address")
+	;;
 127.* | ::1 | localhost)
-	warn "algod listens on $algod_listen only; other agents cannot reach it at $address:$algod_port (set EndpointAddress in $data_dir/config.json)"
+	if [ ${#mesh_hosts[@]} -gt 0 ]; then
+		endpoint_hosts=("${mesh_hosts[@]}")
+		passthrough_hosts=("${mesh_hosts[@]}")
+		warn "algod listens on $algod_listen only; the agent passes $(printf '%s, ' "${mesh_hosts[@]}" | sed 's/, $//') through to it on port $algod_port"
+	else
+		endpoint_hosts=("$address")
+		warn "algod listens on $algod_listen only; other agents cannot reach it at $address:$algod_port (set EndpointAddress in $data_dir/config.json)"
+	fi
 	;;
 *)
-	if [ "$algod_host" != "$address" ]; then
+	endpoint_hosts=("$algod_host")
+	own=0
+	for a in "${mesh_hosts[@]}"; do
+		if [ "$a" = "$algod_host" ]; then
+			own=1
+		else
+			endpoint_hosts+=("$a")
+			passthrough_hosts+=("$a")
+		fi
+	done
+	if [ "$own" = 0 ] && [ "$algod_host" != "$address" ]; then
 		warn "algod listens on $algod_host, not $address; advertising $algod_host for algod"
-		endpoint_host=$algod_host
 	fi
 	;;
 esac
@@ -260,21 +344,59 @@ fi
 
 # --- config -----------------------------------------------------------------
 
+# addr_list_yaml KEY INDENT ADDR... prints an address option: one address
+# inline, several as a list.
+addr_list_yaml() {
+	local key=$1 indent=$2
+	shift 2
+	if [ $# = 1 ]; then
+		echo "${indent}${key}: $1"
+	else
+		echo "${indent}${key}:"
+		printf "${indent}  - %s\n" "$@"
+	fi
+}
+
+# passthrough_yaml prints local.passthrough when algod does not cover every
+# mesh address itself, then the line given (a command substitution cannot
+# end in an empty line).
+passthrough_yaml() {
+	if [ ${#passthrough_hosts[@]} -gt 0 ]; then
+		local addrs=()
+		for h in "${passthrough_hosts[@]}"; do
+			addrs+=("$(hostport "$h" "$algod_port")")
+		done
+		addr_list_yaml passthrough "  " "${addrs[@]}"
+	fi
+	echo "$1"
+}
+
+mesh_advertise=() mesh_listen=()
+for a in "${mesh_addrs[@]}"; do
+	mesh_advertise+=("$(hostport "$a" "$mesh_port")")
+done
+if [ "$mesh_bind" = 1 ]; then
+	mesh_listen=("${mesh_advertise[@]}")
+else
+	mesh_listen=("$(hostport "$([[ "$address" == *:* ]] && echo :: || echo 0.0.0.0)" "$mesh_port")")
+	warn "no 10.112.* or 10.114.* address; gossip listens on every interface (${mesh_listen[0]}) and advertises $address"
+fi
+
 config() {
 	cat <<EOF
 # Generated by autoconfig.sh on $(hostname) at $(date -u +%Y-%m-%dT%H:%M:%SZ).
 # All options: algod-loadb-mesh config example
 
 mode: fallback
-listen: $listen
+$(addr_list_yaml listen "" "${listen_addrs[@]}")
 client_token_file: $client_token_file
 
 local:
   id: $id
   data_dir: $data_dir
   advertise_endpoints:
-    - http://$(hostport "$endpoint_host" "$algod_port")
-  tier: $tier
+$(for h in "${endpoint_hosts[@]}"; do echo "    - http://$(hostport "$h" "$algod_port")"; done)
+$(passthrough_yaml "  tier: $tier")
 
 registry:
   type: algorand
@@ -290,8 +412,8 @@ EOF
   cache: /var/lib/algod-loadb-mesh/registry.cache
 
 mesh:
-  listen: $(hostport "$([[ "$address" == *:* ]] && echo :: || echo 0.0.0.0)" "$mesh_port")
-  advertise: $(hostport "$address" "$mesh_port")
+$(addr_list_yaml listen "  " "${mesh_listen[@]}")
+$(addr_list_yaml advertise "  " "${mesh_advertise[@]}")
 EOF
 	[ "$nodely" = 1 ] || return 0
 	cat <<EOF
