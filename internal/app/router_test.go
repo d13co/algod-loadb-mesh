@@ -549,3 +549,57 @@ func TestBalancerWaitStatusTimeout(t *testing.T) {
 		t.Fatalf("balancer wait after recovery: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// A probe of /loadb/health finds nothing in the mesh and checks the
+// externals, as a request would: an agent that would serve from one is
+// healthy before any request reaches it, so a probe that gates traffic on
+// the answer does not wait for a request that can never arrive.
+func TestHealthChecksExternalsWhenMeshCannotServe(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 5 * time.Second}}}, clients)
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, Balancer: true},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	wh := &waitHarness{harness: h, r: r}
+
+	if rec := wh.get("/loadb/health"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"best_round":500`) {
+		t.Fatalf("health with an unchecked external: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := clients.count("http://ext"); n != 1 {
+		t.Fatalf("%d checks, want 1", n)
+	}
+	// While the check is valid a probe repeats nothing.
+	if rec := wh.get("/loadb/health"); rec.Code != 200 || clients.count("http://ext") != 1 {
+		t.Fatalf("health within the validity: %d, %d checks", rec.Code, clients.count("http://ext"))
+	}
+	// An external that fails its check leaves the agent unhealthy.
+	clients.mu.Lock()
+	clients.fail = true
+	clients.mu.Unlock()
+	h.fc.Advance(6 * time.Second)
+	if rec := wh.get("/loadb/health"); rec.Code != 503 || clients.count("http://ext") != 2 {
+		t.Fatalf("health with a failing external: %d, %d checks", rec.Code, clients.count("http://ext"))
+	}
+}
+
+// The external check a selection failure triggers is inside the request's
+// bound: an external that hangs on its check costs the client the request
+// timeout, not the check's own.
+func TestRequestTimeoutBoundsExternalCheck(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	clients := &countingClients{calls: map[string]int{}, round: 500, block: block}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 5 * time.Second}}}, clients)
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, UpstreamTimeout: 200 * time.Millisecond, RequestTimeout: 300 * time.Millisecond},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	wh := &waitHarness{harness: h, r: r}
+	start := time.Now()
+	rec := wh.get("/v2/status")
+	if el := time.Since(start); rec.Code != 503 || el > 1500*time.Millisecond {
+		t.Fatalf("hanging external check: %d after %s: %s", rec.Code, el, rec.Body.String())
+	}
+	if n := clients.count("http://ext"); n != 1 {
+		t.Fatalf("%d checks, want 1", n)
+	}
+}

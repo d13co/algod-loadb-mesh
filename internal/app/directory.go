@@ -867,9 +867,12 @@ func (d *Directory) checkExternals(ctx context.Context) bool {
 	now := d.clock.Now()
 	d.mu.Lock()
 	for _, e := range d.externals {
+		// A check is repeated once it expires or, while it is valid or
+		// failed, once the debounce has passed: a valid external is kept
+		// current (its round is compared with the mesh's) at one status
+		// call a second at most, and a failing one is retried at that pace.
 		// An expired check is repeated at once, whatever the debounce, so a
-		// validity shorter than it never leaves the external unusable; the
-		// debounce only spaces the checks of a failing external.
+		// validity shorter than it never leaves the external unusable.
 		due := e.checkedAt.IsZero() || now.Sub(e.checkedAt) >= externalDebounce || (e.ok && !e.fresh(now))
 		if e.inflight == nil && due {
 			e.inflight = make(chan struct{})
