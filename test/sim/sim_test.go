@@ -211,7 +211,11 @@ func TestSilentAgentDegradedProbing(t *testing.T) {
 	arch := f.Servers[0].URL
 	// Cut the "plain" agent off the gossip network; its algod keeps running.
 	f.Hub.Partition("mem:plain", true)
-	waitFor(t, 5*time.Second, "plain still reachable via direct probe", func() bool {
+	// A slow runner can time out one probe, and trust returns only on a new
+	// synced round, so keep the chain moving.
+	waitFor(t, 8*time.Second, "plain still reachable via direct probe", func() bool {
+		f.Advance(1)
+		time.Sleep(150 * time.Millisecond)
 		return f.Nodes[1].Hits("/v2/status") > 2 && health(t, arch, "plain") == domain.HealthSynced
 	})
 	// Now the node itself dies: probes fail, peer goes offline.
