@@ -26,7 +26,9 @@ type RouterOptions struct {
 	ClientToken     string
 	AdminToken      string // required for /loadb/* except health; also a valid client token
 	SyncTolerance   uint64
-	UpstreamTimeout time.Duration
+	UpstreamTimeout time.Duration // bound on one attempt at one upstream
+	RequestTimeout  time.Duration // bound on one request across every upstream tried; default 2*UpstreamTimeout
+	StatusTimeout   time.Duration // bound on one /v2/status fetch for coalesced waiters; default 10s
 	WaitTimeout     time.Duration
 	PendingTTL      time.Duration
 	RetryBudget     int // further mesh upstreams tried after a failed one; negative for every eligible one
@@ -41,6 +43,12 @@ func (o *RouterOptions) defaults() {
 	}
 	if o.UpstreamTimeout == 0 {
 		o.UpstreamTimeout = 60 * time.Second
+	}
+	if o.RequestTimeout == 0 {
+		o.RequestTimeout = 2 * o.UpstreamTimeout
+	}
+	if o.StatusTimeout == 0 {
+		o.StatusTimeout = 10 * time.Second
 	}
 	if o.WaitTimeout == 0 {
 		o.WaitTimeout = 60 * time.Second
@@ -259,11 +267,14 @@ func (r *Router) pick(ctx context.Context, class domain.RequestClass, cands []do
 	return sel, cands, best, ok
 }
 
-// forward sends the request to one upstream and records the outcome.
-func (r *Router) forward(w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
+// forward sends the request to one upstream and records the outcome. The
+// attempt is bounded by UpstreamTimeout within ctx, which carries the bound
+// on the request as a whole; the client's own context stays on req, so that
+// its departure is told apart from the request's deadline.
+func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
 	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", u.ID)
 	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(u.Tier))
-	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
 	out := r.fwd.Forward(w, req.WithContext(ctx), ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry})
@@ -323,6 +334,17 @@ func replayable(req *http.Request) (func(), bool) {
 	return reset, true
 }
 
+// minAttempt is the least of the request's time an attempt is worth
+// starting with, so that one cut short by the deadline is not counted
+// against the upstream.
+const minAttempt = time.Second
+
+// timeLeft is true while ctx has at least minAttempt before its deadline.
+func timeLeft(ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	return ctx.Err() == nil && (!ok || time.Until(d) >= minAttempt)
+}
+
 // forwardSelected sends the request to the chosen upstream and, while it
 // fails without a byte reaching the client, to each alternate in turn: every
 // eligible mesh node once (fewer under an explicit retry budget), then the
@@ -332,7 +354,9 @@ func replayable(req *http.Request) (func(), bool) {
 // Writes are repeated too: a signed transaction has one id, so a node that
 // already holds it answers for it rather than applying it twice, and algod's
 // other writes are idempotent by content. A body too large to hold is sent
-// once.
+// once. The attempts together are bounded by RequestTimeout, each by
+// UpstreamTimeout within it, so nodes that accept and hang cost the client
+// one request's worth of time, not one per node.
 func (r *Router) forwardSelected(w http.ResponseWriter, req *http.Request, class domain.RequestClass, sel domain.Selection) {
 	tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
 	if b := r.opts.RetryBudget; b >= 0 && len(tries) > 1+b {
@@ -342,24 +366,29 @@ func (r *Router) forwardSelected(w http.ResponseWriter, req *http.Request, class
 	if !replay {
 		tries = tries[:1]
 	}
+	ctx, cancel := context.WithTimeout(req.Context(), r.opts.RequestTimeout)
+	defer cancel()
 	var last ports.Outcome
 	for i, u := range tries {
 		if i > 0 {
+			if !timeLeft(ctx) {
+				break
+			}
 			r.metric.Inc("loadb_retries")
 			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", tries[i-1].ID, "err", last.Err, "status", last.Status)
 			reset()
 		}
-		last = r.forward(w, req, u, class, nil)
+		last = r.forward(ctx, w, req, u, class, nil)
 		if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 			return
 		}
 	}
-	if replay {
-		if ext, ok := r.externalFallback(req.Context(), class, tries); ok {
+	if replay && timeLeft(ctx) {
+		if ext, ok := r.externalFallback(ctx, class, tries); ok && timeLeft(ctx) {
 			r.metric.Inc("loadb_retries")
 			r.log.Debug("retrying on external", "path", req.URL.Path, "failed", tries[len(tries)-1].ID, "external", ext.ID)
 			reset()
-			last = r.forward(w, req, ext, class, nil)
+			last = r.forward(ctx, w, req, ext, class, nil)
 			if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 				return
 			}
@@ -486,7 +515,9 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 		r.handleDefault(w, req, class, cands, best)
 		return
 	}
-	f := r.statusAt(round)
+	sctx, scancel := context.WithTimeout(req.Context(), r.opts.StatusTimeout)
+	f := r.statusAt(sctx, round)
+	scancel()
 	if f.err != nil {
 		r.log.Debug("held wait timed out with no status, forwarding", "after", after, "err", f.err)
 		r.handleDefault(w, req, class, cands, best)
@@ -525,7 +556,9 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 	if req.Context().Err() != nil {
 		return
 	}
-	f := r.statusAt(round)
+	sctx, scancel := context.WithTimeout(req.Context(), r.opts.StatusTimeout)
+	f := r.statusAt(sctx, round)
+	scancel()
 	if f.err != nil {
 		// No node known at that round answered: an ordinary forward.
 		r.log.Debug("coalesced status unavailable, forwarding", "round", round, "err", f.err)
@@ -542,7 +575,9 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 
 // statusAt returns a status body at round or later: the last one when it is
 // recent enough, else the result of a fetch shared with concurrent callers.
-func (r *Router) statusAt(round uint64) *statusFetch {
+// A caller whose ctx ends first gets an error result; the fetch goes on for
+// the others and for the next round.
+func (r *Router) statusAt(ctx context.Context, round uint64) *statusFetch {
 	r.statusMu.Lock()
 	if last := r.status; last != nil && last.round >= round {
 		r.statusMu.Unlock()
@@ -555,14 +590,21 @@ func (r *Router) statusAt(round uint64) *statusFetch {
 		go r.fetchStatus(f)
 	}
 	r.statusMu.Unlock()
-	<-f.done
-	return f
+	select {
+	case <-f.done:
+		return f
+	case <-ctx.Done():
+		return &statusFetch{want: round, err: ctx.Err()}
+	}
 }
 
 // fetchStatus asks eligible nodes at f.round or later for /v2/status, best
-// first, within the retry budget.
+// first, within the retry budget, each try bounded by StatusTimeout and all
+// of them by RequestTimeout.
 func (r *Router) fetchStatus(f *statusFetch) {
 	defer close(f.done)
+	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
+	defer cancel()
 	want := f.want
 	class := domain.Classify(http.MethodGet, "/v2/status")
 	cands, best := r.dir.Snapshot()
@@ -579,8 +621,11 @@ func (r *Router) fetchStatus(f *statusFetch) {
 			tries = tries[:1+b]
 		}
 		for _, u := range tries {
-			if f.round, f.body, f.err = r.getStatus(u, class); f.err == nil {
+			if f.round, f.body, f.err = r.getStatus(ctx, u, class); f.err == nil {
 				f.upstream = u
+				break
+			}
+			if ctx.Err() != nil {
 				break
 			}
 		}
@@ -595,8 +640,8 @@ func (r *Router) fetchStatus(f *statusFetch) {
 	}
 }
 
-func (r *Router) getStatus(u domain.Upstream, class domain.RequestClass) (uint64, []byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.UpstreamTimeout)
+func (r *Router) getStatus(ctx context.Context, u domain.Upstream, class domain.RequestClass) (uint64, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.opts.StatusTimeout)
 	defer cancel()
 	rq, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(u.BaseURL, "/")+"/v2/status", nil)
 	if err != nil {
@@ -664,7 +709,7 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 		return
 	}
 	targets := dedupeByURL(meshFirst(append([]domain.Upstream{sel.Chosen}, sel.Alternates...)))
-	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
+	ctx, cancel := context.WithTimeout(req.Context(), r.opts.RequestTimeout)
 	defer cancel()
 	results := r.fanOut(ctx, req, body, targets, class)
 	var fallback *fanResult
@@ -689,14 +734,14 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 		}
 	}
 	r.metric.Inc("loadb_multibroadcast", "outcome", "failed")
-	if unanswered == len(targets) {
+	if unanswered == len(targets) && timeLeft(ctx) {
 		// No node answered at all: the externals are the last resort.
-		if ext, ok := r.externalFallback(req.Context(), class, targets); ok {
+		if ext, ok := r.externalFallback(ctx, class, targets); ok && timeLeft(ctx) {
 			r.metric.Inc("loadb_retries")
 			r.log.Debug("retrying on external", "path", req.URL.Path, "external", ext.ID)
 			req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 			cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
-			out := r.forward(cw, req, ext, class, nil)
+			out := r.forward(ctx, cw, req, ext, class, nil)
 			if !out.Failed() || out.HeadersSent || req.Context().Err() != nil {
 				if cw.status == 200 {
 					r.rememberTxn(txIDFrom(cw.buf.Bytes()), ext.ID)
@@ -767,6 +812,8 @@ func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, tar
 	results := make(chan fanResult, len(targets))
 	for _, u := range targets {
 		go func(u domain.Upstream) {
+			ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
+			defer cancel()
 			start := r.clock.Now()
 			rq, _ := http.NewRequestWithContext(ctx, req.Method, strings.TrimSuffix(u.BaseURL, "/")+req.URL.RequestURI(), bytes.NewReader(body))
 			rq.Header.Set("X-Algo-API-Token", u.Token)

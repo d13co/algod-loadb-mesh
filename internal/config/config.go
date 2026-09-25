@@ -282,8 +282,9 @@ type Routing struct {
 	LagGrace               time.Duration `yaml:"lag_grace"` // one round behind is tolerated this long
 	ReturnHysteresisRounds int           `yaml:"return_hysteresis_rounds"`
 	MultiBroadcast         bool          `yaml:"multi_broadcast"`
-	RetryBudget            *int          `yaml:"retry_budget"` // cap on further mesh upstreams tried after a failure; unset: every eligible one
-	UpstreamTimeout        time.Duration `yaml:"upstream_timeout"`
+	RetryBudget            *int          `yaml:"retry_budget"`     // cap on further mesh upstreams tried after a failure; unset: every eligible one
+	UpstreamTimeout        time.Duration `yaml:"upstream_timeout"` // bound on one attempt at one upstream
+	RequestTimeout         time.Duration `yaml:"request_timeout"`  // bound on one request across every upstream tried; default 2*upstream_timeout
 	PendingTTL             time.Duration `yaml:"pending_ttl"`
 	DrainTimeout           time.Duration `yaml:"drain_timeout"`
 	Breaker                Breaker       `yaml:"breaker"`
@@ -525,6 +526,12 @@ func (c *Config) Finish() error {
 	}
 	if c.Routing.UpstreamTimeout == 0 {
 		c.Routing.UpstreamTimeout = 60 * time.Second
+	}
+	if c.Routing.RequestTimeout < 0 {
+		return errors.New("routing.request_timeout must not be negative")
+	}
+	if c.Routing.RequestTimeout == 0 {
+		c.Routing.RequestTimeout = 2 * c.Routing.UpstreamTimeout
 	}
 	if c.Local.WaitTimeout == 0 {
 		c.Local.WaitTimeout = 60 * time.Second

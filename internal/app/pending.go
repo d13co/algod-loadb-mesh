@@ -49,7 +49,7 @@ func (r *Router) handlePending(w http.ResponseWriter, req *http.Request, class d
 			if u.ID != id {
 				continue
 			}
-			out := r.forward(w, req, u, class, map[int]bool{404: true})
+			out := r.forward(req.Context(), w, req, u, class, map[int]bool{404: true})
 			if out.HeadersSent || req.Context().Err() != nil {
 				return
 			}

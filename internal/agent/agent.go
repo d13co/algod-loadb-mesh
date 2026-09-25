@@ -91,7 +91,7 @@ func New(d Deps) (*Agent, error) {
 	}
 	router := app.NewRouter(app.RouterOptions{Mode: mode, Balancer: balancer, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
 		UpstreamTimeout: c.Routing.UpstreamTimeout, WaitTimeout: c.Local.WaitTimeout, PendingTTL: c.Routing.PendingTTL,
-		RetryBudget: retry, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
+		RequestTimeout: c.Routing.RequestTimeout, RetryBudget: retry, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
 		dir, monitor, d.Forwarder, d.HTTPClient, stats, d.Clock, d.Log, d.Metrics, d.Rand, d.MetricsText)
 
 	pub := d.AgentKey.Public().(ed25519.PublicKey)

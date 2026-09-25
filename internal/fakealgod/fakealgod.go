@@ -48,6 +48,7 @@ type Node struct {
 	oldest    uint64
 	changed   chan struct{}
 	failing   bool
+	hang      bool // every request blocks until the client gives up
 	rejecting bool // every broadcast answers 400, as algod does for a rejected transaction
 	latency   time.Duration
 	boxes     map[uint64]map[string][]byte
@@ -118,6 +119,14 @@ func (n *Node) SetRejecting(f bool) {
 	n.mu.Unlock()
 }
 
+// SetHang makes every request block until its client gives up (true), as
+// a node that accepts connections and never answers, or behave normally.
+func (n *Node) SetHang(f bool) {
+	n.mu.Lock()
+	n.hang = f
+	n.mu.Unlock()
+}
+
 // SetFailing makes every request answer 503 (true) or behave normally (false).
 func (n *Node) SetFailing(f bool) {
 	n.mu.Lock()
@@ -173,11 +182,15 @@ func (n *Node) DeleteBox(app uint64, name []byte) {
 func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	n.mu.Lock()
 	n.hits[r.URL.Path]++
-	failing, latency, round, oldest := n.failing, n.latency, n.round, n.oldest
+	failing, hang, latency, round, oldest := n.failing, n.hang, n.latency, n.round, n.oldest
 	n.mu.Unlock()
 	w.Header().Set("X-Fake-Node", n.opts.ID)
 	if latency > 0 {
 		time.Sleep(latency)
+	}
+	if hang {
+		<-r.Context().Done()
+		return
 	}
 	if failing {
 		writeJSON(w, 503, map[string]string{"message": "fake node is failing"})

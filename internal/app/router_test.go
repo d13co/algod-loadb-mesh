@@ -301,9 +301,20 @@ type twoPeerHarness struct {
 
 func newTwoPeerHarness(t *testing.T, multiBroadcast bool) *twoPeerHarness {
 	t.Helper()
+	return newTwoPeerHarnessOpts(t, nil, func(o *RouterOptions) { o.MultiBroadcast = multiBroadcast })
+}
+
+// newTwoPeerHarnessOpts is newTwoPeerHarness with hooks on the directory
+// and router options.
+func newTwoPeerHarnessOpts(t *testing.T, dopts func(*DirectoryOptions), ropts func(*RouterOptions)) *twoPeerHarness {
+	t.Helper()
 	ext := fakealgod.New(fakealgod.Options{ID: "ext", StartRound: 10})
 	t.Cleanup(ext.Close)
-	h := newHarnessWith(t, DirectoryOptions{Externals: []ExternalUpstream{{Name: "ext", URL: ext.URL(), Token: ext.Token(), HealthCheck: 5 * time.Second}}}, algodhttp.Factory{})
+	do := DirectoryOptions{Externals: []ExternalUpstream{{Name: "ext", URL: ext.URL(), Token: ext.Token(), HealthCheck: 5 * time.Second}}}
+	if dopts != nil {
+		dopts(&do)
+	}
+	h := newHarnessWith(t, do, algodhttp.Factory{})
 	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 10})
 	t.Cleanup(b.Close)
 	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 10})
@@ -314,8 +325,11 @@ func newTwoPeerHarness(t *testing.T, multiBroadcast bool) *twoPeerHarness {
 	recC := domain.NodeRecord{ID: "c", Network: "n", Agent: domain.AgentInfo{Addrs: []string{addrB}, PubKey: []byte(cPub)},
 		Endpoints: []string{c.URL()}, Token: c.Token()}
 	h.d.SetRecords([]domain.NodeRecord{recB, recC})
-	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, RetryBudget: -1, MultiBroadcast: multiBroadcast},
-		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	ro := RouterOptions{Mode: domain.ModeFallback, RetryBudget: -1}
+	if ropts != nil {
+		ropts(&ro)
+	}
+	r := NewRouter(ro, h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
 	wh := &waitHarness{harness: h, n: b, r: r}
 	wh.heartbeat(1, 10)
 	wire, _ := domain.EncodeHeartbeat(cKey, domain.Heartbeat{NodeID: "c", Seq: 1, Online: true, LastRound: 10})
@@ -428,5 +442,110 @@ func TestLocalOnlyRequestNeverChecksExternals(t *testing.T) {
 	}
 	if n := ext.Hits("/"); n != 0 {
 		t.Fatalf("external checked %d times for local-only requests", n)
+	}
+}
+
+// An explicit retry budget caps the mesh attempts; the external still
+// follows them.
+func TestRetryBudgetCapsMeshAttempts(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, func(o *RouterOptions) { o.RetryBudget = 0 })
+	h.n.SetFailing(true)
+	h.c.SetFailing(true)
+	rec := h.get("/v2/status")
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("capped fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if b, c := h.n.Hits("/v2/status"), h.c.Hits("/v2/status"); b+c != 1 {
+		t.Fatalf("mesh attempts b=%d c=%d, want one in all", b, c)
+	}
+	if !strings.Contains(h.metricsText(), "loadb_retries_total 1") {
+		t.Fatalf("retries:\n%s", h.metricsText())
+	}
+}
+
+// A body too large to hold is sent once: no other node, no external.
+func TestOversizedBodyIsSentOnce(t *testing.T) {
+	h := newTwoPeerHarness(t, false)
+	h.n.SetFailing(true)
+	h.c.SetFailing(true)
+	rec := h.post("/v2/transactions", strings.Repeat("x", maxReplayBody+1))
+	if rec.Code != 502 {
+		t.Fatalf("oversized write: %d %s", rec.Code, rec.Body.String())
+	}
+	if b, c, e := h.n.Hits("/v2/transactions"), h.c.Hits("/v2/transactions"), h.ext.Hits("/"); b+c != 1 || e != 0 {
+		t.Fatalf("attempts b=%d c=%d ext=%d, want one in all", b, c, e)
+	}
+	if strings.Contains(h.metricsText(), "loadb_retries_total") {
+		t.Fatalf("oversized write retried:\n%s", h.metricsText())
+	}
+}
+
+// The request as a whole is bounded: nodes that accept and hang cost the
+// client one request timeout, not one upstream timeout each, and an
+// attempt is not started with too little of it left.
+func TestRequestTimeoutBoundsHangingNodes(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, func(o *RouterOptions) {
+		o.UpstreamTimeout, o.RequestTimeout = 300*time.Millisecond, 500*time.Millisecond
+	})
+	h.n.SetHang(true)
+	h.c.SetHang(true)
+	start := time.Now()
+	rec := h.get("/v2/status")
+	if el := time.Since(start); rec.Code != 504 || el > 1500*time.Millisecond {
+		t.Fatalf("hanging mesh: %d after %s: %s", rec.Code, el, rec.Body.String())
+	}
+	if e := h.ext.Hits("/"); e != 0 {
+		t.Fatalf("external tried with no time left: %d hits", e)
+	}
+}
+
+// Within the request timeout each attempt is still bounded by its own, so
+// hanging nodes are passed over and the external answers.
+func TestUpstreamTimeoutPassesOverHangingNodes(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, func(o *RouterOptions) { o.UpstreamTimeout, o.RequestTimeout = 300*time.Millisecond, 3*time.Second })
+	h.n.SetHang(true)
+	h.c.SetHang(true)
+	start := time.Now()
+	rec := h.get("/v2/status")
+	if el := time.Since(start); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" || el > 2*time.Second {
+		t.Fatalf("hanging mesh with time to spare: %d %s after %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), el)
+	}
+}
+
+// A held wait that times out answers with a status fetched from a node; a
+// node that hangs on that fetch holds the waiter for StatusTimeout at most,
+// after which the request is forwarded as usual, within its own bounds.
+func TestHangingStatusNodeDoesNotStallWait(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, func(o *RouterOptions) {
+		o.WaitTimeout, o.StatusTimeout, o.UpstreamTimeout = 200*time.Millisecond, 200*time.Millisecond, 300*time.Millisecond
+	})
+	h.n.SetHang(true)
+	h.c.SetHang(true)
+	start := time.Now()
+	rec := h.get("/v2/status/wait-for-block-after/10")
+	if el := time.Since(start); rec.Code != 504 || el > 1500*time.Millisecond {
+		t.Fatalf("wait with hanging nodes: %d after %s: %s", rec.Code, el, rec.Body.String())
+	}
+}
+
+// The same on a balancer, whose every wait-for-block-after is answered from
+// a coalesced status fetch.
+func TestBalancerWaitStatusTimeout(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, func(o *DirectoryOptions) { o.NoLocal = true }, func(o *RouterOptions) {
+		o.Balancer = true
+		o.WaitTimeout, o.StatusTimeout, o.UpstreamTimeout = 200*time.Millisecond, 200*time.Millisecond, 300*time.Millisecond
+	})
+	h.n.SetHang(true)
+	h.c.SetHang(true)
+	start := time.Now()
+	rec := h.get("/v2/status/wait-for-block-after/10")
+	if el := time.Since(start); rec.Code != 504 || el > 1500*time.Millisecond {
+		t.Fatalf("balancer wait with hanging nodes: %d after %s: %s", rec.Code, el, rec.Body.String())
+	}
+	// The nodes answer again: the next wait is served from a fresh fetch.
+	h.n.SetHang(false)
+	h.c.SetHang(false)
+	if rec := h.get("/v2/status/wait-for-block-after/9"); rec.Code != 200 || lastRound(t, rec) != 10 {
+		t.Fatalf("balancer wait after recovery: %d %s", rec.Code, rec.Body.String())
 	}
 }

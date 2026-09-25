@@ -26,8 +26,9 @@ Each host runs one agent next to its algod. The agent:
   one, goes to them, and they are neither polled nor contacted otherwise;
 - retries a request that an upstream failed without answering (a transport
   error, or a 502/503/504) on every other eligible mesh node in turn and
-  then on an external, writes included; an answer such as a rejected
-  transaction is the client's and is never retried;
+  then on an external, writes included, within one `request_timeout` for
+  the request as a whole; an answer such as a rejected transaction is the
+  client's and is never retried;
 - keeps v1's client-facing behaviour: `X-Algo-API-Token` auth,
   wait-for-block coalescing, capability-aware routing, optional
   multi-broadcast, drain on shutdown, and the upstream response header (now

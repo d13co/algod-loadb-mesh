@@ -37,6 +37,12 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nrouting: {retry_budget: -1}\n"); err == nil || !strings.Contains(err.Error(), "retry_budget") {
 		t.Fatalf("negative retry_budget must fail: %v", err)
 	}
+	if c.Routing.RequestTimeout != 2*c.Routing.UpstreamTimeout {
+		t.Fatalf("request_timeout default: %s with upstream_timeout %s", c.Routing.RequestTimeout, c.Routing.UpstreamTimeout)
+	}
+	if _, err := load(t, "local: {id: a, data_dir: /x}\nrouting: {request_timeout: -1s}\n"); err == nil || !strings.Contains(err.Error(), "request_timeout") {
+		t.Fatalf("negative request_timeout must fail: %v", err)
+	}
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nunknown_key: 1\n"); err == nil {
 		t.Fatal("unknown keys must fail")
 	}
