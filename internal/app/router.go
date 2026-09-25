@@ -353,23 +353,27 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 }
 
 // handlePeerWait serves a wait-for-block-after the local node cannot: it holds
-// the request until a peer's heartbeat reports a round past the caller's, then
+// the request until a heartbeat reports a round past the caller's, then
 // forwards it to that peer, whose algod answers at once. Forwarding straight
 // away would let the peer answer before its heartbeat reached this directory,
 // and the client's next request, for the block the answer announced, would
-// find no upstream at that round. When the mesh does not pass the round within
-// the wait timeout the request is answered with a node's current status, as
-// algod's own timeout does. With no reachable peer there is nothing to wait
-// for and the request is forwarded at once.
+// find no upstream at that round. The local node's own progress wakes the
+// hold too: when it was behind the caller's round and catches up, the request
+// goes to it. When the mesh does not pass the round within the wait timeout
+// the request is answered with a node's current status, as algod's own
+// timeout does. When no mesh node could serve the request once at the round,
+// there is nothing to wait for and it is forwarded at once.
 func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	if !anyPeerReachable(cands) {
+	if !r.worthWaiting(cands, class, best) {
 		r.handleDefault(w, req, class, cands, best)
 		return
 	}
 	after := *class.WaitAfter
 	ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
 	defer cancel()
-	r.metric.Inc("loadb_wait_held")
+	if r.dir.HeartbeatRound() <= after {
+		r.metric.Inc("loadb_wait_held")
+	}
 	round, err := r.dir.WaitForHeartbeatRound(ctx, after)
 	if req.Context().Err() != nil {
 		return
@@ -378,7 +382,7 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 	if err == nil {
 		var past []domain.Upstream
 		for _, u := range cands {
-			if u.Kind == domain.KindPeer && u.LastRound > after {
+			if u.Kind != domain.KindExternal && u.LastRound > after {
 				past = append(past, u)
 			}
 		}
@@ -386,7 +390,7 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 			r.forwardSelected(w, req, class, sel)
 			return
 		}
-		// The peer that reported the round is not eligible after all.
+		// The node that reported the round is not eligible after all.
 		r.handleDefault(w, req, class, cands, best)
 		return
 	}
@@ -403,11 +407,14 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 	_, _ = w.Write(f.body)
 }
 
-// anyPeerReachable is true when some peer could be forwarded to at all:
-// reachable, not draining, breaker closed, not throttled.
-func anyPeerReachable(cands []domain.Upstream) bool {
+// worthWaiting is true when some mesh node could serve the request once it
+// reaches the round: eligible for it in every respect but the round itself.
+// A lagging or unusable peer is not waited for; the request is forwarded (or
+// refused) at once, as it was before the hold existed.
+func (r *Router) worthWaiting(cands []domain.Upstream, class domain.RequestClass, best uint64) bool {
+	class.WaitAfter = nil
 	for _, u := range cands {
-		if u.Kind == domain.KindPeer && u.Health.Reachable() && !u.Draining && !u.Stats.BreakerOpen && !u.Stats.Throttled {
+		if u.Kind != domain.KindExternal && domain.Eligible(u, class, best, r.opts.SyncTolerance) {
 			return true
 		}
 	}

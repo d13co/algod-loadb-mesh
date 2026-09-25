@@ -1,9 +1,12 @@
 package app
 
 import (
+	"crypto/ed25519"
+	crand "crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +105,9 @@ func TestPeerWaitHoldsUntilHeartbeatThenForwards(t *testing.T) {
 	if hits := h.n.Hits("/v2/status/wait-for-block-after"); hits != 1 {
 		t.Fatalf("wait forwarded %d times", hits)
 	}
+	if !strings.Contains(h.metricsText(), "loadb_wait_held_total 1") {
+		t.Fatalf("held wait not counted:\n%s", h.metricsText())
+	}
 
 	// The client's next request, for the block the answer announced, finds
 	// the peer at that round.
@@ -118,6 +124,9 @@ func TestPeerWaitPastRoundForwardsAtOnce(t *testing.T) {
 	rec := h.get("/v2/status/wait-for-block-after/10")
 	if rec.Code != 200 || lastRound(t, rec) != 12 || time.Since(start) > time.Second {
 		t.Fatalf("wait for a past round: %d %s after %s", rec.Code, rec.Body.String(), time.Since(start))
+	}
+	if strings.Contains(h.metricsText(), "loadb_wait_held") {
+		t.Fatalf("a wait that never blocked was counted as held:\n%s", h.metricsText())
 	}
 }
 
@@ -143,5 +152,64 @@ func TestPeerWaitWithoutReachablePeerIsNotHeld(t *testing.T) {
 	rec := h.get("/v2/status/wait-for-block-after/10")
 	if rec.Code != 503 || time.Since(start) > time.Second {
 		t.Fatalf("wait with no peer: %d %s after %s", rec.Code, rec.Body.String(), time.Since(start))
+	}
+}
+
+// The local node's own progress wakes a held wait: behind the caller's round
+// at first, it catches up and passes it before any peer heartbeat does, and
+// the request goes to it rather than waiting for the peer.
+func TestPeerWaitWakesOnLocalProgress(t *testing.T) {
+	h := newWaitHarness(t, 5*time.Second)
+	local := fakealgod.New(fakealgod.Options{ID: "me", StartRound: 11})
+	t.Cleanup(local.Close)
+	h.d.monitor.update(func(s *LocalState) {
+		s.Online, s.LastRound, s.Endpoint, s.Config.Token = true, 8, local.URL(), local.Token()
+	})
+	h.heartbeat(1, 9)
+
+	// Round 10 is more than one ahead of the local node: not its wait to serve.
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- h.get("/v2/status/wait-for-block-after/10") }()
+	select {
+	case rec := <-done:
+		t.Fatalf("answered at once: %d %s", rec.Code, rec.Body.String())
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	h.d.monitor.update(func(s *LocalState) { s.LastRound = 11 })
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("still held after the local node passed the round")
+	}
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "me" || lastRound(t, rec) != 11 {
+		t.Fatalf("wait answer: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	}
+	if hits := h.n.Hits("/v2/status/wait-for-block-after"); hits != 0 {
+		t.Fatalf("forwarded to the peer %d times", hits)
+	}
+}
+
+// A peer that could not serve the request once at the round is not worth
+// waiting for: here the only synced peer is draining and the other one is
+// lagging behind it, so the request is refused at once rather than held.
+func TestPeerWaitNotHeldForLaggingPeer(t *testing.T) {
+	h := newWaitHarness(t, 5*time.Second)
+	cPub, cKey, _ := ed25519.GenerateKey(crand.Reader)
+	h.d.SetRecords([]domain.NodeRecord{h.peerRecord(addrA),
+		{ID: "c", Network: "n", Agent: domain.AgentInfo{Addrs: []string{addrB}, PubKey: []byte(cPub)}}})
+	wire, _ := domain.EncodeHeartbeat(cKey, domain.Heartbeat{NodeID: "c", Seq: 1, Online: true, LastRound: 20, Draining: true})
+	h.inject(addrB, wire)
+	waitFor(t, 2*time.Second, func() bool { _, best := h.d.Snapshot(); return best == 20 })
+	h.heartbeat(1, 10)
+
+	start := time.Now()
+	rec := h.get("/v2/status/wait-for-block-after/20")
+	if rec.Code != 503 || time.Since(start) > time.Second {
+		t.Fatalf("wait with only a lagging peer: %d %s after %s", rec.Code, rec.Body.String(), time.Since(start))
+	}
+	if strings.Contains(h.metricsText(), "loadb_wait_held") {
+		t.Fatalf("counted as held:\n%s", h.metricsText())
 	}
 }

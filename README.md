@@ -26,9 +26,9 @@ Each host runs one agent next to its algod. The agent:
   wait-for-block coalescing, capability-aware routing, optional
   multi-broadcast, drain on shutdown, and the upstream response header (now
   `X-Algod-Loadb-Mesh-Upstream`); a `wait-for-block-after` the local node
-  cannot serve is held until a peer's heartbeat reports the round, then
-  forwarded to that peer, so the block it announces is already known to
-  the router when the client asks for it;
+  cannot serve is held until a peer's heartbeat, or the local node, reports
+  the round, then forwarded to that node, so the block it announces is
+  already known to the router when the client asks for it;
 - answers pending-transaction lookups from the node that accepted the txn,
   otherwise asks every node at once and returns the most informative answer
   (confirmed, then pool error, then still pending, then 404).
