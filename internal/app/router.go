@@ -238,6 +238,27 @@ func (r *Router) sel(cands []domain.Upstream, class domain.RequestClass, best ui
 	return domain.Select(r.opts.Mode, cands, class, best, r.opts.SyncTolerance, r.opts.Weights, r.rnd)
 }
 
+// mayUseExternals is false for a request no external can ever serve, so
+// that it never triggers a check of one.
+func mayUseExternals(class domain.RequestClass) bool { return !class.LocalOnly }
+
+// pick selects an upstream for the request. When nothing in the mesh can
+// serve it, the externals are checked — they are only checked on demand, so
+// a third-party RPC costs nothing while the mesh is healthy — and the
+// selection is repeated on a fresh snapshot, which is returned for the
+// caller's reporting.
+func (r *Router) pick(ctx context.Context, class domain.RequestClass, cands []domain.Upstream, best uint64) (domain.Selection, []domain.Upstream, uint64, bool) {
+	if sel, ok := r.sel(cands, class, best); ok {
+		return sel, cands, best, true
+	}
+	if !mayUseExternals(class) || !r.dir.checkExternals(ctx) {
+		return domain.Selection{}, cands, best, false
+	}
+	cands, best = r.dir.Snapshot()
+	sel, ok := r.sel(cands, class, best)
+	return sel, cands, best, ok
+}
+
 // forward sends the request to one upstream and records the outcome.
 func (r *Router) forward(w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
 	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", u.ID)
@@ -271,7 +292,7 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 }
 
 func (r *Router) handleDefault(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
+	sel, cands, best, ok := r.pick(req.Context(), class, cands, best)
 	if !ok {
 		r.noUpstream(w, class, cands, best)
 		return
@@ -301,7 +322,44 @@ func (r *Router) forwardSelected(w http.ResponseWriter, req *http.Request, class
 			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", u.ID, "err", last.Err, "status", last.Status)
 		}
 	}
+	if class.Idempotent && r.retryExternal(w, req, class, tries, &last) {
+		return
+	}
 	r.answerFailure(w, req, last)
+}
+
+// retryExternal is the last resort once every upstream tried has failed
+// without answering the client: the externals, which were not candidates
+// while the mesh looked able to serve, are checked and the best of them gets
+// the request. Nothing is done when an external was already tried. It
+// reports whether the client has been answered.
+func (r *Router) retryExternal(w http.ResponseWriter, req *http.Request, class domain.RequestClass, tried []domain.Upstream, last *ports.Outcome) bool {
+	if !mayUseExternals(class) {
+		return false
+	}
+	for _, u := range tried {
+		if u.Kind == domain.KindExternal {
+			return false
+		}
+	}
+	if !r.dir.checkExternals(req.Context()) {
+		return false
+	}
+	cands, best := r.dir.Snapshot()
+	var ext []domain.Upstream
+	for _, u := range cands {
+		if u.Kind == domain.KindExternal {
+			ext = append(ext, u)
+		}
+	}
+	sel, ok := r.sel(ext, class, best)
+	if !ok {
+		return false
+	}
+	r.metric.Inc("loadb_retries")
+	r.log.Debug("retrying on external", "path", req.URL.Path, "failed", tried[len(tried)-1].ID, "external", sel.Chosen.ID)
+	*last = r.forward(w, req, sel.Chosen, class, nil)
+	return !last.Failed() || last.HeadersSent || req.Context().Err() != nil
 }
 
 func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out ports.Outcome) {
@@ -552,7 +610,7 @@ func (r *Router) recallTxn(txid string) (string, bool) {
 // node (never retried after bytes went out) or, with multi_broadcast, to all
 // of them at once, answering with the first success.
 func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
+	sel, cands, best, ok := r.pick(req.Context(), class, cands, best)
 	if !ok {
 		r.noUpstream(w, class, cands, best)
 		return

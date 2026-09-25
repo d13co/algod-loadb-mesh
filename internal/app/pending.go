@@ -35,7 +35,7 @@ var pendingAnswer = [...]string{"failed", "other", "not_found", "in_pool", "pool
 // the nodes that dropped the txn, so the best answer wins: confirmed, then
 // pool error, then still pending, then 404.
 func (r *Router) handlePending(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
+	sel, cands, best, ok := r.pick(req.Context(), class, cands, best)
 	if !ok {
 		r.noUpstream(w, class, cands, best)
 		return

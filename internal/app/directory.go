@@ -19,7 +19,11 @@ type ExternalUpstream struct {
 	Token        string
 	Tier         int
 	Capabilities *domain.CapabilityOverrides
-	HealthCheck  time.Duration
+	// HealthCheck is how long one status check of the external stays valid.
+	// Externals are never checked on a timer: the router checks them when
+	// the mesh cannot serve a request, and a check older than this is
+	// repeated before the external is used again.
+	HealthCheck time.Duration
 }
 
 // PeerOverride is a local correction to a registry record.
@@ -140,11 +144,19 @@ type PathStatus struct {
 type extState struct {
 	cfg       ExternalUpstream
 	client    ports.AlgodClient
-	checkedAt time.Time
-	ok        bool
-	round     uint64
-	judge     domain.SyncJudge
+	checkedAt time.Time     // when the last check started; zero when never
+	inflight  chan struct{} // closed when the check in flight ends; nil when none
+	ok        bool          // the last check answered
+	round     uint64        // its round
 }
+
+// externalCheckTimeout bounds one status check of an external.
+const externalCheckTimeout = 10 * time.Second
+
+// externalDebounce is the least time between two checks of one external
+// while its last check is valid or failed, so a burst of requests the mesh
+// cannot serve costs it one status call.
+const externalDebounce = time.Second
 
 // Directory merges the static registry with live gossip and external probes
 // into the upstream snapshot the router selects from.
@@ -193,7 +205,7 @@ func NewDirectory(o DirectoryOptions, monitor *Monitor, gossip ports.Gossip, cli
 		if e.HealthCheck == 0 {
 			e.HealthCheck = time.Minute
 		}
-		d.externals[e.Name] = &extState{cfg: e, client: clients.NewAlgodClient(e.URL, e.Token), judge: o.judge()}
+		d.externals[e.Name] = &extState{cfg: e, client: clients.NewAlgodClient(e.URL, e.Token)}
 	}
 	return d
 }
@@ -664,7 +676,6 @@ func (d *Directory) maintenanceLoop(ctx context.Context) {
 		case <-tick:
 			d.probeSilentPeers(ctx)
 			d.checkPaths(ctx)
-			d.checkExternals(ctx)
 		}
 	}
 }
@@ -843,33 +854,72 @@ func (d *Directory) LinkSnapshot() []LinkStatus {
 	return out
 }
 
-func (d *Directory) checkExternals(ctx context.Context) {
+// checkExternals refreshes the status of every external whose last check
+// has expired or is older than externalDebounce, waits for the results (or
+// for ctx), and reports whether any external is usable now. Externals are the
+// last resort, so they are only checked here, when the router found nothing
+// in the mesh to serve a request: a third-party RPC sees no traffic at all
+// while the mesh is healthy.
+func (d *Directory) checkExternals(ctx context.Context) bool {
 	now := d.clock.Now()
-	var due []*extState
+	var wait []chan struct{}
 	d.mu.Lock()
 	for _, e := range d.externals {
-		if now.Sub(e.checkedAt) >= e.cfg.HealthCheck {
+		// An expired check is repeated at once, whatever the debounce, so a
+		// validity shorter than it never leaves the external unusable; the
+		// debounce only spaces the checks of a failing external.
+		due := e.checkedAt.IsZero() || now.Sub(e.checkedAt) >= externalDebounce || (e.ok && !e.fresh(now))
+		if e.inflight == nil && due {
 			e.checkedAt = now
-			due = append(due, e)
+			e.inflight = make(chan struct{})
+			go d.checkExternal(e, e.inflight)
+		}
+		if e.inflight != nil {
+			wait = append(wait, e.inflight)
 		}
 	}
 	d.mu.Unlock()
-	for _, e := range due {
-		go func(e *extState) {
-			pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			st, err := e.client.Status(pctx)
-			d.metric.Inc("loadb_external_checks", "name", e.cfg.Name, "ok", boolStr(err == nil))
-			d.mu.Lock()
-			defer d.mu.Unlock()
-			e.ok = err == nil
-			if err == nil {
-				e.round = st.LastRound
-			} else {
-				d.log.Warn("external upstream check failed", "name", e.cfg.Name, "err", err)
-			}
-		}(e)
+	for _, ch := range wait {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		}
 	}
+	now = d.clock.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, e := range d.externals {
+		if e.fresh(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkExternal is one status check; done is closed when its result is in.
+// The check outlives the request that asked for it, since others may join.
+func (d *Directory) checkExternal(e *extState, done chan struct{}) {
+	defer close(done)
+	ctx, cancel := context.WithTimeout(context.Background(), externalCheckTimeout)
+	defer cancel()
+	st, err := e.client.Status(ctx)
+	d.metric.Inc("loadb_external_checks", "name", e.cfg.Name, "ok", boolStr(err == nil))
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	e.inflight = nil
+	e.ok = err == nil
+	if err == nil {
+		e.round = st.LastRound
+	} else {
+		d.log.Warn("external upstream check failed", "name", e.cfg.Name, "err", err)
+	}
+}
+
+// fresh is true when the external's last check answered and is still
+// within its HealthCheck validity.
+func (e *extState) fresh(now time.Time) bool {
+	return e.ok && now.Sub(e.checkedAt) <= e.cfg.HealthCheck
 }
 
 func boolStr(b bool) string {
@@ -879,7 +929,9 @@ func boolStr(b bool) string {
 	return "false"
 }
 
-// bestRoundLocked is the highest round among local, fresh peers and externals.
+// bestRoundLocked is the highest round among local, fresh peers and
+// externals. An external's round may be old, since it is only checked on
+// demand, but the chain only moves forward so it is still a lower bound.
 func (d *Directory) bestRoundLocked(local LocalState) uint64 {
 	now := d.clock.Now()
 	best := uint64(0)
@@ -972,9 +1024,15 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 		caps := e.cfg.Capabilities.Apply(domain.Capabilities{
 			OldestRound: domain.OldestRoundFor(domain.Archival{Kind: domain.ArchivalNone}, e.round),
 			Archival:    domain.Archival{Kind: domain.ArchivalNone}}, e.round)
+		// An external is reachable only on a valid check. There is no sync
+		// judge with grace and hysteresis for it: its checks are sparse,
+		// on demand, and when it is the only option it should serve.
 		u := domain.Upstream{ID: n, Kind: domain.KindExternal, Tier: e.cfg.Tier, BaseURL: e.cfg.URL, Token: e.cfg.Token,
-			LastRound: e.round, Caps: caps, Stats: d.stats.Snapshot(n), Health: domain.HealthOffline, Source: "check"}
-		u.Health = e.judge.Judge(now, e.ok, e.round, best)
+			LastRound: e.round, Caps: caps, Stats: d.stats.Snapshot(n), Health: domain.HealthOffline, Source: "none"}
+		if e.fresh(now) {
+			u.Source = "check"
+			u.Health = domain.SyncHealth(domain.HealthOnline, e.round, best, d.opts.SyncTolerance)
+		}
 		out = append(out, u)
 	}
 	return out, best

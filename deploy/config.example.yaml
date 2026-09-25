@@ -80,7 +80,10 @@ tiers:
       # token: ""                       # X-Algo-API-Token sent to it
       tier: 100                       # default 100
       capabilities: { archival: { kind: full } }   # same fields as local.overrides; nothing is detected for externals
-      health_check: 60s               # default 1m
+      health_check: 60s               # how long one status check stays valid; default 1m
+                                      # externals are never polled on a timer: the agent checks one only when
+                                      # nothing in the mesh can serve a request, and re-checks it when the last
+                                      # check is older than this
 
 routing:
   sync_tolerance: 0                   # rounds a node may trail the best and still serve; default 0

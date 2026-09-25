@@ -281,8 +281,8 @@ balancer is deaf.
   mask the break; and a **negative** `HeardMS` never marks a path deaf,
   because a restarted peer legitimately reports it on its first pings and a
   path that never worked is caught by loss counting anyway.
-- **`checkPaths`** joins `probeSilentPeers`/`checkExternals` on the existing 1 s
-  tick, collecting pings under the lock and sending outside it (no goroutine
+- **`checkPaths`** joins `probeSilentPeers` on the existing 1 s tick,
+  collecting pings under the lock and sending outside it (no goroutine
   per ping — a UDP write is microseconds). One cadence rule: ping a path when
   `now - pingedAt >= interval`, where interval is `PathProbeInterval` if its
   last ping was answered and `2*PathTimeout` otherwise (never measured, or

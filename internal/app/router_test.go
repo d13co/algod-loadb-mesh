@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/proxy"
 	"github.com/d13co/algod-loadb-mesh/internal/domain"
@@ -211,5 +212,81 @@ func TestPeerWaitNotHeldForLaggingPeer(t *testing.T) {
 	}
 	if strings.Contains(h.metricsText(), "loadb_wait_held") {
 		t.Fatalf("counted as held:\n%s", h.metricsText())
+	}
+}
+
+// An external is only used, and only checked, once the mesh cannot serve:
+// here the peer looks fine by its heartbeat but fails the request, so the
+// request falls back to the external after the failure, and the next one
+// finds the external already checked and reaches it as an alternate.
+func TestFailedMeshForwardFallsBackToExternal(t *testing.T) {
+	ext := fakealgod.New(fakealgod.Options{ID: "ext", StartRound: 10})
+	t.Cleanup(ext.Close)
+	h := newHarnessWith(t, DirectoryOptions{Externals: []ExternalUpstream{{Name: "ext", URL: ext.URL(), Token: ext.Token(), HealthCheck: 5 * time.Second}}}, algodhttp.Factory{})
+	n := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 10})
+	t.Cleanup(n.Close)
+	rec := h.peerRecord(addrA)
+	rec.Endpoints, rec.Token = []string{n.URL()}, n.Token()
+	h.d.SetRecords([]domain.NodeRecord{rec})
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	wh := &waitHarness{harness: h, n: n, r: r}
+	wh.heartbeat(1, 10)
+
+	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
+		t.Fatalf("healthy peer: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if n := ext.Hits("/"); n != 0 {
+		t.Fatalf("external touched %d times while the peer serves", n)
+	}
+
+	n.SetFailing(true)
+	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	}
+	if c, f := ext.Hits("/v2/status"), n.Hits("/v2/status"); c != 2 || f != 2 {
+		t.Fatalf("external hit %d times (check and request), peer %d", c, f)
+	}
+	// The check is still valid: no new one, the external is an alternate.
+	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("second fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if c := ext.Hits("/v2/status"); c != 3 {
+		t.Fatalf("external hit %d times, want one more request and no check", c)
+	}
+	// A non-idempotent request is not retried anywhere.
+	post := httptest.NewRecorder()
+	wh.r.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/v2/accounts/x/assets", nil))
+	if post.Code != 502 {
+		t.Fatalf("non-idempotent retried: %d %s", post.Code, post.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+}
+
+// A request no external can serve never triggers a check of one, whether it
+// finds no upstream at all or fails on the local node.
+func TestLocalOnlyRequestNeverChecksExternals(t *testing.T) {
+	ext := fakealgod.New(fakealgod.Options{ID: "ext", StartRound: 10})
+	t.Cleanup(ext.Close)
+	local := fakealgod.New(fakealgod.Options{ID: "me", StartRound: 10})
+	t.Cleanup(local.Close)
+	h := newHarnessWith(t, DirectoryOptions{Externals: []ExternalUpstream{{Name: "ext", URL: ext.URL(), Token: ext.Token(), HealthCheck: 5 * time.Second}}}, algodhttp.Factory{})
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	wh := &waitHarness{harness: h, r: r}
+
+	// No local node at all: nothing to select, and no check either.
+	if rec := wh.get("/v2/transactions/pending"); rec.Code != 503 {
+		t.Fatalf("no local node: %d", rec.Code)
+	}
+	// A local node that fails the request: no retry on the external.
+	h.d.monitor.update(func(s *LocalState) {
+		s.Online, s.LastRound, s.Endpoint, s.Config.Token = true, 10, local.URL(), local.Token()
+	})
+	local.SetFailing(true)
+	if rec := wh.get("/v2/transactions/pending"); rec.Code != 502 {
+		t.Fatalf("failing local node: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := ext.Hits("/"); n != 0 {
+		t.Fatalf("external checked %d times for local-only requests", n)
 	}
 }
