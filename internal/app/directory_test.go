@@ -822,6 +822,7 @@ func TestExternalCheckReturnsOnFirstUsable(t *testing.T) {
 		t.Fatalf("slow external usable before its check answered: %+v", u)
 	}
 	close(clients.block)
+	h.awaitExternalChecks()
 }
 
 // Concurrent callers share one check of an external.

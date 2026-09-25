@@ -144,7 +144,7 @@ type PathStatus struct {
 type extState struct {
 	cfg       ExternalUpstream
 	client    ports.AlgodClient
-	checkedAt time.Time     // when the last check started; zero when never
+	checkedAt time.Time     // when the last check completed; zero when never
 	inflight  chan struct{} // closed when the check in flight ends; nil when none
 	ok        bool          // the last check answered
 	round     uint64        // its round
@@ -187,6 +187,7 @@ type Directory struct {
 	nonce      uint64           // last ping nonce issued
 	hbRound    uint64           // highest round an online node reported: by heartbeat, or the local node
 	hbChanged  chan struct{}    // closed when hbRound rises
+	extDone    chan struct{}    // closed when a check of an external completes
 	externals  map[string]*extState
 	localJudge domain.SyncJudge
 	localSeq   uint64
@@ -199,7 +200,7 @@ func NewDirectory(o DirectoryOptions, monitor *Monitor, gossip ports.Gossip, cli
 	stats *StatsBook, clock ports.Clock, log ports.Logger, metric ports.Metrics, priv ed25519.PrivateKey) *Directory {
 	o.defaults()
 	d := &Directory{opts: o, monitor: monitor, gossip: gossip, clients: clients, stats: stats, clock: clock,
-		log: log, metric: metric, priv: priv, peers: map[string]*peerState{}, balancers: map[string]*link{}, hbChanged: make(chan struct{}), externals: map[string]*extState{},
+		log: log, metric: metric, priv: priv, peers: map[string]*peerState{}, balancers: map[string]*link{}, hbChanged: make(chan struct{}), extDone: make(chan struct{}), externals: map[string]*extState{},
 		localJudge: o.judge(), nudge: make(chan struct{}, 1), policy: domain.PathPolicy{ProbeInterval: o.PathProbeInterval}}
 	for _, e := range o.Externals {
 		if e.HealthCheck == 0 {
@@ -864,7 +865,6 @@ func (d *Directory) LinkSnapshot() []LinkStatus {
 // healthy.
 func (d *Directory) checkExternals(ctx context.Context) bool {
 	now := d.clock.Now()
-	var wait []chan struct{}
 	d.mu.Lock()
 	for _, e := range d.externals {
 		// An expired check is repeated at once, whatever the debounce, so a
@@ -875,42 +875,37 @@ func (d *Directory) checkExternals(ctx context.Context) bool {
 			e.inflight = make(chan struct{})
 			go d.checkExternal(e, e.inflight)
 		}
-		if e.inflight != nil {
-			wait = append(wait, e.inflight)
-		}
 	}
 	d.mu.Unlock()
-	if d.anyExternalFresh() {
-		return true
-	}
-	done := make(chan struct{}, len(wait))
-	for _, ch := range wait {
-		go func(ch chan struct{}) { <-ch; done <- struct{}{} }(ch)
-	}
-	for range wait {
+	// Every caller waits on the one signal a completing check raises, so a
+	// mesh outage costs no goroutine per waiting request.
+	for {
+		fresh, inflight, done := d.externalsLocked()
+		if fresh {
+			return true
+		}
+		if !inflight {
+			return false
+		}
 		select {
 		case <-done:
-			if d.anyExternalFresh() {
-				return true
-			}
 		case <-ctx.Done():
 			return false
 		}
 	}
-	return false
 }
 
-// anyExternalFresh is true when some external has a valid check.
-func (d *Directory) anyExternalFresh() bool {
+// externalsLocked reports whether some external has a valid check, whether
+// any check is in flight, and the channel closed when the next one ends.
+func (d *Directory) externalsLocked() (fresh, inflight bool, done chan struct{}) {
 	now := d.clock.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, e := range d.externals {
-		if e.fresh(now) {
-			return true
-		}
+		fresh = fresh || e.fresh(now)
+		inflight = inflight || e.inflight != nil
 	}
-	return false
+	return fresh, inflight, d.extDone
 }
 
 // checkExternal is one status check; done is closed when its result is in.
@@ -927,6 +922,8 @@ func (d *Directory) checkExternal(e *extState, done chan struct{}) {
 	e.inflight = nil
 	e.checkedAt = d.clock.Now()
 	e.ok = err == nil
+	close(d.extDone)
+	d.extDone = make(chan struct{})
 	if err == nil {
 		e.round = st.LastRound
 	} else {
