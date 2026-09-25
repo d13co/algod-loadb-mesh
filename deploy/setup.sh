@@ -109,6 +109,8 @@ main() {
 		return 0
 	fi
 	local src=$SHARE/algod-loadb-mesh.service
+	# The apt package keeps the unit template under /usr/share.
+	[ -f "$src" ] || src=/usr/share/algod-loadb-mesh/algod-loadb-mesh.service
 	if [ ! -f "$src" ]; then
 		src=$(mktemp)
 		fetch "${RAW_URL:-https://raw.githubusercontent.com/$REPO/$REF}/deploy/algod-loadb-mesh.service" "$src" ||

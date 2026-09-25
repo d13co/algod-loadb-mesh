@@ -42,12 +42,31 @@ Each host runs one agent next to its algod. The agent:
 
 ## Install
 
-On a linux/amd64 host, this fetches the release binary and the deploy scripts
-into `/usr/local/bin` as `algod-loadb-mesh`, `algod-loadb-mesh-autoconfig` and
-`algod-loadb-mesh-setup`, and configures nothing. Run it as your user; it
-downloads and verifies as you and uses sudo only to copy the files into place:
+On a linux host (amd64 or arm64), run the installer as your user. It downloads
+and verifies as you, and uses sudo only to install:
 
     curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
+
+On Debian and Ubuntu, it adds the apt repository at `https://apt.d13.co` and
+installs the `algod-loadb-mesh` package. The package puts `algod-loadb-mesh`,
+`algod-loadb-mesh-autoconfig` and `algod-loadb-mesh-setup` in `/usr/bin` and
+configures nothing. Later upgrades come with `apt upgrade`, and they restart
+the agent if it is running. Before trusting the repository key, the installer
+checks that it is exactly this key (when gpg is installed):
+
+    F66E 7713 3063 650C 159F  405A C4D2 171F B5B6 0471
+
+To add the repository by hand instead:
+
+    sudo install -d -m 0755 /etc/apt/keyrings
+    sudo curl -fsSL https://apt.d13.co/key.asc -o /etc/apt/keyrings/d13co.asc
+    echo "deb [signed-by=/etc/apt/keyrings/d13co.asc] https://apt.d13.co stable main" |
+      sudo tee /etc/apt/sources.list.d/d13co.list
+    sudo apt update && sudo apt install algod-loadb-mesh
+
+On other distributions, or with `--no-apt`, the installer fetches the release
+binary and the deploy scripts into `/usr/local/bin` under the same names
+instead. That install gets no automatic upgrades.
 
 Setup is a separate step that configures the host: it writes the config,
 installs the systemd unit and starts the service. On a host that already runs
@@ -58,8 +77,9 @@ it is rekeyed) and paste it into the setup on the new host:
 
     sudo algod-loadb-mesh-setup -       # paste the bundle, then Ctrl-D
 
-Releases come from version tags: pushing `v1.2.3` builds the linux/amd64
-binary, publishes it with `checksums.txt`
+Releases come from version tags: pushing `v1.2.3` builds the linux amd64 and
+arm64 binaries and `.deb` packages ([nfpm.yaml](nfpm.yaml)), publishes them
+with `checksums.txt`
 ([.github/workflows/release.yml](.github/workflows/release.yml)) and
 fast-forwards `stable` to that commit, so the scripts install.sh fetches from
 `stable` match the binary it downloads. `--version v1.2.3` installs an older
@@ -69,6 +89,20 @@ release.
 you already have, `--no-start`, `--user`, and anything autoconfig takes.
 Add `--setup` to the install command to do both at once
 ([install.sh](install.sh), [deploy/setup.sh](deploy/setup.sh)).
+
+### Moving to the apt package
+
+A host set up by an older install.sh (or with `--no-apt`) runs
+`/usr/local/bin/algod-loadb-mesh`, which the package does not update. The
+package install and the installer both warn about this. After installing the
+package as above, remove the old files, write the unit again (the config is
+kept) and restart:
+
+    sudo rm /usr/local/bin/algod-loadb-mesh /usr/local/bin/algod-loadb-mesh-autoconfig \
+      /usr/local/bin/algod-loadb-mesh-setup
+    sudo rm -r /usr/local/share/algod-loadb-mesh
+    sudo algod-loadb-mesh-setup --no-start    # add --user USER if you set one before
+    sudo systemctl restart algod-loadb-mesh
 
 ## Run on a node
 
