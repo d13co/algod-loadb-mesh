@@ -1,0 +1,32 @@
+# Debian package, built by the release workflow for each architecture:
+#
+#   GOARCH=arm64 make build && DEB_VERSION=1.2.3 ARCH=arm64 nfpm pkg -p deb -t dist/
+#
+# Like install.sh it configures nothing: algod-loadb-mesh-setup writes the
+# config and the unit (from the template in /usr/share) and starts the service.
+name: algod-loadb-mesh
+arch: ${ARCH}
+version: ${DEB_VERSION}
+maintainer: Tasos Bitsios <bit@d13.co>
+description: Mesh load balancer for algod REST endpoints
+homepage: https://github.com/d13co/algod-loadb-mesh
+section: net
+depends:
+  - iproute2 # autoconfig reads the mesh interfaces
+recommends:
+  - openssl # autoconfig decodes rekeyed bundles with it
+contents:
+  - src: bin/algod-loadb-mesh
+    dst: /usr/bin/algod-loadb-mesh
+    file_info: {mode: 0755} # modes are explicit: the build host's umask leaks otherwise
+  - src: deploy/autoconfig.sh
+    dst: /usr/bin/algod-loadb-mesh-autoconfig
+    file_info: {mode: 0755}
+  - src: deploy/setup.sh
+    dst: /usr/bin/algod-loadb-mesh-setup
+    file_info: {mode: 0755}
+  - src: deploy/algod-loadb-mesh.service
+    dst: /usr/share/algod-loadb-mesh/algod-loadb-mesh.service
+    file_info: {mode: 0644}
+scripts:
+  postinstall: deploy/postinst.sh
