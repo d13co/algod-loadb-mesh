@@ -24,4 +24,7 @@ jobs:
       - run: make test
       - run: make race
       # The scripts install.sh ships: a syntax error there breaks every host.
-      - run: bash -n install.sh deploy/autoconfig.sh deploy/setup.sh
+      - run: bash -n install.sh deploy/autoconfig.sh deploy/setup.sh && sh -n deploy/postinst.sh
+      # Catch packaging mistakes before a tag does.
+      - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+      - run: DEB_VERSION=0.0.0 ARCH=amd64 nfpm pkg -p deb -t "$RUNNER_TEMP"

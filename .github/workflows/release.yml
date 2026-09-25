@@ -1,8 +1,9 @@
 name: release
 
-# Version tags (v1.2.3) publish a release with the linux/amd64 binary that
-# install.sh downloads, and move the stable branch to the tagged commit, so
-# that the scripts install.sh fetches from stable match the released binary.
+# Version tags (v1.2.3) publish a release with the linux amd64 and arm64
+# binaries (which install.sh downloads) and .debs, and move the stable branch
+# to the tagged commit, so that the scripts install.sh fetches from stable
+# match the released binary.
 on:
   push:
     tags: ["v*"]
@@ -24,15 +25,19 @@ jobs:
           cache: true
       - run: make lint
       - run: make test
-      - name: Build
+      - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+      # amd64 last: the version check below runs bin/algod-loadb-mesh.
+      - name: Build the binaries and .debs
         env:
           GOOS: linux
-          GOARCH: amd64
         run: |
-          make build
           mkdir -p dist
-          cp bin/algod-loadb-mesh dist/algod-loadb-mesh-linux-amd64
-          cd dist && sha256sum algod-loadb-mesh-linux-amd64 > checksums.txt
+          for arch in arm64 amd64; do
+            GOARCH=$arch make build
+            cp bin/algod-loadb-mesh dist/algod-loadb-mesh-linux-$arch
+            DEB_VERSION=${GITHUB_REF_NAME#v} ARCH=$arch nfpm pkg -p deb -t dist/
+          done
+          cd dist && sha256sum algod-loadb-mesh-linux-* *.deb > checksums.txt
       - name: Check the version is stamped
         run: |
           v=$(./bin/algod-loadb-mesh version | awk '{print $2}')
@@ -40,6 +45,6 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/algod-loadb-mesh-linux-amd64 dist/checksums.txt
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/*
       - name: Move stable to the tagged commit
         run: git push origin "HEAD:refs/heads/stable" # fast-forward only; fails if stable moved ahead
