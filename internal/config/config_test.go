@@ -37,6 +37,9 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nunknown_key: 1\n"); err == nil {
 		t.Fatal("unknown keys must fail")
 	}
+	if _, err := load(t, "local: {id: a, data_dir: /x}\ntiers: {external: [{name: e, url: http://e, health_check: -1s}]}\n"); err == nil || !strings.Contains(err.Error(), "health_check") {
+		t.Fatalf("negative health_check must fail: %v", err)
+	}
 	// auto_register needs advertise settings.
 	_, err = load(t, "local: {id: a, data_dir: /x}\nregistry: {type: memory}\nmesh: {}\n")
 	if err == nil || !strings.Contains(err.Error(), "advertise") {

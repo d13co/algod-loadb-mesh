@@ -856,10 +856,12 @@ func (d *Directory) LinkSnapshot() []LinkStatus {
 
 // checkExternals refreshes the status of every external whose last check
 // has expired or is older than externalDebounce, waits for the results (or
-// for ctx), and reports whether any external is usable now. Externals are the
-// last resort, so they are only checked here, when the router found nothing
-// in the mesh to serve a request: a third-party RPC sees no traffic at all
-// while the mesh is healthy.
+// for ctx), and reports whether any external is usable now. It returns as
+// soon as one external is usable, so a slow or hanging external never delays
+// a request that another one can serve. Externals are the last resort, so
+// they are only checked here, when the router found nothing in the mesh to
+// serve a request: a third-party RPC sees no traffic at all while the mesh is
+// healthy.
 func (d *Directory) checkExternals(ctx context.Context) bool {
 	now := d.clock.Now()
 	var wait []chan struct{}
@@ -870,7 +872,6 @@ func (d *Directory) checkExternals(ctx context.Context) bool {
 		// debounce only spaces the checks of a failing external.
 		due := e.checkedAt.IsZero() || now.Sub(e.checkedAt) >= externalDebounce || (e.ok && !e.fresh(now))
 		if e.inflight == nil && due {
-			e.checkedAt = now
 			e.inflight = make(chan struct{})
 			go d.checkExternal(e, e.inflight)
 		}
@@ -879,14 +880,29 @@ func (d *Directory) checkExternals(ctx context.Context) bool {
 		}
 	}
 	d.mu.Unlock()
+	if d.anyExternalFresh() {
+		return true
+	}
+	done := make(chan struct{}, len(wait))
 	for _, ch := range wait {
+		go func(ch chan struct{}) { <-ch; done <- struct{}{} }(ch)
+	}
+	for range wait {
 		select {
-		case <-ch:
+		case <-done:
+			if d.anyExternalFresh() {
+				return true
+			}
 		case <-ctx.Done():
 			return false
 		}
 	}
-	now = d.clock.Now()
+	return false
+}
+
+// anyExternalFresh is true when some external has a valid check.
+func (d *Directory) anyExternalFresh() bool {
+	now := d.clock.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, e := range d.externals {
@@ -899,6 +915,7 @@ func (d *Directory) checkExternals(ctx context.Context) bool {
 
 // checkExternal is one status check; done is closed when its result is in.
 // The check outlives the request that asked for it, since others may join.
+// The previous result stays valid until this one replaces it.
 func (d *Directory) checkExternal(e *extState, done chan struct{}) {
 	defer close(done)
 	ctx, cancel := context.WithTimeout(context.Background(), externalCheckTimeout)
@@ -908,6 +925,7 @@ func (d *Directory) checkExternal(e *extState, done chan struct{}) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e.inflight = nil
+	e.checkedAt = d.clock.Now()
 	e.ok = err == nil
 	if err == nil {
 		e.round = st.LastRound
@@ -917,7 +935,8 @@ func (d *Directory) checkExternal(e *extState, done chan struct{}) {
 }
 
 // fresh is true when the external's last check answered and is still
-// within its HealthCheck validity.
+// within its HealthCheck validity, counted from the check's completion so
+// that a slow check is not expired by its own duration.
 func (e *extState) fresh(now time.Time) bool {
 	return e.ok && now.Sub(e.checkedAt) <= e.cfg.HealthCheck
 }

@@ -504,6 +504,9 @@ func (c *Config) Finish() error {
 		if e.Name == "" || e.URL == "" {
 			return fmt.Errorf("tiers.external[%d]: name and url are required", i)
 		}
+		if e.HealthCheck < 0 {
+			return fmt.Errorf("tiers.external[%d]: health_check must not be negative", i)
+		}
 		if e.HealthCheck == 0 {
 			e.HealthCheck = time.Minute
 		}
