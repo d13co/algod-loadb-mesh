@@ -8,13 +8,26 @@ on:
 permissions:
   contents: read
 
+# A PR can push repeatedly; cancel superseded runs so untrusted code cannot
+# stack unbounded concurrent jobs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     # Only this repository: forks do not run the fleet's CI.
     if: github.repository == 'd13co/algod-loadb-mesh'
     runs-on: ubuntu-latest
+    # Untrusted PR code runs below (make targets are attacker-controlled);
+    # cap it well under the 6-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The next steps execute PR-controlled code; do not leave the
+          # GITHUB_TOKEN in .git/config for it to read.
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
