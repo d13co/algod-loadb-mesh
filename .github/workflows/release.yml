@@ -1,9 +1,9 @@
 name: release
 
 # Version tags (v1.2.3) publish a release with the linux amd64 and arm64
-# binaries (which install.sh downloads) and .debs, and move the stable branch
-# to the tagged commit, so that the scripts install.sh fetches from stable
-# match the released binary.
+# binaries (which install.sh downloads) and .debs, move the stable branch to
+# the tagged commit, so that the scripts install.sh fetches from stable match
+# the released binary, and publish the .debs to https://apt.d13.co.
 on:
   push:
     tags: ["v*"]
@@ -48,3 +48,37 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/*
       - name: Move stable to the tagged commit
         run: git push origin "HEAD:refs/heads/stable" # fast-forward only; fails if stable moved ahead
+
+  # Separate from release so a failed publish can be re-run on its own.
+  apt:
+    needs: release
+    runs-on: ubuntu-latest
+    concurrency: apt # one index rebuild at a time
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the .debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" -D dist -p '*.deb' -p checksums.txt
+          cd dist && sha256sum -c --ignore-missing checksums.txt
+      - name: Import the signing subkey
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: echo "$APT_SIGNING_KEY" | gpg --batch --import
+      - name: Publish to apt.d13.co
+        env:
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          printf %s "$APT_SIGNING_PASSPHRASE" > "$RUNNER_TEMP/pass"
+          GPG_PASSPHRASE_FILE=$RUNNER_TEMP/pass APT_REPO=$RUNNER_TEMP/apt .github/apt-publish.sh dist/*.deb
+      - name: Check apt.d13.co lists the release
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          for a in amd64 arm64; do
+            curl -fsS https://apt.d13.co/dists/stable/main/binary-$a/Packages?v=$v |
+              grep -qx "Filename: pool/algod-loadb-mesh_${v}_$a.deb" || { echo "no $v for $a"; exit 1; }
+          done

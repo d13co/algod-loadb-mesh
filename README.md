@@ -82,8 +82,9 @@ arm64 binaries and `.deb` packages ([nfpm.yaml](nfpm.yaml)), publishes them
 with `checksums.txt`
 ([.github/workflows/release.yml](.github/workflows/release.yml)) and
 fast-forwards `stable` to that commit, so the scripts install.sh fetches from
-`stable` match the binary it downloads. `--version v1.2.3` installs an older
-release.
+`stable` match the binary it downloads. It then adds the `.deb`s to the apt
+repository and signs its index ([.github/apt-publish.sh](.github/apt-publish.sh)).
+`--version v1.2.3` installs an older release.
 
 `algod-loadb-mesh-setup -h` lists the rest: `--config FILE` to install a config
 you already have, `--no-start`, `--user`, and anything autoconfig takes.
