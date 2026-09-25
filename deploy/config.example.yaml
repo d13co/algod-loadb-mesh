@@ -25,7 +25,8 @@ local:
   # passthrough: [10.114.0.44:8080]   # also bind these for algod and pass TCP straight through to it (algod binds one address; peers on the other mesh net use this); skipped with a warning when algod already listens there
   tier: 1                             # lower is preferred; default 0
   tags: [dc-a]                        # free-form labels published in this node's record
-  # wait_for_block_timeout: 20s         # timeout of the wait-for-block-after long-poll on the local node
+  # wait_for_block_timeout: 60s         # how long a client wait-for-block-after is held before answering with the current status (algod: 60s);
+  #                                     # the agent's own long-poll on the local node is bound at 70s, above algod's, and is not configurable
   # verify_interval: 1h                 # how often the archival window is re-measured
   # overrides:                          # declare capabilities instead of detecting them from data_dir
   #   archival: { kind: since, n: 25000000 }   # kind: full | trailing (last n rounds) | since (from round n) | none

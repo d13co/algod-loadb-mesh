@@ -43,7 +43,7 @@ func (o *RouterOptions) defaults() {
 		o.UpstreamTimeout = 60 * time.Second
 	}
 	if o.WaitTimeout == 0 {
-		o.WaitTimeout = 20 * time.Second
+		o.WaitTimeout = 60 * time.Second
 	}
 	if o.PendingTTL == 0 {
 		o.PendingTTL = 10 * time.Second
@@ -276,6 +276,12 @@ func (r *Router) handleDefault(w http.ResponseWriter, req *http.Request, class d
 		r.noUpstream(w, class, cands, best)
 		return
 	}
+	r.forwardSelected(w, req, class, sel)
+}
+
+// forwardSelected sends the request to the chosen upstream and, while the
+// retry budget of an idempotent request allows, to the alternates after it.
+func (r *Router) forwardSelected(w http.ResponseWriter, req *http.Request, class domain.RequestClass, sel domain.Selection) {
 	tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
 	budget := 1
 	if class.Idempotent {
@@ -315,8 +321,8 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out por
 }
 
 // handleWait coalesces wait-for-block-after on the local monitor whenever the
-// local node may serve it, and on heartbeats on a balancer; otherwise it is an
-// ordinary forwarded request.
+// local node may serve it, and on heartbeats on a balancer; otherwise it is
+// held until a peer reports the round, then forwarded to that peer.
 func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	if r.opts.Balancer {
 		r.handleBalancerWait(w, req, class, cands, best)
@@ -343,7 +349,76 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 		_, _ = w.Write(body)
 		return
 	}
-	r.handleDefault(w, req, class, cands, best)
+	r.handlePeerWait(w, req, class, cands, best)
+}
+
+// handlePeerWait serves a wait-for-block-after the local node cannot: it holds
+// the request until a heartbeat reports a round past the caller's, then
+// forwards it to that peer, whose algod answers at once. Forwarding straight
+// away would let the peer answer before its heartbeat reached this directory,
+// and the client's next request, for the block the answer announced, would
+// find no upstream at that round. The local node's own progress wakes the
+// hold too: when it was behind the caller's round and catches up, the request
+// goes to it. When the mesh does not pass the round within the wait timeout
+// the request is answered with a node's current status, as algod's own
+// timeout does. When no mesh node could serve the request once at the round,
+// there is nothing to wait for and it is forwarded at once.
+func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
+	if !r.worthWaiting(cands, class, best) {
+		r.handleDefault(w, req, class, cands, best)
+		return
+	}
+	after := *class.WaitAfter
+	ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
+	defer cancel()
+	if r.dir.HeartbeatRound() <= after {
+		r.metric.Inc("loadb_wait_held")
+	}
+	round, err := r.dir.WaitForHeartbeatRound(ctx, after)
+	if req.Context().Err() != nil {
+		return
+	}
+	cands, best = r.dir.Snapshot()
+	if err == nil {
+		var past []domain.Upstream
+		for _, u := range cands {
+			if u.Kind != domain.KindExternal && u.LastRound > after {
+				past = append(past, u)
+			}
+		}
+		if sel, ok := r.sel(past, class, best); ok {
+			r.forwardSelected(w, req, class, sel)
+			return
+		}
+		// The node that reported the round is not eligible after all.
+		r.handleDefault(w, req, class, cands, best)
+		return
+	}
+	f := r.statusAt(round)
+	if f.err != nil {
+		r.log.Debug("held wait timed out with no status, forwarding", "after", after, "err", f.err)
+		r.handleDefault(w, req, class, cands, best)
+		return
+	}
+	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", f.upstream.ID)
+	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, _ = w.Write(f.body)
+}
+
+// worthWaiting is true when some mesh node could serve the request once it
+// reaches the round: eligible for it in every respect but the round itself.
+// A lagging or unusable peer is not waited for; the request is forwarded (or
+// refused) at once, as it was before the hold existed.
+func (r *Router) worthWaiting(cands []domain.Upstream, class domain.RequestClass, best uint64) bool {
+	class.WaitAfter = nil
+	for _, u := range cands {
+		if u.Kind != domain.KindExternal && domain.Eligible(u, class, best, r.opts.SyncTolerance) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleBalancerWait holds the request until a heartbeat reports a round past

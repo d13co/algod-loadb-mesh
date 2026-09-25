@@ -13,7 +13,7 @@ import (
 // MonitorOptions configures the local node monitor.
 type MonitorOptions struct {
 	NodeID         string
-	WaitTimeout    time.Duration // client timeout on wait-for-block-after
+	WaitTimeout    time.Duration // bound on the status-after long-poll; above algod's own timeout
 	StatusTimeout  time.Duration
 	MaxBackoff     time.Duration
 	VerifyInterval time.Duration // empirical re-check of oldest round
@@ -27,7 +27,9 @@ type MonitorOptions struct {
 
 func (o *MonitorOptions) defaults() {
 	if o.WaitTimeout == 0 {
-		o.WaitTimeout = 20 * time.Second
+		// Above algod's own 60s wait-for-block timeout, so that hitting this
+		// one means algod is wedged rather than the chain stalled.
+		o.WaitTimeout = 70 * time.Second
 	}
 	if o.StatusTimeout == 0 {
 		o.StatusTimeout = 10 * time.Second

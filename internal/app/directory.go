@@ -173,7 +173,7 @@ type Directory struct {
 	peers      map[string]*peerState
 	balancers  map[string]*link // registry balancers: heartbeat destinations, never upstreams
 	nonce      uint64           // last ping nonce issued
-	hbRound    uint64           // highest round an accepted, online heartbeat reported
+	hbRound    uint64           // highest round an online node reported: by heartbeat, or the local node
 	hbChanged  chan struct{}    // closed when hbRound rises
 	externals  map[string]*extState
 	localJudge domain.SyncJudge
@@ -403,7 +403,20 @@ func (d *Directory) onLocalChange(st LocalState) {
 		return
 	}
 	d.localSeq = st.Seq
+	if st.Online {
+		d.noteRoundLocked(st.LastRound)
+	}
 	d.localJudge.Judge(d.clock.Now(), st.Online, st.LastRound, d.bestRoundLocked(st))
+}
+
+// noteRoundLocked records a round an online node reported and wakes the
+// waiters of WaitForHeartbeatRound when it is a new high.
+func (d *Directory) noteRoundLocked(round uint64) {
+	if round > d.hbRound {
+		d.hbRound = round
+		close(d.hbChanged)
+		d.hbChanged = make(chan struct{})
+	}
 }
 
 // sendJob is one datagram to one path, collected under the lock and sent
@@ -588,10 +601,8 @@ func (d *Directory) handleLocked(msg ports.GossipMessage, env domain.Envelope) (
 	d.metric.Inc("loadb_heartbeats_received")
 	logMsg("accepted")
 	p.hb, p.seenAt, p.hasHB, p.silent = hb, now, true, false
-	if hb.Online && hb.LastRound > d.hbRound {
-		d.hbRound = hb.LastRound
-		close(d.hbChanged)
-		d.hbChanged = make(chan struct{})
+	if hb.Online {
+		d.noteRoundLocked(hb.LastRound)
 	}
 	p.judge.Judge(now, hb.Online, hb.LastRound, d.bestRoundLocked(d.monitor.State()))
 	return nil, false
@@ -969,8 +980,16 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 	return out, best
 }
 
-// WaitForHeartbeatRound blocks until a heartbeat reports a round past round,
-// or ctx is done, and returns the highest heartbeat round seen.
+// HeartbeatRound is the highest round an online node has reported, by
+// heartbeat or, on a node, by the local monitor.
+func (d *Directory) HeartbeatRound() uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.hbRound
+}
+
+// WaitForHeartbeatRound blocks until a heartbeat, or the local node, reports
+// a round past round, or ctx is done, and returns the highest round seen.
 func (d *Directory) WaitForHeartbeatRound(ctx context.Context, round uint64) (uint64, error) {
 	for {
 		d.mu.Lock()
