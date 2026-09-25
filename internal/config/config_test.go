@@ -22,7 +22,7 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Mode != "fallback" || c.Listen.String() != "127.0.0.1:4000" || c.Registry.Refresh.Minutes() != 5 || *c.Routing.RetryBudget != 1 {
+	if c.Mode != "fallback" || c.Listen.String() != "127.0.0.1:4000" || c.Registry.Refresh.Minutes() != 5 || c.Routing.RetryBudget != nil {
 		t.Fatalf("defaults: %+v", c)
 	}
 	if _, err := load(t, "local:\n  data_dir: /tmp/x\nregistry: {app_id: 5}\n"); err == nil || !strings.Contains(err.Error(), "sync_key") {
@@ -33,6 +33,9 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	}
 	if _, err := load(t, "mode: weird\nlocal: {id: a, data_dir: /x}\n"); err == nil {
 		t.Fatal("bad mode must fail")
+	}
+	if _, err := load(t, "local: {id: a, data_dir: /x}\nrouting: {retry_budget: -1}\n"); err == nil || !strings.Contains(err.Error(), "retry_budget") {
+		t.Fatalf("negative retry_budget must fail: %v", err)
 	}
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nunknown_key: 1\n"); err == nil {
 		t.Fatal("unknown keys must fail")

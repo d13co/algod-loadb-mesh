@@ -282,7 +282,7 @@ type Routing struct {
 	LagGrace               time.Duration `yaml:"lag_grace"` // one round behind is tolerated this long
 	ReturnHysteresisRounds int           `yaml:"return_hysteresis_rounds"`
 	MultiBroadcast         bool          `yaml:"multi_broadcast"`
-	RetryBudget            *int          `yaml:"retry_budget"`
+	RetryBudget            *int          `yaml:"retry_budget"` // cap on further mesh upstreams tried after a failure; unset: every eligible one
 	UpstreamTimeout        time.Duration `yaml:"upstream_timeout"`
 	PendingTTL             time.Duration `yaml:"pending_ttl"`
 	DrainTimeout           time.Duration `yaml:"drain_timeout"`
@@ -520,9 +520,8 @@ func (c *Config) Finish() error {
 	if c.Routing.LagGrace == 0 {
 		c.Routing.LagGrace = 1500 * time.Millisecond
 	}
-	if c.Routing.RetryBudget == nil {
-		v := 1
-		c.Routing.RetryBudget = &v
+	if c.Routing.RetryBudget != nil && *c.Routing.RetryBudget < 0 {
+		return errors.New("routing.retry_budget must not be negative")
 	}
 	if c.Routing.UpstreamTimeout == 0 {
 		c.Routing.UpstreamTimeout = 60 * time.Second

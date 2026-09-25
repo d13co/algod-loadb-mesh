@@ -261,8 +261,9 @@ func TestExternalTierIsLastResort(t *testing.T) {
 	if h := health(t, plain, "nodely"); h != domain.HealthSynced {
 		t.Fatalf("external serving but judged %s", h)
 	}
-	// A broadcast is never retried once sent, so wait for the mesh to be
-	// known down (offline or breaker open) rather than merely failing.
+	// Wait for the mesh to be known down (offline or breaker open), so that
+	// the broadcast below reaches the external directly rather than after
+	// failing on the nodes.
 	waitFor(t, 8*time.Second, "mesh known down", func() bool {
 		get(t, plain+"/v2/status") // failures for the breakers to count
 		_, ups := status(t, plain)

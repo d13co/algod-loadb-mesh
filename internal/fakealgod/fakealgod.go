@@ -43,15 +43,16 @@ type Node struct {
 	opts Options
 	srv  *httptest.Server
 
-	mu      sync.Mutex
-	round   uint64
-	oldest  uint64
-	changed chan struct{}
-	failing bool
-	latency time.Duration
-	boxes   map[uint64]map[string][]byte
-	pool    map[string]poolTxn
-	hits    map[string]int
+	mu        sync.Mutex
+	round     uint64
+	oldest    uint64
+	changed   chan struct{}
+	failing   bool
+	rejecting bool // every broadcast answers 400, as algod does for a rejected transaction
+	latency   time.Duration
+	boxes     map[uint64]map[string][]byte
+	pool      map[string]poolTxn
+	hits      map[string]int
 }
 
 // New starts a fake node.
@@ -106,6 +107,14 @@ func (n *Node) Advance(k uint64) { n.SetRound(n.Round() + k) }
 func (n *Node) SetOldest(r uint64) {
 	n.mu.Lock()
 	n.oldest = r
+	n.mu.Unlock()
+}
+
+// SetRejecting makes every broadcast answer 400 (true), as algod does for a
+// transaction it rejects, or behave normally (false).
+func (n *Node) SetRejecting(f bool) {
+	n.mu.Lock()
+	n.rejecting = f
 	n.mu.Unlock()
 }
 
@@ -221,6 +230,13 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"result": "#pragma version 8\nint 1", "node": n.opts.ID})
 	case p == "/v2/transactions" && r.Method == "POST":
+		n.mu.Lock()
+		rejecting := n.rejecting
+		n.mu.Unlock()
+		if rejecting {
+			writeJSON(w, 400, map[string]string{"message": "TransactionPool.Remember: transaction rejected"})
+			return
+		}
 		if n.opts.FollowMode {
 			writeJSON(w, 400, map[string]string{"message": "follow mode node does not broadcast"})
 			return

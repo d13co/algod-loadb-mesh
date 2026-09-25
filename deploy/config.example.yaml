@@ -90,7 +90,7 @@ routing:
   lag_grace: 1500ms                   # one round behind counts as lagging only after this long; default 1500ms
   return_hysteresis_rounds: 3         # synced rounds a lagging node needs before it serves again; default 3
   multi_broadcast: false              # POST /v2/transactions to every eligible node instead of one; default false
-  retry_budget: 1                     # extra upstreams tried for a failed idempotent request; default 1
+  # retry_budget: 2                   # cap on further mesh upstreams tried after a failure; default: every eligible one, then the externals
   upstream_timeout: 60s               # per upstream request; default 60s
   pending_ttl: 10s                    # pending-txn lookups stick to the node that accepted the txn for ttl..2*ttl; default 10s
   drain_timeout: 10s                  # grace for in-flight requests on shutdown; default 10s

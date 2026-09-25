@@ -21,9 +21,13 @@ Each host runs one agent next to its algod. The agent:
   encrypted node records (or from a static list in the config);
 - routes client requests straight to the chosen algod: the local node first
   in `fallback` mode, or the best-scoring node in `loadbalancer` mode, with
-  tiers and static external RPCs (e.g. Nodely) as the last resort, which
-  are neither polled nor contacted at all while the mesh can serve the
-  request;
+  tiers and static external RPCs (e.g. Nodely) as the last resort: a
+  request that no mesh node can serve, or that failed on every eligible
+  one, goes to them, and they are neither polled nor contacted otherwise;
+- retries a request that an upstream failed without answering (a transport
+  error, or a 502/503/504) on every other eligible mesh node in turn and
+  then on an external, writes included; an answer such as a rejected
+  transaction is the client's and is never retried;
 - keeps v1's client-facing behaviour: `X-Algo-API-Token` auth,
   wait-for-block coalescing, capability-aware routing, optional
   multi-broadcast, drain on shutdown, and the upstream response header (now

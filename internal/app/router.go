@@ -29,7 +29,7 @@ type RouterOptions struct {
 	UpstreamTimeout time.Duration
 	WaitTimeout     time.Duration
 	PendingTTL      time.Duration
-	RetryBudget     int
+	RetryBudget     int // further mesh upstreams tried after a failed one; negative for every eligible one
 	MultiBroadcast  bool
 	Weights         domain.Weights
 	Version         string
@@ -300,50 +300,90 @@ func (r *Router) handleDefault(w http.ResponseWriter, req *http.Request, class d
 	r.forwardSelected(w, req, class, sel)
 }
 
-// forwardSelected sends the request to the chosen upstream and, while the
-// retry budget of an idempotent request allows, to the alternates after it.
+// maxReplayBody bounds a request body held so that the request can be sent
+// to more than one upstream; a larger one is sent once.
+const maxReplayBody = 4 << 20
+
+// replayable holds the request body, when there is one and it fits, so that
+// the request can be forwarded more than once. It returns a reset that
+// installs a fresh copy before each forward, and false when the request can
+// only be sent once.
+func replayable(req *http.Request) (func(), bool) {
+	if req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 {
+		return func() {}, true
+	}
+	body, err := io.ReadAll(io.LimitReader(req.Body, maxReplayBody+1))
+	if err != nil || len(body) > maxReplayBody {
+		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), req.Body))
+		return func() {}, false
+	}
+	req.ContentLength = int64(len(body))
+	reset := func() { req.Body = io.NopCloser(bytes.NewReader(body)) }
+	reset()
+	return reset, true
+}
+
+// forwardSelected sends the request to the chosen upstream and, while it
+// fails without a byte reaching the client, to each alternate in turn: every
+// eligible mesh node once (fewer under an explicit retry budget), then the
+// externals. A failure here is a transport error or a 502/503/504, which the
+// forwarder withholds from the client; any answer the upstream produced,
+// such as a rejected transaction, is the client's and ends the attempts.
+// Writes are repeated too: a signed transaction has one id, so a node that
+// already holds it answers for it rather than applying it twice, and algod's
+// other writes are idempotent by content. A body too large to hold is sent
+// once.
 func (r *Router) forwardSelected(w http.ResponseWriter, req *http.Request, class domain.RequestClass, sel domain.Selection) {
 	tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
-	budget := 1
-	if class.Idempotent {
-		budget += r.opts.RetryBudget
+	if b := r.opts.RetryBudget; b >= 0 && len(tries) > 1+b {
+		tries = tries[:1+b]
 	}
-	if len(tries) > budget {
-		tries = tries[:budget]
+	reset, replay := replayable(req)
+	if !replay {
+		tries = tries[:1]
 	}
 	var last ports.Outcome
 	for i, u := range tries {
+		if i > 0 {
+			r.metric.Inc("loadb_retries")
+			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", tries[i-1].ID, "err", last.Err, "status", last.Status)
+			reset()
+		}
 		last = r.forward(w, req, u, class, nil)
 		if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 			return
 		}
-		if i+1 < len(tries) {
-			r.metric.Inc("loadb_retries")
-			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", u.ID, "err", last.Err, "status", last.Status)
-		}
 	}
-	if class.Idempotent && r.retryExternal(w, req, class, tries, &last) {
-		return
+	if replay {
+		if ext, ok := r.externalFallback(req.Context(), class, tries); ok {
+			r.metric.Inc("loadb_retries")
+			r.log.Debug("retrying on external", "path", req.URL.Path, "failed", tries[len(tries)-1].ID, "external", ext.ID)
+			reset()
+			last = r.forward(w, req, ext, class, nil)
+			if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
+				return
+			}
+		}
 	}
 	r.answerFailure(w, req, last)
 }
 
-// retryExternal is the last resort once every upstream tried has failed
+// externalFallback is the last resort once every upstream tried has failed
 // without answering the client: the externals, which were not candidates
-// while the mesh looked able to serve, are checked and the best of them gets
-// the request. Nothing is done when an external was already tried. It
-// reports whether the client has been answered.
-func (r *Router) retryExternal(w http.ResponseWriter, req *http.Request, class domain.RequestClass, tried []domain.Upstream, last *ports.Outcome) bool {
+// while the mesh looked able to serve, are checked and the best of them is
+// returned. There is none when an external was already tried, or when no
+// external can serve the request.
+func (r *Router) externalFallback(ctx context.Context, class domain.RequestClass, tried []domain.Upstream) (domain.Upstream, bool) {
 	if !mayUseExternals(class) {
-		return false
+		return domain.Upstream{}, false
 	}
 	for _, u := range tried {
 		if u.Kind == domain.KindExternal {
-			return false
+			return domain.Upstream{}, false
 		}
 	}
-	if !r.dir.checkExternals(req.Context()) {
-		return false
+	if !r.dir.checkExternals(ctx) {
+		return domain.Upstream{}, false
 	}
 	cands, best := r.dir.Snapshot()
 	var ext []domain.Upstream
@@ -353,13 +393,7 @@ func (r *Router) retryExternal(w http.ResponseWriter, req *http.Request, class d
 		}
 	}
 	sel, ok := r.sel(ext, class, best)
-	if !ok {
-		return false
-	}
-	r.metric.Inc("loadb_retries")
-	r.log.Debug("retrying on external", "path", req.URL.Path, "failed", tried[len(tried)-1].ID, "external", sel.Chosen.ID)
-	*last = r.forward(w, req, sel.Chosen, class, nil)
-	return !last.Failed() || last.HeadersSent || req.Context().Err() != nil
+	return sel.Chosen, ok
 }
 
 func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out ports.Outcome) {
@@ -541,8 +575,8 @@ func (r *Router) fetchStatus(f *statusFetch) {
 	f.err = errors.New("no eligible node at that round")
 	if sel, ok := r.sel(at, class, best); ok {
 		tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
-		if len(tries) > 1+r.opts.RetryBudget {
-			tries = tries[:1+r.opts.RetryBudget]
+		if b := r.opts.RetryBudget; b >= 0 && len(tries) > 1+b {
+			tries = tries[:1+b]
 		}
 		for _, u := range tries {
 			if f.round, f.body, f.err = r.getStatus(u, class); f.err == nil {
@@ -606,9 +640,10 @@ func (r *Router) recallTxn(txid string) (string, bool) {
 	return r.pins.recall(txid, r.clock.Now())
 }
 
-// handleBroadcast sends POST /v2/transactions to one eligible non-follower
-// node (never retried after bytes went out) or, with multi_broadcast, to all
-// of them at once, answering with the first success.
+// handleBroadcast sends POST /v2/transactions to the eligible non-follower
+// nodes in turn, until one answers (a rejection is an answer), or, with
+// multi_broadcast, to all of them at once, answering with the first success.
+// Either way the externals follow when every node failed to answer.
 func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	sel, cands, best, ok := r.pick(req.Context(), class, cands, best)
 	if !ok {
@@ -617,13 +652,9 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 	}
 	if !r.opts.MultiBroadcast {
 		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
-		out := r.forward(cw, req, sel.Chosen, class, nil)
-		if out.Failed() && !out.HeadersSent {
-			r.answerFailure(w, req, out)
-			return
-		}
-		if out.Status == 200 {
-			r.rememberTxn(txIDFrom(cw.buf.Bytes()), sel.Chosen.ID)
+		r.forwardSelected(cw, req, class, sel)
+		if cw.status == 200 {
+			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
 		}
 		return
 	}
@@ -632,11 +663,12 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 		writeMessage(w, 400, "algod-loadb-mesh: cannot read body")
 		return
 	}
-	targets := dedupeByURL(append([]domain.Upstream{sel.Chosen}, sel.Alternates...))
+	targets := dedupeByURL(meshFirst(append([]domain.Upstream{sel.Chosen}, sel.Alternates...)))
 	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
 	defer cancel()
 	results := r.fanOut(ctx, req, body, targets, class)
 	var fallback *fanResult
+	unanswered := 0
 	for range targets {
 		res := <-results
 		if res.err == nil && res.resp.StatusCode == 200 {
@@ -646,17 +678,74 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 			writeFan(w, res)
 			return
 		}
-		if fallback == nil || (res.err == nil && fallback.err != nil) {
+		if res.err != nil || withheldStatus(res.resp.StatusCode) {
+			unanswered++
+		}
+		// An answer (a rejection, say) outranks a withheld status, which
+		// outranks a transport error.
+		if fallback == nil || fanRank(res) > fanRank(*fallback) {
 			res := res
 			fallback = &res
 		}
 	}
 	r.metric.Inc("loadb_multibroadcast", "outcome", "failed")
+	if unanswered == len(targets) {
+		// No node answered at all: the externals are the last resort.
+		if ext, ok := r.externalFallback(req.Context(), class, targets); ok {
+			r.metric.Inc("loadb_retries")
+			r.log.Debug("retrying on external", "path", req.URL.Path, "external", ext.ID)
+			req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+			cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
+			out := r.forward(cw, req, ext, class, nil)
+			if !out.Failed() || out.HeadersSent || req.Context().Err() != nil {
+				if cw.status == 200 {
+					r.rememberTxn(txIDFrom(cw.buf.Bytes()), ext.ID)
+				}
+				return
+			}
+		}
+	}
 	if fallback.err != nil {
 		writeMessage(w, 502, "algod-loadb-mesh: broadcast failed on every node: "+fallback.err.Error())
 		return
 	}
 	writeFan(w, *fallback)
+}
+
+// fanRank orders a fanned-out request's failures for the answer to give:
+// an upstream's own answer over a status the forwarder would withhold, over
+// a transport error.
+func fanRank(res fanResult) int {
+	switch {
+	case res.err != nil:
+		return 0
+	case withheldStatus(res.resp.StatusCode):
+		return 1
+	default:
+		return 2
+	}
+}
+
+// meshFirst drops the externals from a selection that holds a mesh node:
+// they are the last resort, reached only when no mesh node answers. A
+// selection of externals alone is returned as is.
+func meshFirst(us []domain.Upstream) []domain.Upstream {
+	mesh := us[:0:0]
+	for _, u := range us {
+		if u.Kind != domain.KindExternal {
+			mesh = append(mesh, u)
+		}
+	}
+	if len(mesh) == 0 {
+		return us
+	}
+	return mesh
+}
+
+// withheldStatus is true for the upstream statuses the forwarder withholds
+// from the client as failures of the upstream rather than answers.
+func withheldStatus(code int) bool {
+	return code == 502 || code == 503 || code == 504
 }
 
 // maxFanBody bounds one buffered upstream answer; pending lookups of
@@ -799,11 +888,22 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 // captureWriter tees the first `limit` bytes of a response for inspection.
 type captureWriter struct {
 	http.ResponseWriter
-	buf   bytes.Buffer
-	limit int
+	buf    bytes.Buffer
+	limit  int
+	status int
+}
+
+func (c *captureWriter) WriteHeader(code int) {
+	if c.status == 0 && code >= 200 {
+		c.status = code
+	}
+	c.ResponseWriter.WriteHeader(code)
 }
 
 func (c *captureWriter) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
 	if c.buf.Len() < c.limit {
 		n := c.limit - c.buf.Len()
 		if n > len(b) {

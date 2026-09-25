@@ -254,11 +254,151 @@ func TestFailedMeshForwardFallsBackToExternal(t *testing.T) {
 	if c := ext.Hits("/v2/status"); c != 3 {
 		t.Fatalf("external hit %d times, want one more request and no check", c)
 	}
-	// A non-idempotent request is not retried anywhere.
-	post := httptest.NewRecorder()
-	wh.r.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/v2/accounts/x/assets", nil))
-	if post.Code != 502 {
-		t.Fatalf("non-idempotent retried: %d %s", post.Code, post.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	// A write falls back too, with its body intact.
+	post := wh.post("/v2/transactions", "txnbytes")
+	if post.Code != 200 || post.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("broadcast fallback: %d %s %s", post.Code, post.Header().Get("X-Algod-Loadb-Mesh-Upstream"), post.Body.String())
+	}
+	if id, want := txIDFrom(post.Body.Bytes()), directTxID(t, ext, "txnbytes"); id == "" || id != want {
+		t.Fatalf("broadcast body not replayed to the external: got id %q want %q", id, want)
+	}
+}
+
+func (h *waitHarness) post(path, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+	return rec
+}
+
+// directTxID broadcasts body straight to n and returns the id it assigns,
+// which depends only on the body.
+func directTxID(t *testing.T, n *fakealgod.Node, body string) string {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, n.URL()+"/v2/transactions", strings.NewReader(body))
+	req.Header.Set("X-Algo-API-Token", n.Token())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var v struct {
+		TxID string `json:"txId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil || v.TxID == "" {
+		t.Fatalf("direct broadcast: %d %v", resp.StatusCode, err)
+	}
+	return v.TxID
+}
+
+// twoPeerHarness is a directory with no local node, two peers backed by
+// fake algods, one external, and a router that retries on every eligible
+// mesh node.
+type twoPeerHarness struct {
+	*waitHarness
+	c   *fakealgod.Node
+	ext *fakealgod.Node
+}
+
+func newTwoPeerHarness(t *testing.T, multiBroadcast bool) *twoPeerHarness {
+	t.Helper()
+	ext := fakealgod.New(fakealgod.Options{ID: "ext", StartRound: 10})
+	t.Cleanup(ext.Close)
+	h := newHarnessWith(t, DirectoryOptions{Externals: []ExternalUpstream{{Name: "ext", URL: ext.URL(), Token: ext.Token(), HealthCheck: 5 * time.Second}}}, algodhttp.Factory{})
+	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 10})
+	t.Cleanup(b.Close)
+	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 10})
+	t.Cleanup(c.Close)
+	cPub, cKey, _ := ed25519.GenerateKey(crand.Reader)
+	recB := h.peerRecord(addrA)
+	recB.Endpoints, recB.Token = []string{b.URL()}, b.Token()
+	recC := domain.NodeRecord{ID: "c", Network: "n", Agent: domain.AgentInfo{Addrs: []string{addrB}, PubKey: []byte(cPub)},
+		Endpoints: []string{c.URL()}, Token: c.Token()}
+	h.d.SetRecords([]domain.NodeRecord{recB, recC})
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, RetryBudget: -1, MultiBroadcast: multiBroadcast},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	wh := &waitHarness{harness: h, n: b, r: r}
+	wh.heartbeat(1, 10)
+	wire, _ := domain.EncodeHeartbeat(cKey, domain.Heartbeat{NodeID: "c", Seq: 1, Online: true, LastRound: 10})
+	h.inject(addrB, wire)
+	waitFor(t, 2*time.Second, func() bool {
+		cands, _ := h.d.Snapshot()
+		for _, u := range cands {
+			if u.ID == "c" && u.Health.Reachable() {
+				return true
+			}
+		}
+		return false
+	})
+	return &twoPeerHarness{waitHarness: wh, c: c, ext: ext}
+}
+
+// Every eligible mesh node is tried once before the external, for reads
+// and writes alike, and the write's body reaches each of them.
+func TestEveryMeshNodeIsTriedBeforeTheExternal(t *testing.T) {
+	h := newTwoPeerHarness(t, false)
+	h.n.SetFailing(true)
+	h.c.SetFailing(true)
+
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("read fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if b, c := h.n.Hits("/v2/status"), h.c.Hits("/v2/status"); b != 1 || c != 1 {
+		t.Fatalf("mesh nodes tried b=%d c=%d, want once each", b, c)
+	}
+
+	rec := h.post("/v2/transactions", "txnbytes")
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("write fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	}
+	if b, c := h.n.Hits("/v2/transactions"), h.c.Hits("/v2/transactions"); b != 1 || c != 1 {
+		t.Fatalf("mesh nodes tried for the write b=%d c=%d, want once each", b, c)
+	}
+	if id, want := txIDFrom(rec.Body.Bytes()), directTxID(t, h.ext, "txnbytes"); id != want {
+		t.Fatalf("body not replayed: got id %q want %q", id, want)
+	}
+	if !strings.Contains(h.metricsText(), "loadb_retries_total 4") {
+		t.Fatalf("retries not counted:\n%s", h.metricsText())
+	}
+}
+
+// A node's answer, such as a rejected transaction, ends the attempts: it is
+// the client's, and neither the other node nor the external sees the request.
+func TestRejectedTransactionIsNotRetried(t *testing.T) {
+	h := newTwoPeerHarness(t, false)
+	h.n.SetRejecting(true)
+
+	rec := h.post("/v2/transactions", "txnbytes")
+	if rec.Code != 400 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
+		t.Fatalf("rejection: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	}
+	if c, e := h.c.Hits("/v2/transactions"), h.ext.Hits("/"); c != 0 || e != 0 {
+		t.Fatalf("rejection retried: peer c %d, external %d", c, e)
+	}
+}
+
+// With multi_broadcast the external follows only when no node answered.
+func TestMultiBroadcastFallsBackToExternalWhenNoNodeAnswers(t *testing.T) {
+	h := newTwoPeerHarness(t, true)
+	h.n.SetFailing(true)
+	h.c.SetFailing(true)
+	rec := h.post("/v2/transactions", "txnbytes")
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("multi-broadcast fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	}
+	if id, want := txIDFrom(rec.Body.Bytes()), directTxID(t, h.ext, "txnbytes"); id != want {
+		t.Fatalf("body not replayed: got id %q want %q", id, want)
+	}
+
+	// One node rejects while the other fails: the rejection is the answer.
+	h.n.SetFailing(false)
+	h.n.SetRejecting(true)
+	before := h.ext.Hits("/v2/transactions")
+	rec = h.post("/v2/transactions", "other")
+	if rec.Code != 400 {
+		t.Fatalf("rejection under multi-broadcast: %d %s", rec.Code, rec.Body.String())
+	}
+	if e := h.ext.Hits("/v2/transactions"); e != before {
+		t.Fatalf("external broadcast to %d more times after a rejection", e-before)
 	}
 }
 
