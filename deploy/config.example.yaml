@@ -80,15 +80,20 @@ tiers:
       # token: ""                       # X-Algo-API-Token sent to it
       tier: 100                       # default 100
       capabilities: { archival: { kind: full } }   # same fields as local.overrides; nothing is detected for externals
-      health_check: 60s               # default 1m
+      health_check: 60s               # how long one status check stays valid; default 1m
+                                      # externals are never polled on a timer: the agent checks one only when
+                                      # nothing in the mesh can serve a request, and re-checks it when the last
+                                      # check is older than this
 
 routing:
   sync_tolerance: 0                   # rounds a node may trail the best and still serve; default 0
   lag_grace: 1500ms                   # one round behind counts as lagging only after this long; default 1500ms
   return_hysteresis_rounds: 3         # synced rounds a lagging node needs before it serves again; default 3
   multi_broadcast: false              # POST /v2/transactions to every eligible node instead of one; default false
-  retry_budget: 1                     # extra upstreams tried for a failed idempotent request; default 1
-  upstream_timeout: 60s               # per upstream request; default 60s
+  # retry_budget: 2                   # cap on further mesh upstreams tried after a failure; default: every eligible one, then the externals
+  upstream_timeout: 60s               # bound on one attempt at one upstream; default 60s
+  # request_timeout: 120s             # bound on one request across every upstream tried, mesh then external; default 2x upstream_timeout
+  #                                   # (a held wait-for-block-after adds wait_for_block_timeout before its attempts start)
   pending_ttl: 10s                    # pending-txn lookups stick to the node that accepted the txn for ttl..2*ttl; default 10s
   drain_timeout: 10s                  # grace for in-flight requests on shutdown; default 10s
   breaker:

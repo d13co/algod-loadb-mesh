@@ -590,3 +590,280 @@ func TestEndpointFollowsThePath(t *testing.T) {
 		t.Fatalf("no IP to match: fall back to the first endpoint, got %q", got)
 	}
 }
+
+// countingClients hands out clients that count status calls per URL and
+// answer with one round, or fail, or block until released.
+type countingClients struct {
+	mu    sync.Mutex
+	calls map[string]int
+	round uint64
+	fail  bool
+	block chan struct{} // when set, Status waits for it to close
+	only  string        // when set, only this URL blocks
+}
+
+type countingClient struct {
+	stubClient
+	f   *countingClients
+	url string
+}
+
+func (f *countingClients) NewAlgodClient(baseURL, _ string) ports.AlgodClient {
+	return countingClient{f: f, url: baseURL}
+}
+
+func (c countingClient) Status(ctx context.Context) (ports.Status, error) {
+	c.f.mu.Lock()
+	c.f.calls[c.url]++
+	fail, block, round := c.f.fail, c.f.block, c.f.round
+	if c.f.only != "" && c.f.only != c.url {
+		block = nil
+	}
+	c.f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ports.Status{}, ctx.Err()
+		}
+	}
+	if fail {
+		return ports.Status{}, errors.New("down")
+	}
+	return ports.Status{LastRound: round}, nil
+}
+
+func (f *countingClients) count(url string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[url]
+}
+
+// awaitExternalChecks waits until no external has a check in flight.
+func (h *harness) awaitExternalChecks() {
+	h.t.Helper()
+	waitFor(h.t, time.Second, func() bool {
+		h.d.mu.Lock()
+		defer h.d.mu.Unlock()
+		for _, e := range h.d.externals {
+			if e.inflight != nil {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+func upstream(t *testing.T, ups []domain.Upstream, id string) domain.Upstream {
+	t.Helper()
+	for _, u := range ups {
+		if u.ID == id {
+			return u
+		}
+	}
+	t.Fatalf("no upstream %s in %+v", id, ups)
+	return domain.Upstream{}
+}
+
+// An external is never checked on a timer, only when the router asks
+// because the mesh cannot serve. A check is then valid for HealthCheck,
+// is not repeated within the debounce, and its round stays a lower bound on
+// the best round after it expires.
+func TestExternalsAreCheckedOnDemandOnly(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 5 * time.Second}}}, clients)
+	for i := 0; i < 70; i++ { // over a minute of maintenance ticks
+		h.tick()
+	}
+	if n := clients.count("http://ext"); n != 0 {
+		t.Fatalf("external checked %d times on the timer", n)
+	}
+	ups, _ := h.d.Snapshot()
+	if u := upstream(t, ups, "ext"); u.Health != domain.HealthOffline || u.Source != "none" {
+		t.Fatalf("unchecked external: %+v", u)
+	}
+
+	ctx := context.Background()
+	if !h.d.checkExternals(ctx) {
+		t.Fatal("external not usable after a check")
+	}
+	if n := clients.count("http://ext"); n != 1 {
+		t.Fatalf("%d checks, want 1", n)
+	}
+	ups, best := h.d.Snapshot()
+	if u := upstream(t, ups, "ext"); u.Health != domain.HealthSynced || u.LastRound != 500 || u.Source != "check" || best != 500 {
+		t.Fatalf("checked external: %+v best=%d", u, best)
+	}
+	// Within the debounce the check is not repeated, but it still counts.
+	if !h.d.checkExternals(ctx) || clients.count("http://ext") != 1 {
+		t.Fatalf("check repeated within the debounce: %d", clients.count("http://ext"))
+	}
+	// After the debounce a re-check starts, while the valid result answers
+	// at once.
+	h.fc.Advance(2 * time.Second)
+	if !h.d.checkExternals(ctx) {
+		t.Fatal("usable external not reported during a re-check")
+	}
+	h.awaitExternalChecks()
+	if n := clients.count("http://ext"); n != 2 {
+		t.Fatalf("check not repeated after the debounce: %d", n)
+	}
+	// The check expires after HealthCheck; the round is still a lower bound.
+	h.fc.Advance(6 * time.Second)
+	ups, best = h.d.Snapshot()
+	if u := upstream(t, ups, "ext"); u.Health != domain.HealthOffline || u.Source != "none" || best != 500 {
+		t.Fatalf("expired check: %+v best=%d", u, best)
+	}
+	// A failed check leaves the external unusable.
+	clients.mu.Lock()
+	clients.fail = true
+	clients.mu.Unlock()
+	if h.d.checkExternals(ctx) {
+		t.Fatal("usable after a failed check")
+	}
+	ups, _ = h.d.Snapshot()
+	if u := upstream(t, ups, "ext"); u.Health != domain.HealthOffline || u.Source != "none" {
+		t.Fatalf("failed check: %+v", u)
+	}
+	if !strings.Contains(h.metricsText(), `loadb_external_checks_total{name="ext",ok="false"} 1`) {
+		t.Fatalf("metrics:\n%s", h.metricsText())
+	}
+}
+
+// A check that expired before the debounce has passed is repeated at once:
+// a validity shorter than the debounce must not leave the external unusable.
+func TestExpiredExternalCheckIsRepeatedWithinDebounce(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 200 * time.Millisecond}}}, clients)
+	ctx := context.Background()
+	if !h.d.checkExternals(ctx) || clients.count("http://ext") != 1 {
+		t.Fatal("first check")
+	}
+	h.fc.Advance(300 * time.Millisecond)
+	if !h.d.checkExternals(ctx) || clients.count("http://ext") != 2 {
+		t.Fatalf("expired check not repeated: %d checks", clients.count("http://ext"))
+	}
+	// A failed check is held to the debounce.
+	clients.mu.Lock()
+	clients.fail = true
+	clients.mu.Unlock()
+	h.fc.Advance(300 * time.Millisecond)
+	if h.d.checkExternals(ctx) || clients.count("http://ext") != 3 {
+		t.Fatal("failed check")
+	}
+	h.fc.Advance(300 * time.Millisecond)
+	if h.d.checkExternals(ctx) || clients.count("http://ext") != 3 {
+		t.Fatalf("failed check repeated within the debounce: %d", clients.count("http://ext"))
+	}
+	h.fc.Advance(time.Second)
+	if h.d.checkExternals(ctx) || clients.count("http://ext") != 4 {
+		t.Fatalf("failed check not repeated after the debounce: %d", clients.count("http://ext"))
+	}
+}
+
+// A check's validity counts from its completion: one that takes longer than
+// HealthCheck still leaves the external usable, and while a re-check is in
+// flight the previous result stays valid.
+func TestExternalCheckValidityCountsFromCompletion(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500, block: make(chan struct{})}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 5 * time.Second}}}, clients)
+	result := make(chan bool, 1)
+	go func() { result <- h.d.checkExternals(context.Background()) }()
+	waitFor(t, time.Second, func() bool { return clients.count("http://ext") == 1 })
+	h.fc.Advance(6 * time.Second) // the check outlasts its own validity
+	close(clients.block)
+	select {
+	case ok := <-result:
+		if !ok {
+			t.Fatal("a slow check left the external unusable")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("caller did not return")
+	}
+	ups, _ := h.d.Snapshot()
+	if u := upstream(t, ups, "ext"); u.Health != domain.HealthSynced || u.Source != "check" {
+		t.Fatalf("after a slow check: %+v", u)
+	}
+
+	// A re-check in flight: the earlier result serves meanwhile.
+	clients.mu.Lock()
+	clients.block = make(chan struct{})
+	clients.mu.Unlock()
+	h.fc.Advance(2 * time.Second)
+	start := time.Now()
+	if !h.d.checkExternals(context.Background()) || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("usable external not reported at once during a re-check (%s)", time.Since(start))
+	}
+	waitFor(t, time.Second, func() bool { return clients.count("http://ext") == 2 })
+	close(clients.block)
+	h.awaitExternalChecks()
+}
+
+// A usable external is reported as soon as its check answers, without
+// waiting for the checks of the others.
+func TestExternalCheckReturnsOnFirstUsable(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500, block: make(chan struct{}), only: "http://slow"}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true, Externals: []ExternalUpstream{
+		{Name: "slow", URL: "http://slow", HealthCheck: 5 * time.Second},
+		{Name: "fast", URL: "http://fast", HealthCheck: 5 * time.Second}}}, clients)
+	start := time.Now()
+	if !h.d.checkExternals(context.Background()) || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("usable external not reported until the slow check answered (%s)", time.Since(start))
+	}
+	waitFor(t, time.Second, func() bool { return clients.count("http://slow") == 1 && clients.count("http://fast") == 1 })
+	ups, _ := h.d.Snapshot()
+	if u := upstream(t, ups, "fast"); u.Health != domain.HealthSynced {
+		t.Fatalf("fast external: %+v", u)
+	}
+	if u := upstream(t, ups, "slow"); u.Health != domain.HealthOffline {
+		t.Fatalf("slow external usable before its check answered: %+v", u)
+	}
+	close(clients.block)
+	h.awaitExternalChecks()
+}
+
+// Concurrent callers share one check of an external.
+func TestExternalCheckIsSharedByConcurrentCallers(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500, block: make(chan struct{})}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 5 * time.Second}}}, clients)
+	results := make(chan bool, 3)
+	for i := 0; i < 3; i++ {
+		go func() { results <- h.d.checkExternals(context.Background()) }()
+	}
+	waitFor(t, time.Second, func() bool { return clients.count("http://ext") == 1 })
+	time.Sleep(20 * time.Millisecond)
+	if len(results) != 0 {
+		t.Fatal("a caller returned before the check answered")
+	}
+	close(clients.block)
+	for i := 0; i < 3; i++ {
+		select {
+		case ok := <-results:
+			if !ok {
+				t.Fatal("caller saw no usable external")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("caller did not return")
+		}
+	}
+	if n := clients.count("http://ext"); n != 1 {
+		t.Fatalf("%d checks for three concurrent callers", n)
+	}
+	// A caller whose context ends stops waiting; the check goes on. The
+	// earlier result has expired, so there is nothing to answer with.
+	clients.mu.Lock()
+	clients.block = make(chan struct{})
+	clients.mu.Unlock()
+	h.fc.Advance(6 * time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	if h.d.checkExternals(ctx) {
+		t.Fatal("a cancelled caller reported a usable external")
+	}
+	close(clients.block)
+	waitFor(t, time.Second, func() bool { return h.d.checkExternals(context.Background()) })
+}

@@ -34,8 +34,8 @@ var pendingAnswer = [...]string{"failed", "other", "not_found", "in_pool", "pool
 // then on every other node at once. A pool error lives only in the pool of
 // the nodes that dropped the txn, so the best answer wins: confirmed, then
 // pool error, then still pending, then 404.
-func (r *Router) handlePending(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
+func (r *Router) handlePending(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
+	sel, cands, best, ok := r.pick(ctx, class, cands, best)
 	if !ok {
 		r.noUpstream(w, class, cands, best)
 		return
@@ -49,7 +49,7 @@ func (r *Router) handlePending(w http.ResponseWriter, req *http.Request, class d
 			if u.ID != id {
 				continue
 			}
-			out := r.forward(w, req, u, class, map[int]bool{404: true})
+			out := r.forward(ctx, w, req, u, class, map[int]bool{404: true})
 			if out.HeadersSent || req.Context().Err() != nil {
 				return
 			}
@@ -71,7 +71,7 @@ func (r *Router) handlePending(w http.ResponseWriter, req *http.Request, class d
 	for i, u := range order {
 		pos[u.ID] = i
 	}
-	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	results := r.fanOut(ctx, req, nil, order, class)
 	var (

@@ -240,7 +240,6 @@ func TestExternalTierIsLastResort(t *testing.T) {
 		Externals: []config.External{{Name: "nodely", URL: ext.URL(), Token: "exttoken", Tier: 9,
 			Capabilities: &domain.CapabilityOverrides{Archival: &full}, HealthCheck: 200 * time.Millisecond}}})
 	plain := f.Servers[1].URL
-	waitFor(t, 5*time.Second, "external checked", func() bool { return health(t, plain, "nodely") == domain.HealthSynced })
 
 	if r := get(t, plain+"/v2/status"); r.node != "plain" {
 		t.Fatalf("mesh healthy: local expected, got %s", r.node)
@@ -248,12 +247,37 @@ func TestExternalTierIsLastResort(t *testing.T) {
 	if r := get(t, plain+"/v2/blocks/10"); r.node != "arch" {
 		t.Fatalf("mesh archival preferred over external, got %s", r.node)
 	}
-	// Kill the whole mesh: external takes over.
+	// While the mesh serves, the external is never checked, nor shown as
+	// anything but unknown.
+	if h := health(t, plain, "nodely"); h != domain.HealthOffline {
+		t.Fatalf("external judged %s without a check", h)
+	}
+	if n := ext.Hits("/"); n != 0 {
+		t.Fatalf("external hit %d times while the mesh serves", n)
+	}
+	// Kill the whole mesh: the external is checked on demand and takes over.
 	f.Nodes[0].SetFailing(true)
 	f.Nodes[1].SetFailing(true)
 	waitFor(t, 8*time.Second, "external serving", func() bool {
 		r := get(t, plain+"/v2/status")
 		return r.node == "nodely"
+	})
+	if h := health(t, plain, "nodely"); h != domain.HealthSynced {
+		t.Fatalf("external serving but judged %s", h)
+	}
+	// Wait for the mesh to be known down (offline or breaker open), so that
+	// the broadcast below reaches the external directly rather than after
+	// failing on the nodes.
+	waitFor(t, 8*time.Second, "mesh known down", func() bool {
+		get(t, plain+"/v2/status") // failures for the breakers to count
+		_, ups := status(t, plain)
+		down := 0
+		for _, u := range ups {
+			if u.Kind != domain.KindExternal && (!u.Health.Reachable() || u.Stats.BreakerOpen) {
+				down++
+			}
+		}
+		return down == 2
 	})
 	if r := get(t, plain+"/v2/blocks/10"); r.node != "nodely" {
 		t.Fatalf("external archival, got %s", r.node)
@@ -265,6 +289,17 @@ func TestExternalTierIsLastResort(t *testing.T) {
 	f.Nodes[0].SetFailing(false)
 	f.Nodes[1].SetFailing(false)
 	waitFor(t, 10*time.Second, "mesh back", func() bool { return get(t, plain+"/v2/status").node == "plain" })
+	// With the mesh back the checks stop, even after the last one expired.
+	checks := ext.Hits("/v2/status")
+	time.Sleep(600 * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		if r := get(t, plain+"/v2/status"); r.node != "plain" {
+			t.Fatalf("mesh back: got %s", r.node)
+		}
+	}
+	if n := ext.Hits("/v2/status"); n != checks {
+		t.Fatalf("external checked %d times with the mesh back", n-checks)
+	}
 }
 
 func TestWaitForBlockAfterIsCoalesced(t *testing.T) {

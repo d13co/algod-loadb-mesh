@@ -85,9 +85,13 @@ func New(d Deps) (*Agent, error) {
 		KeepAlive: c.Mesh.KeepAlive, PathProbeInterval: c.Mesh.PathProbeInterval, PathTimeout: c.Mesh.PathTimeout, SyncTolerance: c.Routing.SyncTolerance, LagGrace: c.Routing.LagGrace, ReturnHysteresis: c.Routing.ReturnHysteresisRounds,
 		PeerOverrides: overrides, Externals: externals}, monitor, d.Gossip, d.Clients, stats, d.Clock, d.Log, d.Metrics, d.AgentKey)
 
+	retry := -1 // every eligible mesh upstream, then the externals
+	if c.Routing.RetryBudget != nil {
+		retry = *c.Routing.RetryBudget
+	}
 	router := app.NewRouter(app.RouterOptions{Mode: mode, Balancer: balancer, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
 		UpstreamTimeout: c.Routing.UpstreamTimeout, WaitTimeout: c.Local.WaitTimeout, PendingTTL: c.Routing.PendingTTL,
-		RetryBudget: *c.Routing.RetryBudget, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
+		RequestTimeout: c.Routing.RequestTimeout, RetryBudget: retry, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
 		dir, monitor, d.Forwarder, d.HTTPClient, stats, d.Clock, d.Log, d.Metrics, d.Rand, d.MetricsText)
 
 	pub := d.AgentKey.Public().(ed25519.PublicKey)

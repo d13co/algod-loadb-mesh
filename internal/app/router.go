@@ -26,10 +26,12 @@ type RouterOptions struct {
 	ClientToken     string
 	AdminToken      string // required for /loadb/* except health; also a valid client token
 	SyncTolerance   uint64
-	UpstreamTimeout time.Duration
+	UpstreamTimeout time.Duration // bound on one attempt at one upstream
+	RequestTimeout  time.Duration // bound on one request across every upstream tried; default 2*UpstreamTimeout
+	StatusTimeout   time.Duration // bound on one /v2/status fetch for coalesced waiters; default 10s
 	WaitTimeout     time.Duration
 	PendingTTL      time.Duration
-	RetryBudget     int
+	RetryBudget     int // further mesh upstreams tried after a failed one; negative for every eligible one
 	MultiBroadcast  bool
 	Weights         domain.Weights
 	Version         string
@@ -41,6 +43,12 @@ func (o *RouterOptions) defaults() {
 	}
 	if o.UpstreamTimeout == 0 {
 		o.UpstreamTimeout = 60 * time.Second
+	}
+	if o.RequestTimeout == 0 {
+		o.RequestTimeout = 2 * o.UpstreamTimeout
+	}
+	if o.StatusTimeout == 0 {
+		o.StatusTimeout = 10 * time.Second
 	}
 	if o.WaitTimeout == 0 {
 		o.WaitTimeout = 60 * time.Second
@@ -222,27 +230,63 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	}
 	cands, best := r.dir.Snapshot()
 	w.Header().Set("X-Algod-Loadb-Mesh-Mode", string(r.opts.Mode))
-	switch {
-	case class.WaitAfter != nil:
+	if class.WaitAfter != nil {
 		r.handleWait(w, req, class, cands, best)
-	case class.Broadcast:
-		r.handleBroadcast(w, req, class, cands, best)
-	case class.PendingID != "":
-		r.handlePending(w, req, class, cands, best)
-	default:
-		r.handleDefault(w, req, class, cands, best)
+		return
 	}
+	ctx, cancel := r.requestCtx(req)
+	defer cancel()
+	switch {
+	case class.Broadcast:
+		r.handleBroadcast(ctx, w, req, class, cands, best)
+	case class.PendingID != "":
+		r.handlePending(ctx, w, req, class, cands, best)
+	default:
+		r.handleDefault(ctx, w, req, class, cands, best)
+	}
+}
+
+// requestCtx bounds one request by RequestTimeout: the selection, any
+// external check it triggers, and every attempt, mesh then external. The
+// client's own context stays on req, so that its departure is told apart
+// from the request's deadline.
+func (r *Router) requestCtx(req *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(req.Context(), r.opts.RequestTimeout)
 }
 
 func (r *Router) sel(cands []domain.Upstream, class domain.RequestClass, best uint64) (domain.Selection, bool) {
 	return domain.Select(r.opts.Mode, cands, class, best, r.opts.SyncTolerance, r.opts.Weights, r.rnd)
 }
 
-// forward sends the request to one upstream and records the outcome.
-func (r *Router) forward(w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
+// mayUseExternals is false for a request no external can ever serve, so
+// that it never triggers a check of one.
+func mayUseExternals(class domain.RequestClass) bool { return !class.LocalOnly }
+
+// pick selects an upstream for the request. When nothing in the mesh can
+// serve it, the externals are checked — they are only checked on demand, so
+// a third-party RPC costs nothing while the mesh is healthy — and the
+// selection is repeated on a fresh snapshot, which is returned for the
+// caller's reporting.
+func (r *Router) pick(ctx context.Context, class domain.RequestClass, cands []domain.Upstream, best uint64) (domain.Selection, []domain.Upstream, uint64, bool) {
+	if sel, ok := r.sel(cands, class, best); ok {
+		return sel, cands, best, true
+	}
+	if !mayUseExternals(class) || !r.dir.checkExternals(ctx) {
+		return domain.Selection{}, cands, best, false
+	}
+	cands, best = r.dir.Snapshot()
+	sel, ok := r.sel(cands, class, best)
+	return sel, cands, best, ok
+}
+
+// forward sends the request to one upstream and records the outcome. The
+// attempt is bounded by UpstreamTimeout within ctx, which carries the bound
+// on the request as a whole; the client's own context stays on req, so that
+// its departure is told apart from the request's deadline.
+func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
 	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", u.ID)
 	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(u.Tier))
-	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
 	out := r.fwd.Forward(w, req.WithContext(ctx), ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry})
@@ -270,38 +314,134 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
 }
 
-func (r *Router) handleDefault(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
+func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
+	sel, cands, best, ok := r.pick(ctx, class, cands, best)
 	if !ok {
 		r.noUpstream(w, class, cands, best)
 		return
 	}
-	r.forwardSelected(w, req, class, sel)
+	r.forwardSelected(ctx, w, req, class, sel)
 }
 
-// forwardSelected sends the request to the chosen upstream and, while the
-// retry budget of an idempotent request allows, to the alternates after it.
-func (r *Router) forwardSelected(w http.ResponseWriter, req *http.Request, class domain.RequestClass, sel domain.Selection) {
-	tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
-	budget := 1
-	if class.Idempotent {
-		budget += r.opts.RetryBudget
+// forwardNow is handleDefault for a request whose wait is over, under a
+// request bound of its own: the wait was bounded by WaitTimeout, not by
+// RequestTimeout.
+func (r *Router) forwardNow(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
+	ctx, cancel := r.requestCtx(req)
+	defer cancel()
+	r.handleDefault(ctx, w, req, class, cands, best)
+}
+
+// maxReplayBody bounds a request body held so that the request can be sent
+// to more than one upstream; a larger one is sent once.
+const maxReplayBody = 4 << 20
+
+// replayable holds the request body, when there is one and it fits, so that
+// the request can be forwarded more than once. It returns a reset that
+// installs a fresh copy before each forward, and false when the request can
+// only be sent once.
+func replayable(req *http.Request) (func(), bool) {
+	if req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 {
+		return func() {}, true
 	}
-	if len(tries) > budget {
-		tries = tries[:budget]
+	body, err := io.ReadAll(io.LimitReader(req.Body, maxReplayBody+1))
+	if err != nil || len(body) > maxReplayBody {
+		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), req.Body))
+		return func() {}, false
+	}
+	req.ContentLength = int64(len(body))
+	reset := func() { req.Body = io.NopCloser(bytes.NewReader(body)) }
+	reset()
+	return reset, true
+}
+
+// minAttempt is the least of the request's time an attempt is worth
+// starting with, so that one cut short by the deadline is not counted
+// against the upstream.
+const minAttempt = time.Second
+
+// timeLeft is true while ctx has at least minAttempt before its deadline.
+func timeLeft(ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	return ctx.Err() == nil && (!ok || time.Until(d) >= minAttempt)
+}
+
+// forwardSelected sends the request to the chosen upstream and, while it
+// fails without a byte reaching the client, to each alternate in turn: every
+// eligible mesh node once (fewer under an explicit retry budget), then the
+// externals. A failure here is a transport error or a 502/503/504, which the
+// forwarder withholds from the client; any answer the upstream produced,
+// such as a rejected transaction, is the client's and ends the attempts.
+// Writes are repeated too: a signed transaction has one id, so a node that
+// already holds it answers for it rather than applying it twice, and algod's
+// other writes are idempotent by content. A body too large to hold is sent
+// once. The attempts together are bounded by ctx, the request's bound (see
+// requestCtx), each by UpstreamTimeout within it, so nodes that accept and
+// hang cost the client one request's worth of time, not one per node.
+func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, sel domain.Selection) {
+	tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
+	if b := r.opts.RetryBudget; b >= 0 && len(tries) > 1+b {
+		tries = tries[:1+b]
+	}
+	reset, replay := replayable(req)
+	if !replay {
+		tries = tries[:1]
 	}
 	var last ports.Outcome
 	for i, u := range tries {
-		last = r.forward(w, req, u, class, nil)
+		if i > 0 {
+			if !timeLeft(ctx) {
+				break
+			}
+			r.metric.Inc("loadb_retries")
+			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", tries[i-1].ID, "err", last.Err, "status", last.Status)
+			reset()
+		}
+		last = r.forward(ctx, w, req, u, class, nil)
 		if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 			return
 		}
-		if i+1 < len(tries) {
+	}
+	if replay && timeLeft(ctx) {
+		if ext, ok := r.externalFallback(ctx, class, tries); ok && timeLeft(ctx) {
 			r.metric.Inc("loadb_retries")
-			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", u.ID, "err", last.Err, "status", last.Status)
+			r.log.Debug("retrying on external", "path", req.URL.Path, "failed", tries[len(tries)-1].ID, "external", ext.ID)
+			reset()
+			last = r.forward(ctx, w, req, ext, class, nil)
+			if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
+				return
+			}
 		}
 	}
 	r.answerFailure(w, req, last)
+}
+
+// externalFallback is the last resort once every upstream tried has failed
+// without answering the client: the externals, which were not candidates
+// while the mesh looked able to serve, are checked and the best of them is
+// returned. There is none when an external was already tried, or when no
+// external can serve the request.
+func (r *Router) externalFallback(ctx context.Context, class domain.RequestClass, tried []domain.Upstream) (domain.Upstream, bool) {
+	if !mayUseExternals(class) {
+		return domain.Upstream{}, false
+	}
+	for _, u := range tried {
+		if u.Kind == domain.KindExternal {
+			return domain.Upstream{}, false
+		}
+	}
+	if !r.dir.checkExternals(ctx) {
+		return domain.Upstream{}, false
+	}
+	cands, best := r.dir.Snapshot()
+	var ext []domain.Upstream
+	for _, u := range cands {
+		if u.Kind == domain.KindExternal {
+			ext = append(ext, u)
+		}
+	}
+	sel, ok := r.sel(ext, class, best)
+	return sel.Chosen, ok
 }
 
 func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out ports.Outcome) {
@@ -365,7 +505,7 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 // there is nothing to wait for and it is forwarded at once.
 func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	if !r.worthWaiting(cands, class, best) {
-		r.handleDefault(w, req, class, cands, best)
+		r.forwardNow(w, req, class, cands, best)
 		return
 	}
 	after := *class.WaitAfter
@@ -387,17 +527,21 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 			}
 		}
 		if sel, ok := r.sel(past, class, best); ok {
-			r.forwardSelected(w, req, class, sel)
+			ctx, cancel := r.requestCtx(req)
+			defer cancel()
+			r.forwardSelected(ctx, w, req, class, sel)
 			return
 		}
 		// The node that reported the round is not eligible after all.
-		r.handleDefault(w, req, class, cands, best)
+		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	f := r.statusAt(round)
+	sctx, scancel := context.WithTimeout(req.Context(), r.opts.StatusTimeout)
+	f := r.statusAt(sctx, round)
+	scancel()
 	if f.err != nil {
 		r.log.Debug("held wait timed out with no status, forwarding", "after", after, "err", f.err)
-		r.handleDefault(w, req, class, cands, best)
+		r.forwardNow(w, req, class, cands, best)
 		return
 	}
 	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", f.upstream.ID)
@@ -433,12 +577,14 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 	if req.Context().Err() != nil {
 		return
 	}
-	f := r.statusAt(round)
+	sctx, scancel := context.WithTimeout(req.Context(), r.opts.StatusTimeout)
+	f := r.statusAt(sctx, round)
+	scancel()
 	if f.err != nil {
 		// No node known at that round answered: an ordinary forward.
 		r.log.Debug("coalesced status unavailable, forwarding", "round", round, "err", f.err)
 		cands, best = r.dir.Snapshot()
-		r.handleDefault(w, req, class, cands, best)
+		r.forwardNow(w, req, class, cands, best)
 		return
 	}
 	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", f.upstream.ID)
@@ -450,7 +596,9 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 
 // statusAt returns a status body at round or later: the last one when it is
 // recent enough, else the result of a fetch shared with concurrent callers.
-func (r *Router) statusAt(round uint64) *statusFetch {
+// A caller whose ctx ends first gets an error result; the fetch goes on for
+// the others and for the next round.
+func (r *Router) statusAt(ctx context.Context, round uint64) *statusFetch {
 	r.statusMu.Lock()
 	if last := r.status; last != nil && last.round >= round {
 		r.statusMu.Unlock()
@@ -463,14 +611,21 @@ func (r *Router) statusAt(round uint64) *statusFetch {
 		go r.fetchStatus(f)
 	}
 	r.statusMu.Unlock()
-	<-f.done
-	return f
+	select {
+	case <-f.done:
+		return f
+	case <-ctx.Done():
+		return &statusFetch{want: round, err: ctx.Err()}
+	}
 }
 
 // fetchStatus asks eligible nodes at f.round or later for /v2/status, best
-// first, within the retry budget.
+// first, within the retry budget, each try bounded by StatusTimeout and all
+// of them by RequestTimeout.
 func (r *Router) fetchStatus(f *statusFetch) {
 	defer close(f.done)
+	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
+	defer cancel()
 	want := f.want
 	class := domain.Classify(http.MethodGet, "/v2/status")
 	cands, best := r.dir.Snapshot()
@@ -483,12 +638,15 @@ func (r *Router) fetchStatus(f *statusFetch) {
 	f.err = errors.New("no eligible node at that round")
 	if sel, ok := r.sel(at, class, best); ok {
 		tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
-		if len(tries) > 1+r.opts.RetryBudget {
-			tries = tries[:1+r.opts.RetryBudget]
+		if b := r.opts.RetryBudget; b >= 0 && len(tries) > 1+b {
+			tries = tries[:1+b]
 		}
 		for _, u := range tries {
-			if f.round, f.body, f.err = r.getStatus(u, class); f.err == nil {
+			if f.round, f.body, f.err = r.getStatus(ctx, u, class); f.err == nil {
 				f.upstream = u
+				break
+			}
+			if ctx.Err() != nil {
 				break
 			}
 		}
@@ -503,8 +661,8 @@ func (r *Router) fetchStatus(f *statusFetch) {
 	}
 }
 
-func (r *Router) getStatus(u domain.Upstream, class domain.RequestClass) (uint64, []byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.UpstreamTimeout)
+func (r *Router) getStatus(ctx context.Context, u domain.Upstream, class domain.RequestClass) (uint64, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.opts.StatusTimeout)
 	defer cancel()
 	rq, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(u.BaseURL, "/")+"/v2/status", nil)
 	if err != nil {
@@ -548,24 +706,21 @@ func (r *Router) recallTxn(txid string) (string, bool) {
 	return r.pins.recall(txid, r.clock.Now())
 }
 
-// handleBroadcast sends POST /v2/transactions to one eligible non-follower
-// node (never retried after bytes went out) or, with multi_broadcast, to all
-// of them at once, answering with the first success.
-func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	sel, ok := r.sel(cands, class, best)
+// handleBroadcast sends POST /v2/transactions to the eligible non-follower
+// nodes in turn, until one answers (a rejection is an answer), or, with
+// multi_broadcast, to all of them at once, answering with the first success.
+// Either way the externals follow when every node failed to answer.
+func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
+	sel, cands, best, ok := r.pick(ctx, class, cands, best)
 	if !ok {
 		r.noUpstream(w, class, cands, best)
 		return
 	}
 	if !r.opts.MultiBroadcast {
 		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
-		out := r.forward(cw, req, sel.Chosen, class, nil)
-		if out.Failed() && !out.HeadersSent {
-			r.answerFailure(w, req, out)
-			return
-		}
-		if out.Status == 200 {
-			r.rememberTxn(txIDFrom(cw.buf.Bytes()), sel.Chosen.ID)
+		r.forwardSelected(ctx, cw, req, class, sel)
+		if cw.status == 200 {
+			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
 		}
 		return
 	}
@@ -574,11 +729,12 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 		writeMessage(w, 400, "algod-loadb-mesh: cannot read body")
 		return
 	}
-	targets := dedupeByURL(append([]domain.Upstream{sel.Chosen}, sel.Alternates...))
-	ctx, cancel := context.WithTimeout(req.Context(), r.opts.UpstreamTimeout)
+	targets := dedupeByURL(meshFirst(append([]domain.Upstream{sel.Chosen}, sel.Alternates...)))
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := r.fanOut(ctx, req, body, targets, class)
 	var fallback *fanResult
+	unanswered := 0
 	for range targets {
 		res := <-results
 		if res.err == nil && res.resp.StatusCode == 200 {
@@ -588,17 +744,74 @@ func (r *Router) handleBroadcast(w http.ResponseWriter, req *http.Request, class
 			writeFan(w, res)
 			return
 		}
-		if fallback == nil || (res.err == nil && fallback.err != nil) {
+		if res.err != nil || withheldStatus(res.resp.StatusCode) {
+			unanswered++
+		}
+		// An answer (a rejection, say) outranks a withheld status, which
+		// outranks a transport error.
+		if fallback == nil || fanRank(res) > fanRank(*fallback) {
 			res := res
 			fallback = &res
 		}
 	}
 	r.metric.Inc("loadb_multibroadcast", "outcome", "failed")
+	if unanswered == len(targets) && timeLeft(ctx) {
+		// No node answered at all: the externals are the last resort.
+		if ext, ok := r.externalFallback(ctx, class, targets); ok && timeLeft(ctx) {
+			r.metric.Inc("loadb_retries")
+			r.log.Debug("retrying on external", "path", req.URL.Path, "external", ext.ID)
+			req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+			cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
+			out := r.forward(ctx, cw, req, ext, class, nil)
+			if !out.Failed() || out.HeadersSent || req.Context().Err() != nil {
+				if cw.status == 200 {
+					r.rememberTxn(txIDFrom(cw.buf.Bytes()), ext.ID)
+				}
+				return
+			}
+		}
+	}
 	if fallback.err != nil {
 		writeMessage(w, 502, "algod-loadb-mesh: broadcast failed on every node: "+fallback.err.Error())
 		return
 	}
 	writeFan(w, *fallback)
+}
+
+// fanRank orders a fanned-out request's failures for the answer to give:
+// an upstream's own answer over a status the forwarder would withhold, over
+// a transport error.
+func fanRank(res fanResult) int {
+	switch {
+	case res.err != nil:
+		return 0
+	case withheldStatus(res.resp.StatusCode):
+		return 1
+	default:
+		return 2
+	}
+}
+
+// meshFirst drops the externals from a selection that holds a mesh node:
+// they are the last resort, reached only when no mesh node answers. A
+// selection of externals alone is returned as is.
+func meshFirst(us []domain.Upstream) []domain.Upstream {
+	mesh := us[:0:0]
+	for _, u := range us {
+		if u.Kind != domain.KindExternal {
+			mesh = append(mesh, u)
+		}
+	}
+	if len(mesh) == 0 {
+		return us
+	}
+	return mesh
+}
+
+// withheldStatus is true for the upstream statuses the forwarder withholds
+// from the client as failures of the upstream rather than answers.
+func withheldStatus(code int) bool {
+	return code == 502 || code == 503 || code == 504
 }
 
 // maxFanBody bounds one buffered upstream answer; pending lookups of
@@ -620,6 +833,8 @@ func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, tar
 	results := make(chan fanResult, len(targets))
 	for _, u := range targets {
 		go func(u domain.Upstream) {
+			ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
+			defer cancel()
 			start := r.clock.Now()
 			rq, _ := http.NewRequestWithContext(ctx, req.Method, strings.TrimSuffix(u.BaseURL, "/")+req.URL.RequestURI(), bytes.NewReader(body))
 			rq.Header.Set("X-Algo-API-Token", u.Token)
@@ -693,6 +908,16 @@ func sortByRoundDesc(us []domain.Upstream) {
 	}
 }
 
+// anyEligible is true when some upstream would serve a plain request.
+func (r *Router) anyEligible(cands []domain.Upstream, best uint64) bool {
+	for _, u := range cands {
+		if domain.Eligible(u, domain.RequestClass{}, best, r.opts.SyncTolerance) {
+			return true
+		}
+	}
+	return false
+}
+
 // serveAgent answers /loadb/* from the agent itself.
 func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 	cands, best := r.dir.Snapshot()
@@ -702,11 +927,17 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 			writeMessage(w, 503, "draining")
 			return
 		}
-		for _, u := range cands {
-			if domain.Eligible(u, domain.RequestClass{}, best, r.opts.SyncTolerance) {
-				writeJSON(w, 200, map[string]any{"status": "ok", "best_round": best})
-				return
-			}
+		// Nothing in the mesh: the externals are checked, as they would be
+		// for a request, so that an agent which would serve from one is
+		// healthy. A probe that gates traffic on this answer would otherwise
+		// never let in the request that triggers the check. The check is
+		// bounded by the probe's own context and debounced by the directory.
+		if !r.anyEligible(cands, best) && r.dir.checkExternals(req.Context()) {
+			cands, best = r.dir.Snapshot()
+		}
+		if r.anyEligible(cands, best) {
+			writeJSON(w, 200, map[string]any{"status": "ok", "best_round": best})
+			return
 		}
 		writeMessage(w, 503, "no eligible upstream")
 	case "/loadb/status":
@@ -741,11 +972,22 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 // captureWriter tees the first `limit` bytes of a response for inspection.
 type captureWriter struct {
 	http.ResponseWriter
-	buf   bytes.Buffer
-	limit int
+	buf    bytes.Buffer
+	limit  int
+	status int
+}
+
+func (c *captureWriter) WriteHeader(code int) {
+	if c.status == 0 && code >= 200 {
+		c.status = code
+	}
+	c.ResponseWriter.WriteHeader(code)
 }
 
 func (c *captureWriter) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
 	if c.buf.Len() < c.limit {
 		n := c.limit - c.buf.Len()
 		if n > len(b) {

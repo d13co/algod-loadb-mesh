@@ -43,15 +43,17 @@ type Node struct {
 	opts Options
 	srv  *httptest.Server
 
-	mu      sync.Mutex
-	round   uint64
-	oldest  uint64
-	changed chan struct{}
-	failing bool
-	latency time.Duration
-	boxes   map[uint64]map[string][]byte
-	pool    map[string]poolTxn
-	hits    map[string]int
+	mu        sync.Mutex
+	round     uint64
+	oldest    uint64
+	changed   chan struct{}
+	failing   bool
+	hang      bool // every request blocks until the client gives up
+	rejecting bool // every broadcast answers 400, as algod does for a rejected transaction
+	latency   time.Duration
+	boxes     map[uint64]map[string][]byte
+	pool      map[string]poolTxn
+	hits      map[string]int
 }
 
 // New starts a fake node.
@@ -106,6 +108,22 @@ func (n *Node) Advance(k uint64) { n.SetRound(n.Round() + k) }
 func (n *Node) SetOldest(r uint64) {
 	n.mu.Lock()
 	n.oldest = r
+	n.mu.Unlock()
+}
+
+// SetRejecting makes every broadcast answer 400 (true), as algod does for a
+// transaction it rejects, or behave normally (false).
+func (n *Node) SetRejecting(f bool) {
+	n.mu.Lock()
+	n.rejecting = f
+	n.mu.Unlock()
+}
+
+// SetHang makes every request block until its client gives up (true), as
+// a node that accepts connections and never answers, or behave normally.
+func (n *Node) SetHang(f bool) {
+	n.mu.Lock()
+	n.hang = f
 	n.mu.Unlock()
 }
 
@@ -164,11 +182,15 @@ func (n *Node) DeleteBox(app uint64, name []byte) {
 func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	n.mu.Lock()
 	n.hits[r.URL.Path]++
-	failing, latency, round, oldest := n.failing, n.latency, n.round, n.oldest
+	failing, hang, latency, round, oldest := n.failing, n.hang, n.latency, n.round, n.oldest
 	n.mu.Unlock()
 	w.Header().Set("X-Fake-Node", n.opts.ID)
 	if latency > 0 {
 		time.Sleep(latency)
+	}
+	if hang {
+		<-r.Context().Done()
+		return
 	}
 	if failing {
 		writeJSON(w, 503, map[string]string{"message": "fake node is failing"})
@@ -221,6 +243,13 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"result": "#pragma version 8\nint 1", "node": n.opts.ID})
 	case p == "/v2/transactions" && r.Method == "POST":
+		n.mu.Lock()
+		rejecting := n.rejecting
+		n.mu.Unlock()
+		if rejecting {
+			writeJSON(w, 400, map[string]string{"message": "TransactionPool.Remember: transaction rejected"})
+			return
+		}
 		if n.opts.FollowMode {
 			writeJSON(w, 400, map[string]string{"message": "follow mode node does not broadcast"})
 			return
