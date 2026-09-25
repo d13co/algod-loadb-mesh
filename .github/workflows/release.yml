@@ -52,6 +52,7 @@ jobs:
   # Separate from release so a failed publish can be re-run on its own.
   apt:
     needs: release
+    environment: apt # holds the signing and R2 secrets; v* tags only, needs approval
     runs-on: ubuntu-latest
     concurrency: apt # one index rebuild at a time
     steps:
