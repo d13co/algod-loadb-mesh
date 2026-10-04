@@ -73,16 +73,21 @@ func (s *RegistrySync) Run(ctx context.Context) error {
 	tick, stop := s.clock.Tick(s.opts.Refresh)
 	defer stop()
 	registered := false
+	first := min(s.opts.Refresh, 10*time.Second) / 2
+	retry := first
 	for {
-		if s.refresh(ctx, &registered) && s.opts.AutoRegister && !registered {
-			// The local record is not known yet (monitor still reading the
-			// node); retry sooner than the refresh period.
-			_ = s.clock.Sleep(ctx, min(s.opts.Refresh, 10*time.Second)/2)
+		if !s.refresh(ctx, &registered) || s.opts.AutoRegister && !registered {
+			// The read or the write failed (no synced algod yet), or the
+			// local record is not known yet (monitor still reading the
+			// node): retry sooner than the refresh period, backing off to it.
+			_ = s.clock.Sleep(ctx, retry)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			retry = min(2*retry, s.opts.Refresh)
 			continue
 		}
+		retry = first
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -107,10 +112,11 @@ func (s *RegistrySync) refresh(ctx context.Context, registered *bool) bool {
 	s.metric.Gauge("loadb_registry_round", float64(round))
 	if s.opts.AutoRegister && !*registered {
 		if want, ok := s.local(); ok {
-			if rec, changed := s.register(ctx, recs, want, round); changed {
+			rec, changed, err := s.register(ctx, recs, want, round)
+			if changed {
 				recs = upsert(recs, rec)
 			}
-			*registered = true
+			*registered = err == nil
 		}
 	}
 	s.dir.SetRecords(recs)
@@ -122,13 +128,13 @@ func (s *RegistrySync) refresh(ctx context.Context, registered *bool) bool {
 	return true
 }
 
-func (s *RegistrySync) register(ctx context.Context, recs []domain.NodeRecord, want domain.NodeRecord, round uint64) (domain.NodeRecord, bool) {
+func (s *RegistrySync) register(ctx context.Context, recs []domain.NodeRecord, want domain.NodeRecord, round uint64) (domain.NodeRecord, bool, error) {
 	for _, r := range recs {
 		if r.ID != want.ID {
 			continue
 		}
 		if r.StaticEqual(want) {
-			return r, false
+			return r, false, nil
 		}
 		want.Version = r.Version + 1
 		break
@@ -142,11 +148,11 @@ func (s *RegistrySync) register(ctx context.Context, recs []domain.NodeRecord, w
 	if err := s.reg.Put(wctx, want); err != nil {
 		s.metric.Inc("loadb_registry_writes", "ok", "false")
 		s.log.Warn("self-registration failed", "err", err)
-		return want, false
+		return want, false, err
 	}
 	s.metric.Inc("loadb_registry_writes", "ok", "true")
 	s.log.Info("registered this node", "id", want.ID, "version", want.Version, "endpoints", want.Endpoints)
-	return want, true
+	return want, true, nil
 }
 
 func upsert(recs []domain.NodeRecord, rec domain.NodeRecord) []domain.NodeRecord {

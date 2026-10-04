@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/algorand/go-algorand-sdk/v2/client/v2/algod"
@@ -38,10 +39,11 @@ type Registry struct {
 }
 
 // New builds a registry client. url/token point at the algod used for
-// transactions (normally the local node); reader is used for box reads.
-// syncAddress is the sync account when it has been rekeyed to syncSeed's
-// key; empty means the key's own address.
-func New(appID uint64, syncSeed []byte, syncAddress string, reader ports.AlgodClient, url, token string, log ports.Logger) (*Registry, error) {
+// transactions (normally the local node), reached through rt (nil: the
+// default transport); reader is used for box reads. syncAddress is the sync
+// account when it has been rekeyed to syncSeed's key; empty means the key's
+// own address.
+func New(appID uint64, syncSeed []byte, syncAddress string, reader ports.AlgodClient, url, token string, rt http.RoundTripper, log ports.Logger) (*Registry, error) {
 	key, err := domain.DeriveSyncKey(syncSeed)
 	if err != nil {
 		return nil, err
@@ -57,7 +59,7 @@ func New(appID uint64, syncSeed []byte, syncAddress string, reader ports.AlgodCl
 			return nil, fmt.Errorf("registry: sync address: %w", err)
 		}
 	}
-	sdk, err := algod.MakeClient(strings.TrimSuffix(url, "/"), token)
+	sdk, err := algod.MakeClientWithTransport(strings.TrimSuffix(url, "/"), token, nil, rt)
 	if err != nil {
 		return nil, err
 	}

@@ -53,7 +53,7 @@ func fundedSeed(t *testing.T, c context.Context) []byte {
 	if _, err := rand.Read(seed); err != nil {
 		t.Fatal(err)
 	}
-	reg, err := registryalgo.New(0, seed, "", nil, algodURL, localToken, nil)
+	reg, err := registryalgo.New(0, seed, "", nil, algodURL, localToken, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func newRegistry(t *testing.T, appID uint64, seed []byte) *registryalgo.Registry
 
 func newRekeyedRegistry(t *testing.T, appID uint64, seed []byte, syncAddress string) *registryalgo.Registry {
 	t.Helper()
-	r, err := registryalgo.New(appID, seed, syncAddress, algodhttp.New(algodURL, localToken, nil), algodURL, localToken, nil)
+	r, err := registryalgo.New(appID, seed, syncAddress, algodhttp.New(algodURL, localToken, nil), algodURL, localToken, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
