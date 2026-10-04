@@ -9,6 +9,7 @@ import (
 // RequestClass is everything routing needs to know about a client request.
 type RequestClass struct {
 	Round      *uint64 // request concerns one specific round
+	Ahead      Reply   // algod's reply when Round is past its latest; zero when unknown
 	NeedsDev   bool    // /v2/teal/* requires EnableDeveloperAPI
 	Broadcast  bool    // POST /v2/transactions
 	PendingID  string  // /v2/transactions/pending/{txid}
@@ -16,6 +17,12 @@ type RequestClass struct {
 	LocalOnly  bool    // must be answered by the local node (or the agent)
 	Agent      bool    // /loadb/* served by the agent itself
 	Idempotent bool    // safe to retry on another upstream before bytes were sent
+}
+
+// Reply is a status and message the router answers with in algod's place.
+type Reply struct {
+	Status  int
+	Message string
 }
 
 // String renders the class for logs.
@@ -96,6 +103,19 @@ func Classify(method, path string) RequestClass {
 	case "blocks", "deltas", "stateproofs":
 		if r, ok := parseRound(seg(2)); ok {
 			c.Round = &r
+			const ledger = "failed to retrieve information from the ledger"
+			sub := strings.Join(segs[3:], "/")
+			switch {
+			case method != "GET":
+				// algod has no such route; Ahead stays unset.
+			case seg(1) == "stateproofs" && sub == "", seg(1) == "blocks" && sub == "lightheader/proof":
+				c.Ahead = Reply{500, "given round is greater than the latest round"}
+			case seg(1) == "blocks" && len(segs) == 6 && seg(3) == "transactions" && seg(5) == "proof":
+				c.Ahead = Reply{500, ledger}
+			case seg(1) == "blocks" && (sub == "" || sub == "hash" || sub == "txids" || sub == "logs"),
+				seg(1) == "deltas" && sub == "":
+				c.Ahead = Reply{404, ledger}
+			}
 		}
 		if seg(1) == "deltas" && seg(2) == "txn" {
 			// /v2/deltas/txn/group/{id}: round unknown, any synced node.
