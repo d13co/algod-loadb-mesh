@@ -41,6 +41,7 @@ type Deps struct {
 	AgentKey     ed25519.PrivateKey
 	HTTPClient   *http.Client
 	Rand         domain.Rand
+	loopback     *loopback // set when the registry goes through the router
 }
 
 // Agent is one running loadb instance.
@@ -93,6 +94,9 @@ func New(d Deps) (*Agent, error) {
 		UpstreamTimeout: c.Routing.UpstreamTimeout, WaitTimeout: c.Local.WaitTimeout, PendingTTL: c.Routing.PendingTTL,
 		RequestTimeout: c.Routing.RequestTimeout, RetryBudget: retry, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
 		dir, monitor, d.Forwarder, d.HTTPClient, stats, d.Clock, d.Log, d.Metrics, d.Rand, d.MetricsText)
+	if d.loopback != nil {
+		d.loopback.h = router
+	}
 
 	pub := d.AgentKey.Public().(ed25519.PublicKey)
 	localRecord := func() (domain.NodeRecord, bool) {

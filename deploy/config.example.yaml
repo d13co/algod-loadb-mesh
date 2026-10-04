@@ -39,8 +39,8 @@ registry:
   sync_key_file: /etc/algod-loadb-mesh/sync.key   # algorand: file holding the sync key
   # sync_key: "word1 word2 ... word25"  # the same, inline; wins over sync_key_file. 25-word mnemonic, or hex/base64 of a 32-byte seed or 64-byte key
   # sync_address: ABC...                # only if the sync account is rekeyed: the account; sync_key is its auth key
-  # algod_url: http://127.0.0.1:8080    # algod for registry reads and transactions; default: the local node (required for a balancer)
-  # algod_token: ""                     # its API token; default: the local node's token
+  # algod_url: http://127.0.0.1:8080    # algod for registry reads and transactions; default: routed like client requests, so the local node while synced, else a synced peer or an external (required for a balancer)
+  # algod_token: ""                     # its API token
   refresh: 5m                         # how often the registry is re-read; default 5m
   auto_register: true                 # write this node's record on start; default true (false for static)
   cache: /var/lib/algod-loadb-mesh/registry.cache   # copy of the last read, used at start until the registry answers; default: none

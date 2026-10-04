@@ -306,7 +306,7 @@ func registryCmd(args []string) error {
 		url, tok = nc.Endpoint, nc.Token
 	}
 	reader := algodhttp.New(url, tok, nil)
-	reg, err := registryalgo.New(cfg.Registry.AppID, seed, cfg.Registry.SyncAddress, reader, url, tok, agent.Logger(cfg))
+	reg, err := registryalgo.New(cfg.Registry.AppID, seed, cfg.Registry.SyncAddress, reader, url, tok, nil, agent.Logger(cfg))
 	if err != nil {
 		return err
 	}
