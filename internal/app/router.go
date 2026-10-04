@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,7 +149,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	defer r.inflight.Add(-1)
 	start := r.clock.Now()
 	class := domain.Classify(req.Method, req.URL.Path)
-	sw := &statusWriter{ResponseWriter: w}
+	sw := &statusWriter{ResponseWriter: w, origin: req.Header.Get("Origin") != ""}
 	defer r.logRequest(sw, req, class, start)
 	r.serve(sw, req, class)
 }
@@ -221,6 +222,10 @@ func clientIP(req *http.Request) string {
 }
 
 func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.RequestClass) {
+	if req.Method == http.MethodOptions {
+		preflight(w, req)
+		return
+	}
 	if !r.authorize(w, req, class) {
 		return
 	}
@@ -244,6 +249,20 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	default:
 		r.handleDefault(ctx, w, req, class, cands, best)
 	}
+}
+
+// preflight answers every OPTIONS request as algod's CORS middleware does,
+// ahead of auth: browsers send preflights without the token.
+func preflight(w http.ResponseWriter, req *http.Request) {
+	h := w.Header()
+	h.Add("Vary", "Origin")
+	if req.Header.Get("Origin") != "" {
+		h.Add("Vary", "Access-Control-Request-Method")
+		h.Add("Vary", "Access-Control-Request-Headers")
+		h.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		h.Set("Access-Control-Allow-Headers", "X-Algo-API-Token,Content-Type")
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // requestCtx bounds one request by RequestTimeout: the selection, any
@@ -1006,16 +1025,32 @@ func (c *captureWriter) Flush() {
 
 func (c *captureWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 
-// statusWriter records the status and body size sent to the client.
+// statusWriter records the status and body size sent to the client, and
+// adds algod's CORS headers to every response.
 type statusWriter struct {
 	http.ResponseWriter
+	origin bool // the request carried an Origin
 	status int
 	bytes  int64
+}
+
+// cors runs as the final headers go out, after any upstream's were copied
+// in: Set leaves one Access-Control-Allow-Origin where a proxied algod
+// would make two, which browsers reject.
+func (s *statusWriter) cors() {
+	h := s.Header()
+	if !slices.Contains(h.Values("Vary"), "Origin") {
+		h.Add("Vary", "Origin")
+	}
+	if s.origin {
+		h.Set("Access-Control-Allow-Origin", "*")
+	}
 }
 
 func (s *statusWriter) WriteHeader(code int) {
 	if s.status == 0 && code >= 200 {
 		s.status = code
+		s.cors()
 	}
 	s.ResponseWriter.WriteHeader(code)
 }
@@ -1023,6 +1058,7 @@ func (s *statusWriter) WriteHeader(code int) {
 func (s *statusWriter) Write(b []byte) (int, error) {
 	if s.status == 0 {
 		s.status = http.StatusOK
+		s.cors()
 	}
 	n, err := s.ResponseWriter.Write(b)
 	s.bytes += int64(n)
