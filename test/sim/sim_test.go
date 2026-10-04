@@ -519,12 +519,14 @@ func TestCORSLikeAlgod(t *testing.T) {
 		req, _ := http.NewRequest(method, u+path, nil)
 		if origin != "" {
 			req.Header.Set("Origin", origin)
+		}
+		if method == "OPTIONS" {
 			req.Header.Set("Access-Control-Request-Method", "POST")
 		}
 		if token != "" {
 			req.Header.Set("X-Algo-API-Token", token)
 		}
-		r, err := http.DefaultClient.Do(req)
+		r, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -548,6 +550,10 @@ func TestCORSLikeAlgod(t *testing.T) {
 		"Access-Control-Allow-Headers": {"X-Algo-API-Token,Content-Type"},
 		"Vary":                         {"Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"},
 	})
+	// Not held as a wait-for-block request would be.
+	check("preflight on wait", do("OPTIONS", "/v2/status/wait-for-block-after/1000000", "https://x.example", ""), 204, http.Header{
+		"Access-Control-Allow-Origin": {"*"},
+	})
 	check("options without origin", do("OPTIONS", "/v2/status", "", ""), 204, http.Header{
 		"Access-Control-Allow-Origin":  nil,
 		"Access-Control-Allow-Methods": nil,
@@ -567,6 +573,7 @@ func TestCORSLikeAlgod(t *testing.T) {
 	})
 	check("agent", do("GET", "/loadb/health", "https://x.example", ""), 200, http.Header{
 		"Access-Control-Allow-Origin": {"*"},
+		"Vary":                        {"Origin"},
 	})
 }
 
