@@ -12,6 +12,7 @@ import (
 	"github.com/d13co/algod-loadb-mesh/internal/app"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -505,6 +506,68 @@ func TestClientTokenAndAgentEndpoints(t *testing.T) {
 	if r := call(t, "GET", u+"/loadb/peers", "admin", ""); r.code != 200 {
 		t.Fatalf("peers: %d", r.code)
 	}
+}
+
+// The mesh sends algod's CORS headers: preflights answered before auth, and
+// one Access-Control-Allow-Origin on every response, proxied or its own.
+func TestCORSLikeAlgod(t *testing.T) {
+	defaultToken, adminToken = "secret", "admin"
+	t.Cleanup(func() { defaultToken, adminToken = "", "" })
+	f := start(t, devfleet.Options{Nodes: threeNodes()[:1], Mode: "fallback", ClientToken: "secret", AdminToken: "admin"})
+	u := f.Servers[0].URL
+	do := func(method, path, origin, token string) *http.Response {
+		req, _ := http.NewRequest(method, u+path, nil)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+			req.Header.Set("Access-Control-Request-Method", "POST")
+		}
+		if token != "" {
+			req.Header.Set("X-Algo-API-Token", token)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r
+	}
+	check := func(name string, r *http.Response, code int, want http.Header) {
+		t.Helper()
+		if r.StatusCode != code {
+			t.Errorf("%s: status %d, want %d", name, r.StatusCode, code)
+		}
+		for k, vs := range want {
+			if got := r.Header.Values(k); !slices.Equal(got, vs) {
+				t.Errorf("%s: %s = %q, want %q", name, k, got, vs)
+			}
+		}
+	}
+	check("preflight", do("OPTIONS", "/v2/transactions", "https://x.example", ""), 204, http.Header{
+		"Access-Control-Allow-Origin":  {"*"},
+		"Access-Control-Allow-Methods": {"GET,POST,PUT,DELETE,OPTIONS"},
+		"Access-Control-Allow-Headers": {"X-Algo-API-Token,Content-Type"},
+		"Vary":                         {"Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"},
+	})
+	check("options without origin", do("OPTIONS", "/v2/status", "", ""), 204, http.Header{
+		"Access-Control-Allow-Origin":  nil,
+		"Access-Control-Allow-Methods": nil,
+		"Vary":                         {"Origin"},
+	})
+	check("unauthorized", do("GET", "/v2/status", "https://x.example", ""), 401, http.Header{
+		"Access-Control-Allow-Origin": {"*"},
+		"Vary":                        {"Origin"},
+	})
+	check("proxied", do("GET", "/v2/status", "https://x.example", "secret"), 200, http.Header{
+		"Access-Control-Allow-Origin": {"*"},
+		"Vary":                        {"Origin"},
+	})
+	check("proxied without origin", do("GET", "/v2/status", "", "secret"), 200, http.Header{
+		"Access-Control-Allow-Origin": nil,
+		"Vary":                        {"Origin"},
+	})
+	check("agent", do("GET", "/loadb/health", "https://x.example", ""), 200, http.Header{
+		"Access-Control-Allow-Origin": {"*"},
+	})
 }
 
 // With a client token but no admin token, the agent endpoints stay closed.
