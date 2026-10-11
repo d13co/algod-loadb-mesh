@@ -28,6 +28,7 @@ const (
 // RequestClass is everything routing needs to know about a client request.
 type RequestClass struct {
 	Round      *uint64 // request concerns one specific round
+	Ahead      Reply   // algod's reply when Round is past its latest; zero when unknown
 	NeedsDev   bool    // /v2/teal/* requires EnableDeveloperAPI
 	Broadcast  bool    // POST /v2/transactions
 	PendingID  string  // /v2/transactions/pending/{txid}
@@ -54,6 +55,12 @@ type RequestClass struct {
 	// Simulate marks POST /v2/transactions/simulate, whose body may carry a
 	// round the router refines the class with before it selects.
 	Simulate bool
+}
+
+// Reply is a status and message the router answers with in algod's place.
+type Reply struct {
+	Status  int
+	Message string
 }
 
 // String renders the class for logs.
@@ -162,27 +169,38 @@ func Classify(method, path, rawQuery string) RequestClass {
 		return c
 	}
 	switch seg(1) {
-	case "blocks":
+	case "blocks", "deltas", "stateproofs":
 		if r, ok := parseRound(seg(2)); ok {
 			c.Round = &r
-		}
-		if q.Get("header-only") == "true" {
-			// A time-travel node answers a header from its history at any
-			// round; a plain node needs the stored block (WindowBlock).
-			c.HistoryAnyRound = true
-		}
-	case "deltas", "stateproofs":
-		if r, ok := parseRound(seg(2)); ok {
-			c.Round = &r
-			if seg(1) == "deltas" {
+			const ledger = "failed to retrieve information from the ledger"
+			sub := strings.Join(segs[3:], "/")
+			switch {
+			case method != "GET":
+				// algod has no such route; Ahead stays unset.
+			case seg(1) == "stateproofs" && sub == "", seg(1) == "blocks" && sub == "lightheader/proof":
+				c.Ahead = Reply{500, "given round is greater than the latest round"}
+			case seg(1) == "blocks" && len(segs) == 6 && seg(3) == "transactions" && seg(5) == "proof":
+				c.Ahead = Reply{500, ledger}
+			case seg(1) == "blocks" && (sub == "" || sub == "hash" || sub == "txids" || sub == "logs"),
+				seg(1) == "deltas" && sub == "":
+				c.Ahead = Reply{404, ledger}
+			}
+			if seg(1) == "deltas" && sub == "" {
 				// A plain node serves a delta only from its account-state
 				// lookback; a time-travel node re-evaluates one whose block
 				// is still stored, so it stays on the block window.
 				c.RoundWindow = WindowDelta
 			}
 		}
-		// /v2/deltas/txn/group/{id} and the other non-round delta paths
-		// concern no specific round: any synced node.
+		if seg(1) == "blocks" && q.Get("header-only") == "true" {
+			// A time-travel node answers a header from its history at any
+			// round; a plain node needs the stored block (WindowBlock).
+			c.HistoryAnyRound = true
+		}
+		if seg(1) == "deltas" && seg(2) == "txn" {
+			// /v2/deltas/txn/group/{id}: round unknown, any synced node.
+			c.Round = nil
+		}
 	case "accounts", "assets", "applications", "ledger":
 		// Of the ledger group only supply is proxied; the rest is admin API.
 		if seg(1) == "ledger" && seg(2) != "supply" {

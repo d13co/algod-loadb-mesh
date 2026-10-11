@@ -13,17 +13,28 @@ import (
 func u64(v uint64) *uint64 { return &v }
 
 func TestClassify(t *testing.T) {
+	notFound := Reply{404, "failed to retrieve information from the ledger"}
+	tooHigh := Reply{500, "given round is greater than the latest round"}
 	cases := []struct {
 		method, path, query string
 		want                RequestClass
 	}{
 		{method: "GET", path: "/v2/status", want: RequestClass{Idempotent: true}},
-		{method: "GET", path: "/v2/blocks/123", want: RequestClass{Round: u64(123), Idempotent: true}},
-		{method: "GET", path: "/v2/blocks/123/hash", want: RequestClass{Round: u64(123), Idempotent: true}},
-		{method: "GET", path: "/v2/blocks/123", query: "header-only=true", want: RequestClass{Round: u64(123), HistoryAnyRound: true, Idempotent: true}},
-		{method: "GET", path: "/v2/deltas/55", want: RequestClass{Round: u64(55), RoundWindow: WindowDelta, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/hash", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123", query: "header-only=true", want: RequestClass{Round: u64(123), Ahead: notFound, HistoryAnyRound: true, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/lightheader/proof", want: RequestClass{Round: u64(123), Ahead: tooHigh, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/transactions/TXID/proof", want: RequestClass{Round: u64(123),
+			Ahead: Reply{500, "failed to retrieve information from the ledger"}, Idempotent: true}},
+		{method: "GET", path: "/v2/deltas/55", want: RequestClass{Round: u64(55), Ahead: notFound, RoundWindow: WindowDelta, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/txids", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/lightheader", want: RequestClass{Round: u64(123), Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/transactions/TXID", want: RequestClass{Round: u64(123), Idempotent: true}},
+		{method: "HEAD", path: "/v2/blocks/123", want: RequestClass{Round: u64(123), Idempotent: true}},
+		{method: "POST", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9)}},
+		{method: "GET", path: "/v2/deltas/55/txn/group", want: RequestClass{Round: u64(55), Idempotent: true}},
 		{method: "GET", path: "/v2/deltas/txn/group/abc", want: RequestClass{Idempotent: true}},
-		{method: "GET", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9), Idempotent: true}},
+		{method: "GET", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9), Ahead: tooHigh, Idempotent: true}},
 		{method: "GET", path: "/v2/status/wait-for-block-after/70", want: RequestClass{WaitAfter: u64(70), Idempotent: true}},
 		{method: "POST", path: "/v2/teal/compile", want: RequestClass{NeedsDev: true, Idempotent: true}},
 		{method: "POST", path: "/v2/transactions", want: RequestClass{Broadcast: true}},

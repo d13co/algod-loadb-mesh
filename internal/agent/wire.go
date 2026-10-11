@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"time"
@@ -64,6 +65,7 @@ func FromConfig(c config.Config) (Deps, error) {
 
 	var reg ports.Registry
 	var cache ports.RegistryCache
+	var lb *loopback
 	switch c.Registry.Type {
 	case "algorand":
 		seed, err := c.SyncSeed()
@@ -71,13 +73,19 @@ func FromConfig(c config.Config) (Deps, error) {
 			return Deps{}, err
 		}
 		url, token := c.Registry.AlgodURL, c.Registry.AlgodToken
-		regReader := local
+		var rt http.RoundTripper
+		var regReader ports.AlgodClient
 		if url == "" {
-			url, token = nc.Endpoint, nc.Token
+			// No algod named: go through this agent's router, which uses the
+			// local node while it is synced and a synced peer or an external
+			// while it is not, so a syncing node still reads and registers.
+			lb = &loopback{}
+			url, token, rt = "http://loopback", c.ClientToken, lb
+			regReader = algodhttp.New(url, token, &http.Client{Transport: lb})
 		} else {
 			regReader = factory.NewAlgodClient(url, token)
 		}
-		r, err := registryalgo.New(c.Registry.AppID, seed, c.Registry.SyncAddress, regReader, url, token, log)
+		r, err := registryalgo.New(c.Registry.AppID, seed, c.Registry.SyncAddress, regReader, url, token, rt, log)
 		if err != nil {
 			return Deps{}, err
 		}
@@ -114,5 +122,18 @@ func FromConfig(c config.Config) (Deps, error) {
 	m := metrics.New()
 	return Deps{Config: c, Algod: local, ConfigReader: reader, Clients: factory, Gossip: gossip, Registry: reg, Cache: cache,
 		Forwarder: proxy.New(nil), Clock: clock.Real{}, Log: log, Metrics: m, MetricsText: m, AgentKey: key,
-		HTTPClient: &http.Client{Timeout: c.Routing.UpstreamTimeout + time.Second}}, nil
+		HTTPClient: &http.Client{Timeout: c.Routing.UpstreamTimeout + time.Second}, loopback: lb}, nil
+}
+
+// loopback is an http.RoundTripper that serves requests with the agent's
+// router in-process; New sets the router.
+type loopback struct{ h http.Handler }
+
+// RoundTrip implements http.RoundTripper.
+func (l *loopback) RoundTrip(req *http.Request) (*http.Response, error) {
+	in := req.Clone(req.Context())
+	in.RemoteAddr = "loopback" // the access log's ip
+	rec := httptest.NewRecorder()
+	l.h.ServeHTTP(rec, in)
+	return rec.Result(), nil
 }
