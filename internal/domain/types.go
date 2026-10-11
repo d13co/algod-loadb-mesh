@@ -55,10 +55,15 @@ type Capabilities struct {
 	DeveloperAPI    bool     `json:"developer_api"`
 	FollowMode      bool     `json:"follow_mode"`
 	ExperimentalAPI bool     `json:"experimental_api"`
-	AlgodVersion    string   `json:"algod_version,omitempty"`
-	GenesisID       string   `json:"genesis_id,omitempty"`
-	StorageEngine   string   `json:"storage_engine,omitempty"`
-	MaxAcctLookback uint64   `json:"max_acct_lookback,omitempty"`
+	// TimeTravel is a node that keeps every ledger object's value at every
+	// round (the EnableTimeTravel fork), so it answers ?round= on state
+	// endpoints and the /versions history endpoints at any past round, even
+	// when Archival is off.
+	TimeTravel      bool   `json:"time_travel,omitempty"`
+	AlgodVersion    string `json:"algod_version,omitempty"`
+	GenesisID       string `json:"genesis_id,omitempty"`
+	StorageEngine   string `json:"storage_engine,omitempty"`
+	MaxAcctLookback uint64 `json:"max_acct_lookback,omitempty"`
 }
 
 // CapabilityOverrides are manual corrections from config or the registry.
@@ -67,6 +72,7 @@ type CapabilityOverrides struct {
 	Archival     *Archival `json:"archival,omitempty" yaml:"archival,omitempty"`
 	DeveloperAPI *bool     `json:"developer_api,omitempty" yaml:"developer_api,omitempty"`
 	FollowMode   *bool     `json:"follow_mode,omitempty" yaml:"follow_mode,omitempty"`
+	TimeTravel   *bool     `json:"time_travel,omitempty" yaml:"time_travel,omitempty"`
 }
 
 // Apply returns caps with the overrides applied, recomputing OldestRound.
@@ -83,6 +89,9 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 	}
 	if o.FollowMode != nil {
 		c.FollowMode = *o.FollowMode
+	}
+	if o.TimeTravel != nil {
+		c.TimeTravel = *o.TimeTravel
 	}
 	return c
 }
@@ -215,7 +224,8 @@ func equalOverrides(a, b *CapabilityOverrides) bool {
 	eqA := (a.Archival == nil && b.Archival == nil) || (a.Archival != nil && b.Archival != nil && *a.Archival == *b.Archival)
 	eqD := (a.DeveloperAPI == nil && b.DeveloperAPI == nil) || (a.DeveloperAPI != nil && b.DeveloperAPI != nil && *a.DeveloperAPI == *b.DeveloperAPI)
 	eqF := (a.FollowMode == nil && b.FollowMode == nil) || (a.FollowMode != nil && b.FollowMode != nil && *a.FollowMode == *b.FollowMode)
-	return eqA && eqD && eqF
+	eqT := (a.TimeTravel == nil && b.TimeTravel == nil) || (a.TimeTravel != nil && b.TimeTravel != nil && *a.TimeTravel == *b.TimeTravel)
+	return eqA && eqD && eqF && eqT
 }
 
 // Health is the liveness/sync state of an upstream as seen by an agent.

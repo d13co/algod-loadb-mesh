@@ -83,11 +83,29 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 	if len(elig) == 0 {
 		return Selection{}, false
 	}
-	// Order: effective tier, then score. Ties broken by ID for determinism.
+	// A time-travel node is the tie-breaker against a peer sitting on the
+	// edge of its state window: its LastRound comes from a heartbeat that can
+	// trail the node by a round, so the round may already be unservable
+	// there, while history answers it exactly.
+	hasTT := false
+	for _, u := range elig {
+		if u.Caps.TimeTravel {
+			hasTT = true
+			break
+		}
+	}
+	// Order: effective tier, then the edge preference, then score. Ties
+	// broken by ID for determinism.
 	sort.SliceStable(elig, func(i, j int) bool {
 		ti, tj := effectiveTier(mode, elig[i]), effectiveTier(mode, elig[j])
 		if ti != tj {
 			return ti < tj
+		}
+		if hasTT {
+			ei, ej := stateWindowEdge(elig[i], c), stateWindowEdge(elig[j], c)
+			if ei != ej {
+				return ej // a peer on the edge sorts after a time-travel node
+			}
 		}
 		if elig[i].Score != elig[j].Score {
 			return elig[i].Score < elig[j].Score
@@ -101,7 +119,22 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 	}
 	idx := 0
 	if mode == ModeLoadBalancer && n > 1 && rnd != nil {
-		a, b := rnd.IntN(n), rnd.IntN(n)
+		// Keep an edge peer out of the random pool when a time-travel node is
+		// eligible, so power-of-two-choices cannot fall on the risky peer.
+		pool := make([]int, 0, n)
+		for i := 0; i < n; i++ {
+			if hasTT && stateWindowEdge(elig[i], c) {
+				continue
+			}
+			pool = append(pool, i)
+		}
+		if len(pool) == 0 {
+			for i := 0; i < n; i++ {
+				pool = append(pool, i)
+			}
+		}
+		a := pool[rnd.IntN(len(pool))]
+		b := pool[rnd.IntN(len(pool))]
 		if elig[b].Score < elig[a].Score {
 			a = b
 		}
@@ -112,6 +145,21 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 	alts = append(alts, elig[:idx]...)
 	alts = append(alts, elig[idx+1:]...)
 	return Selection{Chosen: chosen, Alternates: alts, Tier: chosen.Tier}, true
+}
+
+// stateWindowEdge reports whether u is a non-local, non-time-travel node whose
+// account-state window (or delta window) begins exactly at the requested
+// round. It is a selection-only preference: eligible stays exact, and a fleet
+// with no time-travel node still routes such a round to this node.
+func stateWindowEdge(u Upstream, c RequestClass) bool {
+	if c.Round == nil || c.RoundWindow == WindowBlock || u.Caps.TimeTravel || u.Kind == KindLocal {
+		return false
+	}
+	if u.LastRound < u.Caps.MaxAcctLookback {
+		return false // the window reaches genesis: no edge to fall off
+	}
+	oldest, ok := stateOldest(u, c.RoundWindow)
+	return ok && *c.Round == oldest
 }
 
 // effectiveTier places the local node ahead of everything in fallback mode

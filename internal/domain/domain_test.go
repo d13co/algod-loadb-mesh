@@ -16,45 +16,68 @@ func TestClassify(t *testing.T) {
 	notFound := Reply{404, "failed to retrieve information from the ledger"}
 	tooHigh := Reply{500, "given round is greater than the latest round"}
 	cases := []struct {
-		method, path string
-		want         RequestClass
+		method, path, query string
+		want                RequestClass
 	}{
-		{"GET", "/v2/status", RequestClass{Idempotent: true}},
-		{"GET", "/v2/blocks/123", RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
-		{"GET", "/v2/blocks/123/hash", RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
-		{"GET", "/v2/blocks/123/lightheader/proof", RequestClass{Round: u64(123), Ahead: tooHigh, Idempotent: true}},
-		{"GET", "/v2/blocks/123/transactions/TXID/proof", RequestClass{Round: u64(123),
+		{method: "GET", path: "/v2/status", want: RequestClass{Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/hash", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123", query: "header-only=true", want: RequestClass{Round: u64(123), Ahead: notFound, HistoryAnyRound: true, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/lightheader/proof", want: RequestClass{Round: u64(123), Ahead: tooHigh, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/transactions/TXID/proof", want: RequestClass{Round: u64(123),
 			Ahead: Reply{500, "failed to retrieve information from the ledger"}, Idempotent: true}},
-		{"GET", "/v2/deltas/55", RequestClass{Round: u64(55), Ahead: notFound, Idempotent: true}},
-		{"GET", "/v2/blocks/123/txids", RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
-		{"GET", "/v2/blocks/123/lightheader", RequestClass{Round: u64(123), Idempotent: true}},
-		{"GET", "/v2/blocks/123/transactions/TXID", RequestClass{Round: u64(123), Idempotent: true}},
-		{"HEAD", "/v2/blocks/123", RequestClass{Round: u64(123), Idempotent: true}},
-		{"POST", "/v2/stateproofs/9", RequestClass{Round: u64(9)}},
-		{"GET", "/v2/deltas/55/txn/group", RequestClass{Round: u64(55), Idempotent: true}},
-		{"GET", "/v2/deltas/txn/group/abc", RequestClass{Idempotent: true}},
-		{"GET", "/v2/stateproofs/9", RequestClass{Round: u64(9), Ahead: tooHigh, Idempotent: true}},
-		{"GET", "/v2/status/wait-for-block-after/70", RequestClass{WaitAfter: u64(70), Idempotent: true}},
-		{"POST", "/v2/teal/compile", RequestClass{NeedsDev: true, Idempotent: true}},
-		{"POST", "/v2/transactions", RequestClass{Broadcast: true}},
-		{"POST", "/v2/transactions/simulate", RequestClass{Idempotent: true}},
-		{"GET", "/v2/transactions/pending/TXID", RequestClass{PendingID: "TXID", Idempotent: true}},
-		{"GET", "/v2/transactions/pending", RequestClass{LocalOnly: true, Idempotent: true}},
-		{"GET", "/health", RequestClass{LocalOnly: true, Idempotent: true}},
-		{"GET", "/loadb/status", RequestClass{Agent: true, LocalOnly: true, Idempotent: true}},
-		{"POST", "/v2/participation", RequestClass{LocalOnly: true}},
+		{method: "GET", path: "/v2/deltas/55", want: RequestClass{Round: u64(55), Ahead: notFound, RoundWindow: WindowDelta, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/txids", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/lightheader", want: RequestClass{Round: u64(123), Idempotent: true}},
+		{method: "GET", path: "/v2/blocks/123/transactions/TXID", want: RequestClass{Round: u64(123), Idempotent: true}},
+		{method: "HEAD", path: "/v2/blocks/123", want: RequestClass{Round: u64(123), Idempotent: true}},
+		{method: "POST", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9)}},
+		{method: "GET", path: "/v2/deltas/55/txn/group", want: RequestClass{Round: u64(55), Idempotent: true}},
+		{method: "GET", path: "/v2/deltas/txn/group/abc", want: RequestClass{Idempotent: true}},
+		{method: "GET", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9), Ahead: tooHigh, Idempotent: true}},
+		{method: "GET", path: "/v2/status/wait-for-block-after/70", want: RequestClass{WaitAfter: u64(70), Idempotent: true}},
+		{method: "POST", path: "/v2/teal/compile", want: RequestClass{NeedsDev: true, Idempotent: true}},
+		{method: "POST", path: "/v2/transactions", want: RequestClass{Broadcast: true}},
+		{method: "POST", path: "/v2/transactions/simulate", want: RequestClass{Idempotent: true, Simulate: true}},
+		{method: "GET", path: "/v2/transactions/pending/TXID", want: RequestClass{PendingID: "TXID", Idempotent: true}},
+		{method: "GET", path: "/v2/transactions/pending", want: RequestClass{LocalOnly: true, Idempotent: true}},
+		{method: "GET", path: "/health", want: RequestClass{LocalOnly: true, Idempotent: true}},
+		{method: "GET", path: "/loadb/status", want: RequestClass{Agent: true, LocalOnly: true, Idempotent: true}},
+		{method: "POST", path: "/v2/participation", want: RequestClass{LocalOnly: true}},
+		// Time travel: ?round= on state endpoints is only answerable from
+		// the history; a plain node would ignore it and answer "latest".
+		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/assets/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/box", query: "name=str:k&round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/assets/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/applications/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/ledger/supply", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/ledger/supply", want: RequestClass{LocalOnly: true, Idempotent: true}},
+		// A malformed pair must not hide a well-formed round.
+		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100&x=%zz", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		// A box listing takes round on a plain node within its account-state
+		// lookback, so a time-travel node merely extends its range.
+		{method: "GET", path: "/v2/applications/42/boxes", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, Idempotent: true}},
+		// Object histories are registered only with EnableTimeTravel.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/assets/42/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/assets/42/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/box/versions", query: "name=str:k", want: RequestClass{TimeTravel: true, Idempotent: true}},
 	}
 	for _, c := range cases {
-		got := Classify(c.method, c.path)
+		got := Classify(c.method, c.path, c.query)
+		label := c.method + " " + c.path + "?" + c.query
 		if (got.Round == nil) != (c.want.Round == nil) || (got.Round != nil && *got.Round != *c.want.Round) {
-			t.Errorf("%s %s: round %v want %v", c.method, c.path, got.Round, c.want.Round)
+			t.Errorf("%s: round %v want %v", label, got.Round, c.want.Round)
 		}
 		if (got.WaitAfter == nil) != (c.want.WaitAfter == nil) || (got.WaitAfter != nil && *got.WaitAfter != *c.want.WaitAfter) {
-			t.Errorf("%s %s: wait %v want %v", c.method, c.path, got.WaitAfter, c.want.WaitAfter)
+			t.Errorf("%s: wait %v want %v", label, got.WaitAfter, c.want.WaitAfter)
 		}
 		got.Round, got.WaitAfter, c.want.Round, c.want.WaitAfter = nil, nil, nil, nil
 		if got != c.want {
-			t.Errorf("%s %s: got %+v want %+v", c.method, c.path, got, c.want)
+			t.Errorf("%s: got %+v want %+v", label, got, c.want)
 		}
 	}
 }
@@ -62,6 +85,24 @@ func TestClassify(t *testing.T) {
 func up(id string, kind UpstreamKind, tier int, h Health, round uint64) Upstream {
 	return Upstream{ID: id, Kind: kind, Tier: tier, Health: h, LastRound: round,
 		Caps: Capabilities{OldestRound: OldestRoundFor(Archival{Kind: ArchivalNone}, round)}}
+}
+
+// ttUp is a synced peer with time travel on but no archival blocks: its
+// history covers every round while its block window starts at oldest.
+func ttUp(round, oldest uint64) Upstream {
+	u := up("tt", KindPeer, 1, HealthSynced, round)
+	u.Caps.TimeTravel = true
+	u.Caps.OldestRound = oldest
+	return u
+}
+
+// stateUp is a synced peer with a chosen block window and account-state
+// lookback, for the state-window checks.
+func stateUp(id string, h Health, round, oldest, maxAcct uint64) Upstream {
+	u := up(id, KindPeer, 1, h, round)
+	u.Caps.OldestRound = oldest
+	u.Caps.MaxAcctLookback = maxAcct
+	return u
 }
 
 func TestEligible(t *testing.T) {
@@ -89,6 +130,43 @@ func TestEligible(t *testing.T) {
 		{"local only on local online", up("l", KindLocal, 1, HealthOnline, 900), RequestClass{LocalOnly: true}, 1000, true},
 		{"wait after far ahead", local, RequestClass{WaitAfter: u64(1005)}, 1000, false},
 		{"wait after next", local, RequestClass{WaitAfter: u64(1000)}, 1000, true},
+		// Time travel: ?round= on a state endpoint is only answerable from
+		// the history.
+		{"tt round on plain node", stateUp("p", HealthSynced, 5000, 4000, 4),
+			RequestClass{Round: u64(10), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true}, 5000, false},
+		{"tt round outside window on tt node", ttUp(5000, 4000),
+			RequestClass{Round: u64(10), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true}, 5000, true},
+		{"tt round in window on tt node", ttUp(5000, 4000),
+			RequestClass{Round: u64(4500), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true}, 5000, true},
+		// A block header extends to any round on a time-travel node but
+		// stays on the block window on a plain one.
+		{"header anywhere on plain node pruned", stateUp("p", HealthSynced, 5000, 4000, 4),
+			RequestClass{Round: u64(10), HistoryAnyRound: true}, 5000, false},
+		{"header anywhere outside window on tt node", ttUp(5000, 4000),
+			RequestClass{Round: u64(10), HistoryAnyRound: true}, 5000, true},
+		// State at a round is bounded by the account-state lookback on a
+		// plain node: an archival block window does not widen it.
+		{"state at oldest lookback round", stateUp("p", HealthSynced, 5000, 0, 4),
+			RequestClass{Round: u64(4996), RoundWindow: WindowState, HistoryAnyRound: true}, 5000, true},
+		{"state below the lookback", stateUp("p", HealthSynced, 5000, 0, 4),
+			RequestClass{Round: u64(4995), RoundWindow: WindowState, HistoryAnyRound: true}, 5000, false},
+		{"state old round on archival plain node", stateUp("p", HealthSynced, 5000, 0, 4),
+			RequestClass{Round: u64(10), RoundWindow: WindowState, HistoryAnyRound: true}, 5000, false},
+		{"state unknown lookback falls back to block window", stateUp("p", HealthSynced, 5000, 0, 0),
+			RequestClass{Round: u64(10), RoundWindow: WindowState, HistoryAnyRound: true}, 5000, true},
+		// ... and by the block window on a time-travel node, which only
+		// re-evaluates a delta whose block is still stored.
+		{"delta in block window on tt node", ttUp(5000, 4000), RequestClass{Round: u64(4500), RoundWindow: WindowDelta}, 5000, true},
+		{"delta outside block window on tt node", ttUp(5000, 4000), RequestClass{Round: u64(10), RoundWindow: WindowDelta}, 5000, false},
+		{"delta old round on plain node", stateUp("p", HealthSynced, 5000, 0, 4), RequestClass{Round: u64(10), RoundWindow: WindowDelta}, 5000, false},
+		// A delta is kept only for the rounds after the oldest lookback
+		// round, which the ledger answers state at from disk.
+		{"delta at oldest lookback round on plain node", stateUp("p", HealthSynced, 5000, 0, 4),
+			RequestClass{Round: u64(4996), RoundWindow: WindowDelta}, 5000, false},
+		{"delta just inside the lookback on plain node", stateUp("p", HealthSynced, 5000, 0, 4),
+			RequestClass{Round: u64(4997), RoundWindow: WindowDelta}, 5000, true},
+		{"versions on plain node", up("p", KindPeer, 1, HealthSynced, 5000), RequestClass{TimeTravel: true}, 5000, false},
+		{"versions on tt node", ttUp(5000, 4000), RequestClass{TimeTravel: true}, 5000, true},
 	}
 	for _, tt := range tests {
 		if got := Eligible(tt.u, tt.c, tt.best, 0); got != tt.want {
@@ -100,6 +178,36 @@ func TestEligible(t *testing.T) {
 	}
 	if Eligible(up("p", KindPeer, 1, HealthOnline, 998), RequestClass{}, 1000, 1) {
 		t.Error("tolerance 1 must reject two rounds of lag")
+	}
+}
+
+// A peer sitting on the edge of its account-state window is a risky pick when
+// a time-travel node is available (the heartbeat's LastRound can trail the
+// node by a round); the time-travel node is preferred. Without one, the peer
+// is still chosen.
+func TestSelectPrefersTimeTravelAtStateWindowEdge(t *testing.T) {
+	best := uint64(100)
+	edge := stateUp("edge", HealthSynced, best, 0, 4) // serves r=96..100
+	edge.Stats.LatencyMS = map[string]float64{"round": 1}
+	tt := ttUp(best, 0)
+	tt.Stats.LatencyMS = map[string]float64{"round": 500}
+	class := RequestClass{Round: u64(96), RoundWindow: WindowState, HistoryAnyRound: true}
+	if !Eligible(edge, class, best, 0) || !Eligible(tt, class, best, 0) {
+		t.Fatalf("edge and tt should be eligible")
+	}
+	sel, ok := Select(ModeFallback, []Upstream{edge, tt}, class, best, 0, Weights{}, nil)
+	if !ok || sel.Chosen.ID != "tt" {
+		t.Fatalf("edge peer should yield to time travel, got %v %q", ok, sel.Chosen.ID)
+	}
+	if sel, ok = Select(ModeFallback, []Upstream{edge}, class, best, 0, Weights{}, nil); !ok || sel.Chosen.ID != "edge" {
+		t.Fatalf("edge peer alone should be chosen, got %v %q", ok, sel.Chosen.ID)
+	}
+	// One round inside the window it is no longer an edge and wins on score.
+	inner := stateUp("edge", HealthSynced, best, 0, 4)
+	inner.Stats.LatencyMS = map[string]float64{"round": 1}
+	sel, _ = Select(ModeFallback, []Upstream{inner, tt}, RequestClass{Round: u64(97), RoundWindow: WindowState, HistoryAnyRound: true}, best, 0, Weights{}, nil)
+	if sel.Chosen.ID != "edge" {
+		t.Fatalf("non-edge peer should win on score, got %q", sel.Chosen.ID)
 	}
 }
 

@@ -33,6 +33,7 @@ type NodeSpec struct {
 	OldestRound  uint64 // what the fake node really serves
 	DeveloperAPI bool
 	FollowMode   bool
+	TimeTravel   bool
 	Tier         int
 	Nets         []int // which of Options.Nets this agent is on; nil: all of them
 }
@@ -136,7 +137,7 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 			cfg.Local.Network = o.GenesisID
 		} else {
 			node = fakealgod.New(fakealgod.Options{ID: spec.ID, GenesisID: o.GenesisID, StartRound: spec.StartRound,
-				OldestRound: spec.OldestRound, DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode})
+				OldestRound: spec.OldestRound, DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode, TimeTravel: spec.TimeTravel})
 			f.Nodes = append(f.Nodes, node)
 			cfg.Local.DataDir = "/dev/null"
 			cfg.Local.AdvertiseEndpoints = []string{node.URL()}
@@ -171,7 +172,7 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		if node != nil {
 			deps.Algod = factory.NewAlgodClient(node.URL(), node.Token())
 			deps.ConfigReader = fakealgod.ConfigReader{Node: node, Archival: spec.Archival, Lookback: spec.Lookback,
-				DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode}
+				DeveloperAPI: spec.DeveloperAPI, FollowMode: spec.FollowMode, TimeTravel: spec.TimeTravel}
 		}
 		a, err := agent.New(deps)
 		if err != nil {

@@ -93,6 +93,23 @@ func TestMonitorTrailingWindow(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return m.State().Caps.OldestRound == 4010 })
 }
 
+func TestMonitorDetectsTimeTravel(t *testing.T) {
+	n := fakealgod.New(fakealgod.Options{ID: "tt", StartRound: 5000, OldestRound: 4000, TimeTravel: true})
+	defer n.Close()
+	m := NewMonitor(MonitorOptions{NodeID: "tt", WaitTimeout: time.Second},
+		algodhttp.New(n.URL(), n.Token(), nil), fakealgod.ConfigReader{Node: n, Lookback: 1000}, clock.Real{}, logging.Nop{}, metrics.New())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return m.State().Online && m.State().Caps.TimeTravel })
+	// The capability survives the round updates that recompute the window.
+	n.Advance(1)
+	waitFor(t, 2*time.Second, func() bool { return m.State().LastRound == 5001 })
+	if !m.State().Caps.TimeTravel {
+		t.Fatal("time travel dropped on round update")
+	}
+}
+
 func TestStatsBreaker(t *testing.T) {
 	fc := clock.NewFake(time.Unix(0, 0))
 	b := NewStatsBook(BreakerOptions{Threshold: 2, OpenFor: 5 * time.Second, Window: 10, Alpha: 0.5}, fc)
