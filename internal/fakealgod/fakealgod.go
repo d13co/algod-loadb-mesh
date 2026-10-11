@@ -185,6 +185,10 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	failing, hang, latency, round, oldest := n.failing, n.hang, n.latency, n.round, n.oldest
 	n.mu.Unlock()
 	w.Header().Set("X-Fake-Node", n.opts.ID)
+	w.Header().Add("Vary", "Origin") // algod's CORS headers, as the mesh will copy them
+	if r.Header.Get("Origin") != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	if latency > 0 {
 		time.Sleep(latency)
 	}
