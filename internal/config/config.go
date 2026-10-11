@@ -238,8 +238,8 @@ type Reg struct {
 	SyncKey      string              `yaml:"sync_key"`
 	SyncKeyFile  string              `yaml:"sync_key_file"`
 	SyncAddress  string              `yaml:"sync_address"` // rekeyed sync account; empty: the sync key's address
-	AlgodURL     string              `yaml:"algod_url"`    // empty: local node
-	AlgodToken   string              `yaml:"algod_token"`  // empty: local token
+	AlgodURL     string              `yaml:"algod_url"`    // empty: through this agent's router
+	AlgodToken   string              `yaml:"algod_token"`  // token for AlgodURL
 	Refresh      time.Duration       `yaml:"refresh"`
 	AutoRegister *bool               `yaml:"auto_register"`
 	Cache        string              `yaml:"cache"`
