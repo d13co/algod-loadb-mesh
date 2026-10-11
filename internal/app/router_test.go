@@ -1,14 +1,19 @@
 package app
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	crand "crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/algorand/go-codec/codec"
 
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
 	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
@@ -579,6 +584,165 @@ func TestHealthChecksExternalsWhenMeshCannotServe(t *testing.T) {
 	h.fc.Advance(6 * time.Second)
 	if rec := wh.get("/loadb/health"); rec.Code != 503 || clients.count("http://ext") != 2 {
 		t.Fatalf("health with a failing external: %d, %d checks", rec.Code, clients.count("http://ext"))
+	}
+}
+
+// requestLog records the class of each access log line.
+type requestLog struct {
+	logging.Nop
+	mu      sync.Mutex
+	classes []string
+}
+
+func (l *requestLog) Info(msg string, kv ...any) {
+	if msg != "request" {
+		return
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i] == "class" {
+			l.mu.Lock()
+			l.classes = append(l.classes, fmt.Sprint(kv[i+1]))
+			l.mu.Unlock()
+		}
+	}
+}
+
+func (l *requestLog) lastClass() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.classes) == 0 {
+		return ""
+	}
+	return l.classes[len(l.classes)-1]
+}
+
+// signedHeartbeat is a heartbeat from id signed by key, with the given
+// capabilities, ready to inject on the gossip transport.
+func signedHeartbeat(t *testing.T, key ed25519.PrivateKey, id string, seq, round uint64, caps domain.Capabilities) []byte {
+	t.Helper()
+	wire, err := domain.EncodeHeartbeat(key, domain.Heartbeat{NodeID: id, Seq: seq, Online: true, LastRound: round, Caps: caps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+// Historical requests (a past round on a state endpoint, an object history,
+// a simulation pinned to a past round) reach only the time-travel node; a
+// plain node never sees them because it would silently answer the latest
+// state. Ordinary requests still reach either.
+func TestTimeTravelRoutesToHistoryNode(t *testing.T) {
+	h := newHarnessWith(t, DirectoryOptions{}, algodhttp.Factory{})
+	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 20})
+	t.Cleanup(b.Close)
+	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 20})
+	t.Cleanup(c.Close)
+	cPub, cKey, _ := ed25519.GenerateKey(crand.Reader)
+	recB := h.peerRecord(addrA)
+	recB.Endpoints, recB.Token = []string{b.URL()}, b.Token()
+	recC := domain.NodeRecord{ID: "c", Network: "n", Agent: domain.AgentInfo{Addrs: []string{addrB}, PubKey: []byte(cPub)},
+		Endpoints: []string{c.URL()}, Token: c.Token()}
+	h.d.SetRecords([]domain.NodeRecord{recB, recC})
+	lg := &requestLog{}
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, lg, h.m, nil, nil)
+	h.inject(addrA, signedHeartbeat(t, h.peerKey, "b", 1, 20, domain.Capabilities{MaxAcctLookback: 4}))
+	h.inject(addrB, signedHeartbeat(t, cKey, "c", 1, 20, domain.Capabilities{TimeTravel: true, MaxAcctLookback: 4}))
+	waitFor(t, 2*time.Second, func() bool {
+		cands, _ := h.d.Snapshot()
+		tt := 0
+		for _, u := range cands {
+			if u.Caps.TimeTravel {
+				tt++
+			}
+		}
+		return tt == 1
+	})
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+	upstream := func(rec *httptest.ResponseRecorder) string {
+		return rec.Header().Get("X-Algod-Loadb-Mesh-Upstream")
+	}
+
+	if rec := get("/v2/status"); rec.Code != 200 || upstream(rec) != "b" {
+		t.Fatalf("ordinary request: %d upstream %q", rec.Code, upstream(rec))
+	}
+	for _, path := range []string{"/v2/accounts/ADDR?round=5", "/v2/accounts/ADDR/versions", "/v2/assets/42?round=5"} {
+		rec := get(path)
+		if rec.Code != 200 || upstream(rec) != "c" {
+			t.Fatalf("%s: %d upstream %q body %s", path, rec.Code, upstream(rec), rec.Body.String())
+		}
+	}
+	if n := b.Hits("/v2/accounts") + b.Hits("/v2/assets"); n != 0 {
+		t.Fatalf("plain node saw %d historical requests", n)
+	}
+
+	// A simulation pinned to a past round goes to the history node too.
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v2/transactions/simulate",
+		strings.NewReader(`{"txn-groups":[],"round":5}`)))
+	if rec.Code != 200 || upstream(rec) != "c" {
+		t.Fatalf("historical simulate: %d upstream %q", rec.Code, upstream(rec))
+	}
+	// The access log shows the class with the round read from the body.
+	if cl := lg.lastClass(); !strings.Contains(cl, "round=5") {
+		t.Fatalf("simulate access log class %q lacks the round", cl)
+	}
+	if n := b.Hits("/v2/transactions/simulate"); n != 0 {
+		t.Fatalf("plain node saw %d historical simulations", n)
+	}
+
+	// The SDKs post simulate as msgpack; the round must be read all the same.
+	type simReq struct {
+		TxnGroups []any  `codec:"txn-groups"`
+		Round     uint64 `codec:"round"`
+	}
+	var buf bytes.Buffer
+	if err := codec.NewEncoder(&buf, &codec.MsgpackHandle{}).Encode(simReq{Round: 5}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v2/transactions/simulate", &buf))
+	if rec.Code != 200 || upstream(rec) != "c" {
+		t.Fatalf("msgpack historical simulate: %d upstream %q", rec.Code, upstream(rec))
+	}
+	if n := b.Hits("/v2/transactions/simulate"); n != 0 {
+		t.Fatalf("plain node saw %d historical simulations", n)
+	}
+}
+
+// Without a time-travel node in the fleet, a historical request is refused
+// rather than answered with the latest state by a plain node.
+func TestTimeTravelRefusedWithoutHistoryNode(t *testing.T) {
+	h := newHarnessWith(t, DirectoryOptions{}, algodhttp.Factory{})
+	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 20})
+	t.Cleanup(b.Close)
+	recB := h.peerRecord(addrA)
+	recB.Endpoints, recB.Token = []string{b.URL()}, b.Token()
+	h.d.SetRecords([]domain.NodeRecord{recB})
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	h.inject(addrA, signedHeartbeat(t, h.peerKey, "b", 1, 20, domain.Capabilities{}))
+	waitFor(t, 2*time.Second, func() bool {
+		cands, _ := h.d.Snapshot()
+		for _, u := range cands {
+			if u.ID == "b" && u.Health.Reachable() {
+				return true
+			}
+		}
+		return false
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/accounts/ADDR?round=5", nil))
+	if rec.Code != 503 {
+		t.Fatalf("historical request without history node: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := b.Hits("/v2/accounts"); n != 0 {
+		t.Fatalf("plain node saw %d historical requests", n)
 	}
 }
 

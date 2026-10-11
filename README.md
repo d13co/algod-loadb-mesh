@@ -12,7 +12,8 @@ Each host runs one agent next to its algod. The agent:
 
 - follows its own node with a single `wait-for-block-after` long-poll and
   reads the node's data directory for capabilities (archival window,
-  developer API, follow mode), verifying the archival window empirically;
+  developer API, follow mode, time travel), verifying the archival window
+  empirically;
 - gossips a signed heartbeat per round to the other agents over UDP (on the
   WireGuard networks), so nobody polls anybody else's node; with several
   mesh interfaces each pair of agents settles on the path with the lowest
@@ -39,6 +40,47 @@ Each host runs one agent next to its algod. The agent:
 - answers pending-transaction lookups from the node that accepted the txn,
   otherwise asks every node at once and returns the most informative answer
   (confirmed, then pool error, then still pending, then 404).
+
+## Time travel nodes
+
+A node built from the time-travel fork (`EnableTimeTravel`) keeps every
+ledger object's value at every round and serves state at any past round. The
+agent reads `EnableTimeTravel` from `config.json` and advertises it in its
+heartbeats; the router then keeps each round request away from the nodes that
+cannot answer it. A round request names one of two windows, because a plain
+node's block store and its account state reach back by different amounts:
+
+- a state endpoint with `?round=` (`/v2/accounts/...`, `/v2/assets/{id}`,
+  `/v2/applications/{id}`, `/v2/applications/{id}/box`, `/v2/ledger/supply`,
+  and the resource listings) and the object histories (`.../versions`) go
+  only to time-travel nodes: a plain node ignores the round and would answer
+  the latest state;
+- a block header (`/v2/blocks/{R}?header-only=true`) reaches a plain node
+  within its **block** window (`max_block_history_lookback`, or the ~1000
+  rounds a non-archival node keeps) and a time-travel node at any round;
+- a box listing (`/v2/applications/{id}/boxes?round=`, which stock algod also
+  takes) and a simulation pinned with `"round"` in its body (JSON or msgpack)
+  reach a plain node within its **account-state** lookback
+  (`MaxAcctLookback`, a handful of rounds) and a time-travel node at any
+  round;
+- a state delta (`/v2/deltas/{R}`) reaches a plain node within its
+  account-state lookback less its oldest round (`R + MaxAcctLookback >
+  last_round`: the ledger answers state at that round but keeps no delta for
+  it) and a time-travel node within its block window
+  (the round is re-evaluated only while its block is stored); full blocks,
+  block hashes and state proofs use the block window on both.
+
+The state window is checked exactly (`R + MaxAcctLookback >= last_round`); a
+node that does not advertise the lookback falls back to its block window. At
+the window's edge a peer yields to a time-travel node, because a heartbeat's
+round can trail the node by one: a fleet with no time-travel node still
+serves the round from that peer.
+
+The capability rides the heartbeats, so a mixed fleet routes as soon as the
+agents hear each other. `local.overrides.time_travel`,
+`tiers.external.capabilities.time_travel` and a static record's `declared`
+can pin the capability where it cannot be detected (an external RPC, or a
+node whose data directory the agent does not read).
 
 ## Build and test
 

@@ -26,7 +26,8 @@ var defaults = configFile{
 	EnableDeveloperAPI:      false,
 	EnableFollowMode:        false,
 	EnableExperimentalAPI:   false,
-	MaxAcctLookback:         8,
+	EnableTimeTravel:        false,
+	MaxAcctLookback:         4,
 	StorageEngine:           "sqlite",
 	RestWriteTimeoutSeconds: 120,
 	EndpointAddress:         "127.0.0.1:0",
@@ -38,6 +39,7 @@ type configFile struct {
 	EnableDeveloperAPI      bool   `json:"EnableDeveloperAPI"`
 	EnableFollowMode        bool   `json:"EnableFollowMode"`
 	EnableExperimentalAPI   bool   `json:"EnableExperimentalAPI"`
+	EnableTimeTravel        bool   `json:"EnableTimeTravel"`
 	MaxAcctLookback         uint64 `json:"MaxAcctLookback"`
 	StorageEngine           string `json:"StorageEngine"`
 	RestWriteTimeoutSeconds int    `json:"RestWriteTimeoutSeconds"`
@@ -90,6 +92,7 @@ func (r Reader) Read() (ports.NodeConfig, error) {
 	nc.EnableDeveloperAPI = cf.EnableDeveloperAPI
 	nc.EnableFollowMode = cf.EnableFollowMode
 	nc.EnableExperimentalAPI = cf.EnableExperimentalAPI
+	nc.EnableTimeTravel = cf.EnableTimeTravel
 	nc.MaxAcctLookback = cf.MaxAcctLookback
 	nc.StorageEngine = cf.StorageEngine
 	nc.RestWriteTimeoutSeconds = cf.RestWriteTimeoutSeconds

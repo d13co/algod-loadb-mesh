@@ -28,6 +28,7 @@ type Options struct {
 	OldestRound  uint64 // fixed; use SetOldest to move it
 	DeveloperAPI bool
 	FollowMode   bool
+	TimeTravel   bool
 	Version      string
 }
 
@@ -392,11 +393,13 @@ type ConfigReader struct {
 	Lookback     uint64
 	DeveloperAPI bool
 	FollowMode   bool
+	TimeTravel   bool
 }
 
 // Read implements ports.NodeConfigReader.
 func (c ConfigReader) Read() (ports.NodeConfig, error) {
+	tt := c.TimeTravel || c.Node.opts.TimeTravel
 	return ports.NodeConfig{Endpoint: c.Node.URL(), NetAddr: strings.TrimPrefix(c.Node.URL(), "http://"), Token: c.Node.Token(), GenesisID: c.Node.opts.GenesisID,
 		Archival: c.Archival, MaxBlockHistoryLookback: c.Lookback, EnableDeveloperAPI: c.DeveloperAPI,
-		EnableFollowMode: c.FollowMode, MaxAcctLookback: 8, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
+		EnableFollowMode: c.FollowMode, EnableTimeTravel: tt, MaxAcctLookback: 4, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
 }

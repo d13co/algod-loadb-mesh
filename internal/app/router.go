@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/algorand/go-codec/codec"
+
 	"github.com/d13co/algod-loadb-mesh/internal/domain"
 	"github.com/d13co/algod-loadb-mesh/internal/ports"
 )
@@ -147,10 +149,55 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.inflight.Add(1)
 	defer r.inflight.Add(-1)
 	start := r.clock.Now()
-	class := domain.Classify(req.Method, req.URL.Path)
+	class := domain.Classify(req.Method, req.URL.Path, req.URL.RawQuery)
 	sw := &statusWriter{ResponseWriter: w}
-	defer r.logRequest(sw, req, class, start)
+	// A closure, so the log sees the class as refineSimulate leaves it.
+	defer func() { r.logRequest(sw, req, class, start) }()
+	if class.Simulate && !r.refineSimulate(req, &class) {
+		writeMessage(sw, http.StatusBadRequest, "algod-loadb-mesh: cannot read request body")
+		return
+	}
 	r.serve(sw, req, class)
+}
+
+// refineSimulate reads a simulate request body, whose "round" field asks for
+// the state at a past round, and marks the class so the request reaches a node
+// that can serve that round: a plain node within its account-state lookback,
+// or a time-travel node anywhere. The body is restored for forwarding, sized
+// like replayable so that a retry can send it again. It reports false only
+// when the body could not be read, which the caller answers with a 400.
+func (r *Router) refineSimulate(req *http.Request, class *domain.RequestClass) bool {
+	if req.Body == nil {
+		return true
+	}
+	prefix, err := io.ReadAll(io.LimitReader(req.Body, maxReplayBody+1))
+	if err != nil {
+		return false
+	}
+	if len(prefix) > maxReplayBody {
+		// Too large to hold, so the round is not inspected. algod caps a
+		// simulate request at 1 MB anyway, so this body is already invalid.
+		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), req.Body))
+		return true
+	}
+	req.Body = io.NopCloser(bytes.NewReader(prefix))
+	req.ContentLength = int64(len(prefix))
+	var body struct {
+		Round *uint64 `codec:"round" json:"round"`
+	}
+	// algod accepts msgpack or JSON; the SDKs post msgpack and set no
+	// Content-Type, so try msgpack first exactly as the node does.
+	if codec.NewDecoderBytes(prefix, &codec.MsgpackHandle{}).Decode(&body) != nil {
+		if json.Unmarshal(prefix, &body) != nil {
+			return true
+		}
+	}
+	if body.Round != nil {
+		class.Round = body.Round
+		class.RoundWindow = domain.WindowState
+		class.HistoryAnyRound = true
+	}
+	return true
 }
 
 // logRequest writes the access log line: INFO, except health probes at DEBUG.
@@ -303,15 +350,29 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	r.metric.Inc("loadb_requests_unroutable", "class", class.StatKey())
 	summary := make([]string, 0, len(cands))
 	for _, u := range cands {
-		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v breaker=%v draining=%v)", u.ID, u.Health,
-			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Stats.BreakerOpen, u.Draining))
+		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v tt=%v breaker=%v draining=%v)", u.ID, u.Health,
+			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Caps.TimeTravel, u.Stats.BreakerOpen, u.Draining))
 	}
 	r.log.Warn("no eligible upstream", "class", class.String(), "best", best, "candidates", strings.Join(summary, " "))
 	if class.LocalOnly && r.opts.Balancer {
 		writeMessage(w, 503, "algod-loadb-mesh: this agent is a balancer with no local node, and this request is only answered by one")
 		return
 	}
+	if class.TimeTravel && !anyTimeTravel(cands) {
+		writeMessage(w, 503, "algod-loadb-mesh: this request needs a time-travel node and the fleet has none")
+		return
+	}
 	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
+}
+
+// anyTimeTravel reports whether any candidate advertises the history.
+func anyTimeTravel(us []domain.Upstream) bool {
+	for _, u := range us {
+		if u.Caps.TimeTravel {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
@@ -627,7 +688,7 @@ func (r *Router) fetchStatus(f *statusFetch) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
 	defer cancel()
 	want := f.want
-	class := domain.Classify(http.MethodGet, "/v2/status")
+	class := domain.Classify(http.MethodGet, "/v2/status", "")
 	cands, best := r.dir.Snapshot()
 	at := cands[:0:0]
 	for _, u := range cands {

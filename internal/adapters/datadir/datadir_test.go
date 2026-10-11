@@ -23,15 +23,15 @@ func TestReadDataDir(t *testing.T) {
 	if nc.Endpoint != "http://127.0.0.1:8080" || nc.Token != "abc" || nc.GenesisID != "mainnet-v1.0" {
 		t.Fatalf("%+v", nc)
 	}
-	if nc.Archival || nc.MaxBlockHistoryLookback != 0 || nc.MaxAcctLookback != 8 || nc.RestWriteTimeoutSeconds != 120 {
+	if nc.Archival || nc.MaxBlockHistoryLookback != 0 || nc.MaxAcctLookback != 4 || nc.RestWriteTimeoutSeconds != 120 {
 		t.Fatalf("defaults: %+v", nc)
 	}
-	write("config.json", `{"Version": 34, "MaxBlockHistoryLookback": 3500000, "EnableDeveloperAPI": true, "EnableFollowMode": false, "UnknownKey": 1}`)
+	write("config.json", `{"Version": 34, "MaxBlockHistoryLookback": 3500000, "EnableDeveloperAPI": true, "EnableFollowMode": false, "EnableTimeTravel": true, "UnknownKey": 1}`)
 	nc, err = Reader{Dir: dir}.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nc.MaxBlockHistoryLookback != 3500000 || !nc.EnableDeveloperAPI || nc.ModTime.IsZero() {
+	if nc.MaxBlockHistoryLookback != 3500000 || !nc.EnableDeveloperAPI || !nc.EnableTimeTravel || nc.ModTime.IsZero() {
 		t.Fatalf("%+v", nc)
 	}
 	if _, err := (Reader{Dir: filepath.Join(dir, "missing")}).Read(); err == nil {

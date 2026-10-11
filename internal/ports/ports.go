@@ -56,6 +56,7 @@ type NodeConfig struct {
 	EnableDeveloperAPI      bool
 	EnableFollowMode        bool
 	EnableExperimentalAPI   bool
+	EnableTimeTravel        bool
 	MaxAcctLookback         uint64
 	StorageEngine           string
 	RestWriteTimeoutSeconds int
