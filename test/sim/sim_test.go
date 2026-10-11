@@ -168,8 +168,8 @@ func TestFallbackServesLocallyAndRoutesByCapability(t *testing.T) {
 	if r := get(t, devn+"/v2/transactions/pending"); r.node != "devn" {
 		t.Fatalf("pool dump must be local, got %s", r.node)
 	}
-	// A block nobody has is unroutable.
-	if r := get(t, plain+"/v2/blocks/999999"); r.code != 503 {
+	// A block nobody has yet gets algod's answer.
+	if r := get(t, plain+"/v2/blocks/999999"); r.code != 404 || !strings.Contains(string(r.body), "failed to retrieve information from the ledger") {
 		t.Fatalf("future block: %d %s", r.code, r.body)
 	}
 }

@@ -582,6 +582,29 @@ func TestHealthChecksExternalsWhenMeshCannotServe(t *testing.T) {
 	}
 }
 
+// A round past every reachable node gets algod's answer, but not when
+// nothing is reachable: an external that was ahead and has since failed its
+// check leaves the outage a 503, not a 404 for every round it had passed.
+func TestFutureRoundAnswersAsAlgodOnlyWhileSomethingIsReachable(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 500}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true,
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext", HealthCheck: 5 * time.Second}}}, clients)
+	r := NewRouter(RouterOptions{Mode: domain.ModeFallback, Balancer: true},
+		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
+	wh := &waitHarness{harness: h, r: r}
+
+	if rec := wh.get("/v2/stateproofs/501"); rec.Code != 500 || !strings.Contains(rec.Body.String(), "greater than the latest round") {
+		t.Fatalf("future round: %d %s", rec.Code, rec.Body.String())
+	}
+	clients.mu.Lock()
+	clients.fail = true
+	clients.mu.Unlock()
+	h.fc.Advance(6 * time.Second)
+	if rec := wh.get("/v2/blocks/90000"); rec.Code != 503 {
+		t.Fatalf("nothing reachable: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // The external check a selection failure triggers is inside the request's
 // bound: an external that hangs on its check costs the client the request
 // timeout, not the check's own.

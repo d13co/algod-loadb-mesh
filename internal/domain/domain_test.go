@@ -13,16 +13,27 @@ import (
 func u64(v uint64) *uint64 { return &v }
 
 func TestClassify(t *testing.T) {
+	notFound := Reply{404, "failed to retrieve information from the ledger"}
+	tooHigh := Reply{500, "given round is greater than the latest round"}
 	cases := []struct {
 		method, path string
 		want         RequestClass
 	}{
 		{"GET", "/v2/status", RequestClass{Idempotent: true}},
-		{"GET", "/v2/blocks/123", RequestClass{Round: u64(123), Idempotent: true}},
-		{"GET", "/v2/blocks/123/hash", RequestClass{Round: u64(123), Idempotent: true}},
-		{"GET", "/v2/deltas/55", RequestClass{Round: u64(55), Idempotent: true}},
+		{"GET", "/v2/blocks/123", RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{"GET", "/v2/blocks/123/hash", RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{"GET", "/v2/blocks/123/lightheader/proof", RequestClass{Round: u64(123), Ahead: tooHigh, Idempotent: true}},
+		{"GET", "/v2/blocks/123/transactions/TXID/proof", RequestClass{Round: u64(123),
+			Ahead: Reply{500, "failed to retrieve information from the ledger"}, Idempotent: true}},
+		{"GET", "/v2/deltas/55", RequestClass{Round: u64(55), Ahead: notFound, Idempotent: true}},
+		{"GET", "/v2/blocks/123/txids", RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
+		{"GET", "/v2/blocks/123/lightheader", RequestClass{Round: u64(123), Idempotent: true}},
+		{"GET", "/v2/blocks/123/transactions/TXID", RequestClass{Round: u64(123), Idempotent: true}},
+		{"HEAD", "/v2/blocks/123", RequestClass{Round: u64(123), Idempotent: true}},
+		{"POST", "/v2/stateproofs/9", RequestClass{Round: u64(9)}},
+		{"GET", "/v2/deltas/55/txn/group", RequestClass{Round: u64(55), Idempotent: true}},
 		{"GET", "/v2/deltas/txn/group/abc", RequestClass{Idempotent: true}},
-		{"GET", "/v2/stateproofs/9", RequestClass{Round: u64(9), Idempotent: true}},
+		{"GET", "/v2/stateproofs/9", RequestClass{Round: u64(9), Ahead: tooHigh, Idempotent: true}},
 		{"GET", "/v2/status/wait-for-block-after/70", RequestClass{WaitAfter: u64(70), Idempotent: true}},
 		{"POST", "/v2/teal/compile", RequestClass{NeedsDev: true, Idempotent: true}},
 		{"POST", "/v2/transactions", RequestClass{Broadcast: true}},
