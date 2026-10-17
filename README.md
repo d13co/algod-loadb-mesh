@@ -8,7 +8,7 @@ the fleet has migrated.
 
 ## v2 in short
 
-Each host runs one agent next to its algod. The agent:
+Each host runs one agent next to each of its algods ([several algods on one host](#several-algods-on-one-host)). The agent:
 
 - follows its own node with a single `wait-for-block-after` long-poll and
   reads the node's data directory for capabilities (archival window,
@@ -154,6 +154,8 @@ kept) and restart:
     sudo algod-loadb-mesh-setup --no-start    # add --user USER if you set one before
     sudo systemctl restart algod-loadb-mesh
 
+A host with [several agents](#several-algods-on-one-host) also needs `sudo algod-loadb-mesh-setup --instance NAME --no-start` (any one of its names: they share the template unit) and `sudo systemctl restart 'algod-loadb-mesh@*'`.
+
 ## Run on a node
 
 1. Create the sync account once per fleet and fund it with a few ALGO:
@@ -232,6 +234,25 @@ build that knows roles before they send heartbeats to balancers.
 With a static registry, list the balancer on the nodes as
 `{id: lb1, role: balancer, network: mainnet-v1.0, agent: {addrs: [10.112.0.9:4001, 10.114.0.9:4001]}}`.
 `algod-loadb-mesh dev -balancers 1` adds one to the fake fleet.
+
+## Several algods on one host
+
+One agent serves one algod, so a host with several algods (mainnet and testnet, or an archival and a time-travel node of one network) runs one agent for each. The first is set up as usual; each further one is a named instance:
+
+    sudo algod-loadb-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -   # paste testnet's bundle
+
+| | first agent | instance `NAME` |
+|---|---|---|
+| config | `/etc/algod-loadb-mesh/config.yaml` | `/etc/algod-loadb-mesh/NAME.yaml` |
+| service | `algod-loadb-mesh` | `algod-loadb-mesh@NAME` |
+| `local.id` | hostname | `HOSTNAME-NAME` |
+| registry cache | `/var/lib/algod-loadb-mesh/registry.cache` | `/var/lib/algod-loadb-mesh/NAME.registry.cache` |
+
+Setup gives each agent the first client and gossip ports no other agent in `/etc/algod-loadb-mesh` binds: 4000/4001, then 4002/4003, and so on (`--client-port` and `--mesh-port` choose them). It leaves out of detection the data dirs other agents already serve, and refuses a config that shares a data dir, a port, a node id or a registry cache with one of them. A `--force` re-run keeps the agent's ports while they are free. Run without `--instance` and with a `--data-dir` other than the one `config.yaml` serves, it stops and suggests a name instead of replacing that config (without `--data-dir`, it keeps `config.yaml` as always). All agents on a host run as one user, so a different `--user` is refused while other agents exist. Every `*.yaml` in `/etc/algod-loadb-mesh` counts as an agent's config: setup stops on one that does not load.
+
+Each agent belongs to the fleet of its own network, so it takes that fleet's bundle; two agents of one network join the same fleet with the same bundle. The other commands take the instance's config, for example `algod-loadb-mesh registry bundle -config /etc/algod-loadb-mesh/testnet.yaml` and `systemctl status algod-loadb-mesh@testnet`. Package upgrades restart every running agent.
+
+Configs written by hand need the same care: a distinct `local.id` (the hostname default collides), `listen` and `mesh.listen` ports, and `registry.cache` path for each.
 
 ## Several mesh interfaces
 

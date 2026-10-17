@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Writes an algod-loadb-mesh config for this host from what it can detect:
-#   local.id             hostname, without a trailing .local
+#   local.id             hostname, without a trailing .local (plus -NAME for
+#                        --instance NAME)
 #   local.data_dir       the algod data dir (running algod -d, $ALGORAND_DATA,
 #                        common locations); asks when there are several
 #   addresses            every 10.112.* and 10.114.* interface, else a public
@@ -27,8 +28,14 @@ usage: $0 [options] [BUNDLE]
 
   -o FILE               write the config to FILE (mode 0600) instead of stdout
   -f                    overwrite FILE if it exists
-  --id ID               node id (default: hostname without .local)
+  --id ID               node id (default: hostname without .local, plus -NAME
+                        with --instance)
+  --instance NAME       configure one of several agents on this host, one per
+                        algod: the id gets -NAME and the registry cache is
+                        NAME.registry.cache (NAME: lowercase letters, digits, -)
   --data-dir DIR        algod data dir (default: detected)
+  --skip-data-dir DIR   leave DIR out of detection (one another agent serves);
+                        repeatable
   --address IP[,IP]     addresses other agents reach this host on, preferred
                         first; repeatable (default: every 10.112.*/10.114.*
                         address, else a public one)
@@ -49,16 +56,18 @@ usage: $0 [options] [BUNDLE]
 EOF
 }
 
-out="" force=0 id="" data_dir="" address="" app_id="" sync_address="" tier=1
+out="" force=0 id="" instance="" data_dir="" address="" app_id="" sync_address="" tier=1
 sync_key_file="" sync_key="" bundle="" client_token_file=""
-listen="" client_port=4000 mesh_port=4001 nodely=""
+listen="" client_port=4000 mesh_port=4001 nodely="" skip_dirs=()
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-o) out=$2; shift ;;
 	-f) force=1 ;;
 	--id) id=$2; shift ;;
+	--instance) instance=$2; shift ;;
 	--data-dir) data_dir=$2; shift ;;
+	--skip-data-dir) skip_dirs+=("$2"); shift ;;
 	--address) address="${address:+$address,}$2"; shift ;;
 	--app-id) app_id=$2; shift ;;
 	--sync-key-file) sync_key_file=$2; shift ;;
@@ -81,6 +90,8 @@ warn() { echo "autoconfig: $*" >&2; }
 die() { warn "$*"; exit 1; }
 
 [ -z "$out" ] || [ "$force" = 1 ] || [ ! -e "$out" ] || die "$out exists (use -f to overwrite)"
+[ -z "$instance" ] || [[ "$instance" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
+	die "--instance \"$instance\": want lowercase letters, digits and -"
 
 # --- registry bundle --------------------------------------------------------
 
@@ -120,6 +131,7 @@ fi
 if [ -z "$id" ]; then
 	id=$(hostname)
 	id=${id%.local}
+	[ -z "$id" ] || [ -z "$instance" ] || id=$id-$instance
 fi
 [ -n "$id" ] || die "no hostname; pass --id"
 [ "${#id}" -le 48 ] || die "id \"$id\" is longer than 48 bytes; pass --id"
@@ -130,6 +142,11 @@ is_data_dir() { [ -f "$1/genesis.json" ]; }
 
 detect_data_dirs() {
 	local pid args dir
+	# Test hook: the candidates, one per line, instead of looking around.
+	if [ -n "${AUTOCONFIG_DATA_DIRS+set}" ]; then
+		printf '%s\n' "$AUTOCONFIG_DATA_DIRS"
+		return
+	fi
 	# Running nodes: `algod -d DIR`. Paths inside containers usually do not
 	# exist on the host and are skipped by the check below.
 	for pid in $(pgrep -x algod 2>/dev/null || true); do
@@ -146,16 +163,25 @@ detect_data_dirs() {
 }
 
 if [ -z "$data_dir" ]; then
+	# Data dirs other agents on this host already serve.
+	skip=" "
+	for dir in ${skip_dirs[@]+"${skip_dirs[@]}"}; do
+		skip+="$(realpath -m "$dir") "
+	done
 	candidates=()
 	while IFS= read -r dir; do
-		is_data_dir "$dir" || continue
+		[ -n "$dir" ] && is_data_dir "$dir" || continue
 		dir=$(realpath "$dir")
+		case "$skip" in *" $dir "*) continue ;; esac
 		case " ${candidates[*]-} " in *" $dir "*) continue ;; esac
 		candidates+=("$dir")
 	done < <(detect_data_dirs)
 
 	case ${#candidates[@]} in
-	0) die "no algod data dir found (looked for genesis.json); pass --data-dir" ;;
+	0)
+		[ "$skip" = " " ] || die "no algod data dir found that another agent does not already serve ($skip); pass --data-dir"
+		die "no algod data dir found (looked for genesis.json); pass --data-dir"
+		;;
 	1) data_dir=${candidates[0]} ;;
 	*)
 		if ! { : </dev/tty; } 2>/dev/null; then
@@ -185,10 +211,24 @@ if [ -z "$algod_listen" ] && [ -f "$data_dir/config.json" ]; then
 	algod_listen=$(sed -n 's/.*"EndpointAddress"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$data_dir/config.json" | head -n1)
 fi
 [ -n "$algod_listen" ] || algod_listen=127.0.0.1:8080
-algod_host=${algod_listen%:*}
+# algod.net may hold a URL instead (a node behind a proxy or TLS): the agent
+# reaches algod there, so peers are told exactly that and nothing is passed
+# through.
+algod_url=""
+case "$algod_listen" in
+http://* | https://*) algod_url=${algod_listen%/} ;;
+esac
+algod_host=${algod_listen#*://}
+algod_host=${algod_host%%/*}
+algod_host=${algod_host%:*}
 algod_host=${algod_host#[}
 algod_host=${algod_host%]}
-algod_port=${algod_listen##*:}
+algod_port=${algod_listen#*://}
+algod_port=${algod_port%%/*}
+case "$algod_port" in
+*:*) algod_port=${algod_port##*:} ;;
+*) algod_port="" ;;
+esac
 [ -n "$algod_port" ] || algod_port=8080
 
 # --- addresses --------------------------------------------------------------
@@ -283,6 +323,14 @@ fi
 mesh_hosts=()
 [ "$mesh_bind" = 1 ] && mesh_hosts=("${mesh_addrs[@]}")
 endpoint_hosts=() passthrough_hosts=()
+if [ -n "$algod_url" ]; then
+	# A URL: advertised as is, by endpoint_list.
+	case "$algod_host" in
+	"" | 0.0.0.0 | :: | 127.* | ::1 | localhost)
+		warn "algod.net says $algod_url, which other agents cannot reach; set local.advertise_endpoints to an address they can"
+		;;
+	esac
+else
 case "$algod_host" in
 "" | 0.0.0.0 | :: | "*")
 	endpoint_hosts=("${mesh_hosts[@]}")
@@ -314,6 +362,7 @@ case "$algod_host" in
 	fi
 	;;
 esac
+fi
 
 client_token_file=${client_token_file:-$data_dir/algod.token}
 
@@ -371,6 +420,15 @@ passthrough_yaml() {
 	echo "$1"
 }
 
+# endpoint_list prints local.advertise_endpoints' entries.
+endpoint_list() {
+	if [ -n "$algod_url" ]; then
+		echo "    - $algod_url"
+		return
+	fi
+	for h in "${endpoint_hosts[@]}"; do echo "    - http://$(hostport "$h" "$algod_port")"; done
+}
+
 mesh_advertise=() mesh_listen=()
 for a in "${mesh_addrs[@]}"; do
 	mesh_advertise+=("$(hostport "$a" "$mesh_port")")
@@ -395,7 +453,7 @@ local:
   id: $id
   data_dir: $data_dir
   advertise_endpoints:
-$(for h in "${endpoint_hosts[@]}"; do echo "    - http://$(hostport "$h" "$algod_port")"; done)
+$(endpoint_list)
 $(passthrough_yaml "  tier: $tier")
 
 registry:
@@ -409,7 +467,7 @@ EOF
 	fi
 	[ -z "$sync_address" ] || echo "  sync_address: $sync_address"
 	cat <<EOF
-  cache: /var/lib/algod-loadb-mesh/registry.cache
+  cache: /var/lib/algod-loadb-mesh/${instance:+$instance.}registry.cache
 
 mesh:
 $(addr_list_yaml listen "  " "${mesh_listen[@]}")

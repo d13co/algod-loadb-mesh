@@ -262,6 +262,88 @@ func TestAutoconfigListenFlag(t *testing.T) {
 	}
 }
 
+// fakeHostname puts a `hostname` earlier in PATH that prints name.
+func fakeHostname(t *testing.T, dir, name string) []string {
+	t.Helper()
+	bin := filepath.Join(dir, "hostbin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "hostname"), []byte("#!/bin/sh\necho "+name+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
+}
+
+// A named instance gets its own id and registry cache, so two agents on one
+// host do not collide.
+func TestAutoconfigInstance(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := fakeDataDir(t, dir, "data", "{}", "0.0.0.0:8080")
+	env := fakeHostname(t, dir, "k44.local")
+	c := autoconfigExec(t, dir, "", env, "--no-nodely", "--address", "10.112.0.44", "--listen", "10.112.0.44", "--data-dir", dataDir,
+		"--instance", "testnet", "--client-port", "4002", "--mesh-port", "4003", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if c.Local.ID != "k44-testnet" {
+		t.Errorf("id = %q", c.Local.ID)
+	}
+	if c.Registry.Cache != "/var/lib/algod-loadb-mesh/testnet.registry.cache" {
+		t.Errorf("cache = %q", c.Registry.Cache)
+	}
+	if c.Listen.String() != "10.112.0.44:4002" || c.Mesh.Listen.String() != "10.112.0.44:4003" {
+		t.Errorf("listen %q, mesh.listen %q", c.Listen, c.Mesh.Listen)
+	}
+	// --id still wins.
+	c = autoconfigRun(t, t.TempDir(), "{}", "0.0.0.0:8080", "", nil, "--no-nodely", "--address", "10.112.0.44",
+		"--instance", "testnet", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if c.Local.ID != "k44" || c.Registry.Cache != "/var/lib/algod-loadb-mesh/testnet.registry.cache" {
+		t.Errorf("--id with --instance: id %q, cache %q", c.Local.ID, c.Registry.Cache)
+	}
+}
+
+func TestAutoconfigInstanceName(t *testing.T) {
+	for _, name := range []string{"Testnet", "-x", "a_b", "a/b"} {
+		dir := t.TempDir()
+		dataDir := fakeDataDir(t, dir, "data", "{}", "0.0.0.0:8080")
+		cmd := autoconfigCmd(t, dir, "", nil, "--no-nodely", "--address", "10.112.0.44", "--data-dir", dataDir, "--instance", name, "--app-id", "7")
+		if b, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(b), "--instance") {
+			t.Errorf("--instance %q: err %v\n%s", name, err, b)
+		}
+	}
+}
+
+// Detection leaves out the data dirs other agents serve; one left is picked
+// without asking.
+func TestAutoconfigSkipDataDir(t *testing.T) {
+	dir := t.TempDir()
+	a := fakeDataDir(t, dir, "a", "{}", "0.0.0.0:8080")
+	b := fakeDataDir(t, dir, "b", "{}", "0.0.0.0:8090")
+	env := []string{"AUTOCONFIG_DATA_DIRS=" + a + "\n" + b}
+	args := []string{"--no-nodely", "--id", "k44", "--address", "10.112.0.44", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir)}
+	c := autoconfigExec(t, dir, "", env, append(args, "--skip-data-dir", a+"/")...)
+	if c.Local.DataDir != b || c.Local.AdvertiseEndpoints[0] != "http://10.112.0.44:8090" {
+		t.Errorf("data dir %q, endpoints %v", c.Local.DataDir, c.Local.AdvertiseEndpoints)
+	}
+	cmd := autoconfigCmd(t, dir, "", env, append(args, "--skip-data-dir", a, "--skip-data-dir", b)...)
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "already serve") {
+		t.Errorf("every dir skipped: err %v\n%s", err, out)
+	}
+}
+
+// algod.net holding a URL is advertised as is, never passed through.
+func TestAutoconfigAlgodURL(t *testing.T) {
+	dir := t.TempDir()
+	env := fakeIP(t, dir,
+		"2: wg0    inet 10.112.0.44/16 brd 10.112.255.255 scope global wg0",
+		"3: wg1    inet 10.114.0.44/16 brd 10.114.255.255 scope global wg1")
+	c := autoconfigRun(t, dir, "{}", "https://fnet-api.d13.co:443", "", env, "--no-nodely", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if got := strings.Join(c.Local.AdvertiseEndpoints, ", "); got != "https://fnet-api.d13.co:443" {
+		t.Errorf("endpoints = %q", got)
+	}
+	if len(c.Local.Passthrough) != 0 {
+		t.Errorf("passthrough = %v", c.Local.Passthrough)
+	}
+}
+
 func writeSyncKey(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "sync.key")
@@ -296,28 +378,37 @@ func autoconfigEnv(t *testing.T, dir, stdin string, env []string, args ...string
 // data dir whose algod.net says algodNet.
 func autoconfigRun(t *testing.T, dir, genesis, algodNet, stdin string, env []string, args ...string) config.Config {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("no bash")
-	}
-	dataDir := filepath.Join(dir, "data")
+	dataDir := fakeDataDir(t, dir, "data", genesis, algodNet)
+	return autoconfigExec(t, dir, stdin, env, append([]string{"--id", "k44", "--data-dir", dataDir}, args...)...)
+}
+
+// fakeDataDir makes an algod data dir named name under dir, with the
+// genesis.json and algod.net given, and the client token autoconfigExec
+// passes.
+func fakeDataDir(t *testing.T, dir, name, genesis, algodNet string) string {
+	t.Helper()
+	dataDir := filepath.Join(dir, name)
 	if err := os.Mkdir(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"data/genesis.json": genesis,
-		"data/algod.net":    algodNet,
-		"client.token":      "t",
+		filepath.Join(dataDir, "genesis.json"): genesis,
+		filepath.Join(dataDir, "algod.net"):    algodNet,
+		filepath.Join(dir, "client.token"):     "t",
 	} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	return dataDir
+}
+
+// autoconfigExec runs autoconfig.sh with the arguments given (plus the output
+// file and client token) and loads the config it writes.
+func autoconfigExec(t *testing.T, dir, stdin string, env []string, args ...string) config.Config {
+	t.Helper()
 	out := filepath.Join(dir, "config.yaml")
-	cmd := exec.Command("bash", append([]string{"autoconfig.sh", "-o", out, "--id", "k44", "--data-dir", dataDir,
-		"--client-token-file", filepath.Join(dir, "client.token")}, args...)...)
-	cmd.Stdin = strings.NewReader(stdin)
-	cmd.Env = append(os.Environ(), env...)
-	if b, err := cmd.CombinedOutput(); err != nil {
+	if b, err := autoconfigCmd(t, dir, stdin, env, append([]string{"-o", out}, args...)...).CombinedOutput(); err != nil {
 		t.Fatalf("autoconfig.sh: %v\n%s", err, b)
 	}
 	c, err := config.Load(out)
@@ -325,4 +416,15 @@ func autoconfigRun(t *testing.T, dir, genesis, algodNet, stdin string, env []str
 		t.Fatal(err)
 	}
 	return c
+}
+
+func autoconfigCmd(t *testing.T, dir, stdin string, env []string, args ...string) *exec.Cmd {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	cmd := exec.Command("bash", append([]string{"autoconfig.sh", "--client-token-file", filepath.Join(dir, "client.token")}, args...)...)
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Env = append(os.Environ(), env...)
+	return cmd
 }
