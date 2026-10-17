@@ -96,12 +96,11 @@ and verifies as you, and uses sudo only to install:
 
     curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
 
-On Debian and Ubuntu, it adds the apt repository at `https://apt.d13.co` and
-installs the `algod-loadb-mesh` package. The package puts `algod-loadb-mesh`,
-`algod-loadb-mesh-autoconfig` and `algod-loadb-mesh-setup` in `/usr/bin` and
-configures nothing. Later upgrades come with `apt upgrade`, and they restart
-the agent if it is running. Before trusting the repository key, the installer
-checks that it is exactly this key (when gpg is installed):
+On Debian and Ubuntu, it adds the apt repository at `https://apt.d13.co` and installs the `algod-loadb-mesh` package. The package puts `algod-loadb-mesh`, `algod-loadb-mesh-autoconfig` and `algod-loadb-mesh-setup` in `/usr/bin`. It configures nothing but its own upgrades (below). Later upgrades come with `apt upgrade`, and they restart the agent if it is running.
+
+The package also installs `/etc/apt/apt.conf.d/51algod-loadb-mesh-upgrades`, which lets unattended-upgrades install new releases from apt.d13.co on its daily run (this package, and `dtalgorand` if installed). To upgrade by hand only, delete that file; upgrades keep it deleted. On hosts that also run `dtalgorand`, its own `51dtalgorand-upgrades` allows the same repository, so remove both.
+
+Before trusting the repository key, the installer checks that it is exactly this key (when gpg is installed):
 
     F66E 7713 3063 650C 159F  405A C4D2 171F B5B6 0471
 
