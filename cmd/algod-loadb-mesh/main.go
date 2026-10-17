@@ -172,8 +172,10 @@ func configCheckCmd(args []string) error {
 }
 
 // checkSummary is what `config check` prints after the ok line. setup.sh
-// takes the first client address off the "listen" line, so that line keeps
-// its shape: "listen <first>[, <rest>]...".
+// reads it to tell agents on one host apart, so the lines keep their shape:
+// "id <id>, ...", "... data dir <dir>", "listen <first>[, <rest>]...[,
+// advertising ...]", "passthrough ...", "gossip on ..., heartbeats to ..."
+// and "registry ..., cache <path>, ...".
 func checkSummary(c config.Config) string {
 	reg := c.Registry.Type
 	if reg == "algorand" {
@@ -182,6 +184,10 @@ func checkSummary(c config.Config) string {
 	tokens := "no tokens: open to anyone"
 	if c.ClientToken != "" || c.AdminToken != "" {
 		tokens = fmt.Sprintf("client token %s, admin token %s", have(c.ClientToken), have(c.AdminToken))
+	}
+	// setup.sh reads the cache off the registry line: ", cache <path>,".
+	if c.Registry.Cache != "" {
+		tokens = "cache " + c.Registry.Cache + ", " + tokens
 	}
 	if c.Balancer() {
 		return fmt.Sprintf("id %s, role balancer, mode %s, network %s\nlisten %s\ngossip on %s, heartbeats to %s\nregistry %s via %s, %s\n",
