@@ -31,6 +31,7 @@ var defaults = configFile{
 	StorageEngine:           "sqlite",
 	RestWriteTimeoutSeconds: 120,
 	EndpointAddress:         "127.0.0.1:0",
+	DisableAPIAuth:          false,
 }
 
 type configFile struct {
@@ -44,6 +45,7 @@ type configFile struct {
 	StorageEngine           string `json:"StorageEngine"`
 	RestWriteTimeoutSeconds int    `json:"RestWriteTimeoutSeconds"`
 	EndpointAddress         string `json:"EndpointAddress"`
+	DisableAPIAuth          bool   `json:"DisableAPIAuth"`
 }
 
 // Read implements ports.NodeConfigReader.
@@ -57,9 +59,6 @@ func (r Reader) Read() (ports.NodeConfig, error) {
 		return nc, fmt.Errorf("datadir: %w (is algod running?)", err)
 	}
 	nc.NetAddr, nc.Endpoint = netAddr, endpointURL(netAddr)
-	if nc.Token, err = readTrimmed(filepath.Join(r.Dir, "algod.token")); err != nil {
-		return nc, fmt.Errorf("datadir: %w", err)
-	}
 	gen, err := os.ReadFile(filepath.Join(r.Dir, "genesis.json"))
 	if err != nil {
 		return nc, fmt.Errorf("datadir: %w", err)
@@ -85,6 +84,10 @@ func (r Reader) Read() (ports.NodeConfig, error) {
 			return nc, fmt.Errorf("datadir: config.json: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return nc, fmt.Errorf("datadir: %w", err)
+	}
+	// algod with DisableAPIAuth writes no algod.token and ignores the header.
+	if nc.Token, err = readTrimmed(filepath.Join(r.Dir, "algod.token")); err != nil && !(cf.DisableAPIAuth && errors.Is(err, os.ErrNotExist)) {
 		return nc, fmt.Errorf("datadir: %w", err)
 	}
 	nc.Archival = cf.Archival

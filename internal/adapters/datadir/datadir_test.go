@@ -1,6 +1,7 @@
 package datadir
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,20 @@ func TestReadDataDir(t *testing.T) {
 	}
 	if nc.MaxBlockHistoryLookback != 3500000 || !nc.EnableDeveloperAPI || !nc.EnableTimeTravel || nc.ModTime.IsZero() {
 		t.Fatalf("%+v", nc)
+	}
+	write("config.json", `{"DisableAPIAuth": true}`)
+	if nc, err = (Reader{Dir: dir}).Read(); err != nil || nc.Token != "abc" {
+		t.Fatalf("DisableAPIAuth with algod.token: %+v, %v", nc, err)
+	}
+	if err := os.Remove(filepath.Join(dir, "algod.token")); err != nil {
+		t.Fatal(err)
+	}
+	if nc, err = (Reader{Dir: dir}).Read(); err != nil || nc.Token != "" {
+		t.Fatalf("DisableAPIAuth without algod.token: %+v, %v", nc, err)
+	}
+	write("config.json", `{}`)
+	if _, err := (Reader{Dir: dir}).Read(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing algod.token must fail while API auth is on: %v", err)
 	}
 	if _, err := (Reader{Dir: filepath.Join(dir, "missing")}).Read(); err == nil {
 		t.Fatal("missing dir must fail")
