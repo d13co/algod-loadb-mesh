@@ -201,6 +201,18 @@ func TestAutoconfigPassthrough(t *testing.T) {
 		{"10.114.0.44:8080", "http://10.114.0.44:8080, http://10.112.0.44:8080", "10.112.0.44:8080"},
 		{"10.9.9.9:8080", "http://10.9.9.9:8080, http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
 		{"10.112.0.44:8081", "http://10.112.0.44:8081, http://10.114.0.44:8081", "10.114.0.44:8081"},
+		// IPv6, and addresses without a port. algod.net always has one; these
+		// come from config.json's EndpointAddress, guessed as 8080.
+		{"[::]:8081", "http://10.112.0.44:8081, http://10.114.0.44:8081", ""},
+		{"::", "http://10.112.0.44:8080, http://10.114.0.44:8080", ""},
+		{"[::1]", "http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"::1", "http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"[fd00::1]:8081", "http://[fd00::1]:8081, http://10.112.0.44:8081, http://10.114.0.44:8081", "10.112.0.44:8081, 10.114.0.44:8081"},
+		{"[fd00::1]", "http://[fd00::1]:8080, http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"fd00::1", "http://[fd00::1]:8080, http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		{"127.0.0.1", "http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
+		// algod's default EndpointAddress: port 0 is a free port, 8080 first.
+		{"127.0.0.1:0", "http://10.112.0.44:8080, http://10.114.0.44:8080", "10.112.0.44:8080, 10.114.0.44:8080"},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
@@ -341,6 +353,36 @@ func TestAutoconfigAlgodURL(t *testing.T) {
 	}
 	if len(c.Local.Passthrough) != 0 {
 		t.Errorf("passthrough = %v", c.Local.Passthrough)
+	}
+}
+
+// IPv6 addresses are written so that YAML reads them as strings: unquoted,
+// [::1]:4000 is a flow sequence.
+func TestAutoconfigIPv6Addresses(t *testing.T) {
+	dir := t.TempDir()
+	c := autoconfigRun(t, dir, "{}", "[::]:8080", "", nil, "--no-nodely", "--address", "fd00::44", "--address", "10.112.0.44",
+		"--listen", "[::1]", "--listen", "10.112.0.44", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if got := c.Listen.String(); got != "[::1]:4000, 10.112.0.44:4000" {
+		t.Errorf("listen = %q", got)
+	}
+	if got := c.Mesh.Advertise.String(); got != "[fd00::44]:4001, 10.112.0.44:4001" {
+		t.Errorf("mesh.advertise = %q", got)
+	}
+	// [::1] is also a glob: a file named 1 beside the script must not match.
+	if err := os.WriteFile("1", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove("1")
+	c = autoconfigRun(t, t.TempDir(), "{}", "[::]:8080", "", nil, "--no-nodely", "--address", "10.112.0.44, 10.114.0.44,",
+		"--listen", "[::1],10.112.0.44", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if c.Listen.String() != "[::1]:4000, 10.112.0.44:4000" || c.Mesh.Advertise.String() != "10.112.0.44:4001, 10.114.0.44:4001" {
+		t.Errorf("listen %q, mesh.advertise %q", c.Listen, c.Mesh.Advertise)
+	}
+	// One address alone is written inline.
+	c = autoconfigRun(t, t.TempDir(), "{}", "[::]:8080", "", nil, "--no-nodely", "--address", "fd00::44", "--listen", "[::1]",
+		"--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
+	if c.Listen.String() != "[::1]:4000" || c.Mesh.Listen.String() != "[fd00::44]:4001" {
+		t.Errorf("listen %q, mesh.listen %q", c.Listen, c.Mesh.Listen)
 	}
 }
 

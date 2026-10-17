@@ -218,18 +218,21 @@ algod_url=""
 case "$algod_listen" in
 http://* | https://*) algod_url=${algod_listen%/} ;;
 esac
-algod_host=${algod_listen#*://}
-algod_host=${algod_host%%/*}
-algod_host=${algod_host%:*}
-algod_host=${algod_host#[}
-algod_host=${algod_host%]}
-algod_port=${algod_listen#*://}
-algod_port=${algod_port%%/*}
-case "$algod_port" in
-*:*) algod_port=${algod_port##*:} ;;
-*) algod_port="" ;;
+# Host and port, either of which may be missing: host:port, [v6]:port, [v6],
+# a bare IPv6 address (two colons or more), or a bare host.
+hp=${algod_listen#*://}
+hp=${hp%%/*}
+case "$hp" in
+\[*\]:*) algod_host=${hp%%]*} algod_port=${hp##*]:} ;;
+\[*\]) algod_host=${hp%]} algod_port="" ;;
+*:*:*) algod_host=$hp algod_port="" ;;
+*:*) algod_host=${hp%:*} algod_port=${hp##*:} ;;
+*) algod_host=$hp algod_port="" ;;
 esac
-[ -n "$algod_port" ] || algod_port=8080
+algod_host=${algod_host#[}
+# No port, or 0 (algod's default EndpointAddress 127.0.0.1:0 in
+# config.json, which algod binds as 8080 when it is free): 8080.
+[ -n "$algod_port" ] && [ "$algod_port" != 0 ] || algod_port=8080
 
 # --- addresses --------------------------------------------------------------
 
@@ -287,11 +290,20 @@ if [ -z "$address" ]; then
 	fi
 	[ -n "$address" ] || die "no 10.112.*, 10.114.* or public address on any interface; pass --address"
 fi
-# Addresses hold no spaces, so splitting the list on them is safe.
+# split_list LIST prints LIST's comma- or space-separated entries one per
+# line, without pathname expansion: [::1] is a glob too.
+split_list() {
+	local parts p
+	IFS=$', \t' read -r -a parts <<<"$1"
+	for p in ${parts[@]+"${parts[@]}"}; do
+		[ -z "$p" ] || printf '%s\n' "$p"
+	done
+}
+
 mesh_addrs=()
-for a in $(printf '%s' "$address" | tr ',' ' '); do
+while IFS= read -r a; do
 	mesh_addrs+=("$a")
-done
+done < <(split_list "$address")
 address=${mesh_addrs[0]}
 
 hostport() { case "$1" in *:*) echo "[$1]:$2" ;; *) echo "$1:$2" ;; esac; }
@@ -308,9 +320,9 @@ with_port() {
 }
 
 listen_addrs=()
-for a in $(printf '%s' "${listen:-$(detect_listen)}" | tr ',' ' '); do
+while IFS= read -r a; do
 	listen_addrs+=("$(with_port "$a" "$client_port")")
-done
+done < <(split_list "${listen:-$(detect_listen)}")
 if [ ${#listen_addrs[@]} = 0 ]; then
 	listen_addrs=("$(hostport 0.0.0.0 "$client_port")")
 	warn "no 10.112.* or 10.114.* address; serving clients on every interface (${listen_addrs[0]})"
@@ -396,15 +408,19 @@ fi
 # addr_list_yaml KEY INDENT ADDR... prints an address option: one address
 # inline, several as a list.
 addr_list_yaml() {
-	local key=$1 indent=$2
+	local key=$1 indent=$2 a
 	shift 2
 	if [ $# = 1 ]; then
-		echo "${indent}${key}: $1"
+		echo "${indent}${key}: $(yaml_addr "$1")"
 	else
 		echo "${indent}${key}:"
-		printf "${indent}  - %s\n" "$@"
+		for a in "$@"; do echo "${indent}  - $(yaml_addr "$a")"; done
 	fi
 }
+
+# yaml_addr quotes an address YAML would otherwise misread: [::1]:4000
+# unquoted is a flow sequence.
+yaml_addr() { case "$1" in \[*) echo "\"$1\"" ;; *) echo "$1" ;; esac; }
 
 # passthrough_yaml prints local.passthrough when algod does not cover every
 # mesh address itself, then the line given (a command substitution cannot
