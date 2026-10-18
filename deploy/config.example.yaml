@@ -44,7 +44,7 @@ registry:
   # algod_token: ""                     # its API token
   refresh: 5m                         # how often the registry is re-read; default 5m
   auto_register: true                 # write this node's record on start; default true (false for static)
-  cache: /var/lib/algod-loadb-mesh/registry.cache   # copy of the last read, used at start until the registry answers; default: none
+  cache: /var/lib/algod-loadb-mesh/registry.cache   # copy of the last read, used at start until the registry answers; one file per agent on the host; default: none
   # file: /var/lib/algod-loadb-mesh/registry.json   # type file: shared JSON file holding the records
   # static:                             # type static: the fleet, listed on every host (see `config example -static`)
   #   - id: k45
