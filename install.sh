@@ -109,6 +109,11 @@ Put the app id it prints into the config (registry.app_id), then start it:
 
     sudo systemctl enable --now algod-loadb-mesh
 
+One agent serves one algod. For another algod on this host (another
+network, or another role), add a named agent with that fleet's bundle:
+
+    sudo algod-loadb-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -
+
 algod-loadb-mesh-setup -h lists its options, including --config FILE to
 install a config you already have.
 EOF

@@ -38,4 +38,8 @@ func TestCheckSummaryListenLine(t *testing.T) {
 	if !strings.Contains(checkSummary(c), "\npassthrough none\n") {
 		t.Fatalf("no passthrough: %q", checkSummary(c))
 	}
+	c.Registry.Cache = "/var/lib/algod-loadb-mesh/testnet.registry.cache"
+	if !strings.Contains(checkSummary(c), "\nregistry static, cache /var/lib/algod-loadb-mesh/testnet.registry.cache, ") {
+		t.Fatalf("no cache: %q", checkSummary(c))
+	}
 }

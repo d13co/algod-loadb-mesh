@@ -72,7 +72,11 @@ Linux, amd64 or arm64. Run the installer as your normal user: it downloads and v
 curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
 ```
 
-On **Debian and Ubuntu** the installer adds the apt repository at `https://apt.d13.co` and installs the `algod-loadb-mesh` package, so later upgrades come with `apt upgrade` (and restart the agent if it is running). Before trusting the repository key, the installer checks that it is exactly this one (when gpg is installed):
+On **Debian and Ubuntu** the installer adds the apt repository at `https://apt.d13.co` and installs the `algod-loadb-mesh` package, so later upgrades come with `apt upgrade` (and restart the agent if it is running).
+
+The package also installs `/etc/apt/apt.conf.d/51algod-loadb-mesh-upgrades`, which lets unattended-upgrades install new releases from apt.d13.co on its daily run (this package, and `dtalgorand` if installed). To upgrade by hand only, delete that file; upgrades keep it deleted. On hosts that also run `dtalgorand`, its own `51dtalgorand-upgrades` allows the same repository, so remove both.
+
+Before trusting the repository key, the installer checks that it is exactly this one (when gpg is installed):
 
     F66E 7713 3063 650C 159F  405A C4D2 171F B5B6 0471
 
@@ -88,7 +92,7 @@ sudo apt update && sudo apt install algod-loadb-mesh
 
 On **other distributions**, or with `--no-apt`, the installer puts the release binary and scripts in `/usr/local/bin`. That install doesn't upgrade itself; run the installer again to upgrade.
 
-Either way you get three commands, and nothing is configured yet:
+Either way you get three commands, and no agent is configured yet:
 
 | command | what it does |
 |---|---|
@@ -110,6 +114,8 @@ sudo rm -r /usr/local/share/algod-loadb-mesh
 sudo algod-loadb-mesh-setup --no-start    # add --user USER if you set one before
 sudo systemctl restart algod-loadb-mesh
 ```
+
+A host with [several agents](#several-algods-on-one-host) also needs `sudo algod-loadb-mesh-setup --instance NAME --no-start` (any one of its names: they share the template unit) and `sudo systemctl restart 'algod-loadb-mesh@*'`.
 
 </details>
 
@@ -168,12 +174,33 @@ The bundle contains the sync key. Anyone who has it can read every node's algod 
 - **algod data dir**: detected; it asks when there are several (`--data-dir`)
 - **client token**: the node's own `algod.token`, so clients keep their current token (`--client-token-file`)
 - **addresses**: every `10.112.*`/`10.114.*` interface, else a public one (`--address`). Clients and gossip are served on all of them and peers are told about all of them.
-- **ports**: 4000/tcp for clients and 4001/udp for gossip (`--client-port`, `--mesh-port`)
+- **ports**: 4000/tcp for clients and 4001/udp for gossip, or the next free pair if [other agents](#several-algods-on-one-host) run on the host (`--client-port`, `--mesh-port`)
 - **algod pass-through**: algod is advertised on every mesh address. Algod binds the address in `algod.net`, and the agent binds the rest and passes them through (see [multi-homed hosts](#multi-homed-hosts)).
 - **external fallback**: it asks whether to add Nodely for the node's network (`--nodely`/`--no-nodely`)
 - **routing tier**: 1 (`--tier`)
 
 To install a config you wrote yourself, use `--config FILE`. To start from the fully commented example, run `algod-loadb-mesh config example -o FILE`.
+
+### Several algods on one host
+
+One agent serves one algod, so a host with several algods (mainnet and testnet, or an archival and a time-travel node of one network) runs one agent for each. The first is set up as usual; each further one is a named instance:
+
+```sh
+sudo algod-loadb-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -   # paste testnet's bundle
+```
+
+| | first agent | instance `NAME` |
+|---|---|---|
+| config | `/etc/algod-loadb-mesh/config.yaml` | `/etc/algod-loadb-mesh/NAME.yaml` |
+| service | `algod-loadb-mesh` | `algod-loadb-mesh@NAME` |
+| `local.id` | hostname | `HOSTNAME-NAME` |
+| registry cache | `/var/lib/algod-loadb-mesh/registry.cache` | `/var/lib/algod-loadb-mesh/NAME.registry.cache` |
+
+Setup gives each agent the first client and gossip ports no other agent in `/etc/algod-loadb-mesh` binds: 4000/4001, then 4002/4003, and so on (`--client-port` and `--mesh-port` choose them). It leaves out of detection the data dirs other agents already serve, and refuses a config that shares a data dir, a port, a node id or a registry cache with one of them. A `--force` re-run keeps the agent's ports while they are free. Run without `--instance` and with a `--data-dir` other than the one `config.yaml` serves, it stops and suggests a name instead of replacing that config (without `--data-dir`, it keeps `config.yaml` as always). All agents on a host run as one user, so a different `--user` is refused while other agents exist. Every `*.yaml` in `/etc/algod-loadb-mesh` counts as an agent's config: setup stops on one that does not load.
+
+Each agent belongs to the fleet of its own network, so it takes that fleet's bundle; two agents of one network join the same fleet with the same bundle. The other commands take the instance's config, for example `algod-loadb-mesh registry bundle -config /etc/algod-loadb-mesh/testnet.yaml` and `systemctl status algod-loadb-mesh@testnet`. Package upgrades restart every running agent.
+
+Configs written by hand need the same care: a distinct `local.id` (the hostname default collides), `listen` and `mesh.listen` ports, and `registry.cache` path for each.
 
 ### Without the on-chain registry
 
@@ -313,7 +340,7 @@ Hosts on two private networks list both addresses in `mesh.listen` and `mesh.adv
 - **Not a highly available endpoint on its own.** A client depends on the agent it connects to. Put agents on every app host (layout 2) or several balancers behind DNS/L4 (layout 3).
 - **Assumes a trusted private network.** Gossip and proxied traffic are plain UDP/HTTP, and every member can use every node's algod token. Run it over WireGuard or a VPC, not the open internet. `config check` warns about public or wildcard mesh addresses.
 - **No TLS on the client listener.** Put a TLS-terminating proxy in front if clients connect over untrusted networks.
-- **One agent serves one algod.** A host with several algods (for example mainnet and testnet) needs one agent per algod, each with its own config, ports and node id.
+- **One agent serves one algod.** A host with several algods (for example mainnet and testnet) runs one agent per algod, each with its own config, ports and node id. Setup handles this with named instances (see [several algods on one host](#several-algods-on-one-host)).
 - **Linux and systemd only** for the packaged install and setup scripts. The binary itself is plain Go.
 - **The on-chain registry has a small cost.** The sync account pays box storage and fees (a few ALGO), and the sync key is a shared secret to manage. The static registry avoids both but must be edited on every host.
 - **Externals are trusted as declared.** Nothing is detected for an external RPC: you state its capabilities in the config, and it is only checked once nothing in the fleet can serve.

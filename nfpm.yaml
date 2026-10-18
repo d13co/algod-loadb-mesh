@@ -2,8 +2,9 @@
 #
 #   GOARCH=arm64 make build && DEB_VERSION=1.2.3 ARCH=arm64 nfpm pkg -p deb -t dist/
 #
-# Like install.sh it configures nothing: algod-loadb-mesh-setup writes the
-# config and the unit (from the template in /usr/share) and starts the service.
+# Like install.sh it configures nothing but its own upgrades (it lets
+# unattended-upgrades install from apt.d13.co): algod-loadb-mesh-setup writes
+# the config and the unit (from the template in /usr/share) and starts the service.
 name: algod-loadb-mesh
 arch: ${ARCH}
 version: ${DEB_VERSION}
@@ -15,6 +16,7 @@ depends:
   - iproute2 # autoconfig reads the mesh interfaces
 recommends:
   - openssl # autoconfig decodes rekeyed bundles with it
+  - unattended-upgrades # installs new releases, see the apt.conf.d file below
 contents:
   - src: bin/algod-loadb-mesh
     dst: /usr/bin/algod-loadb-mesh
@@ -27,6 +29,10 @@ contents:
     file_info: {mode: 0755}
   - src: deploy/algod-loadb-mesh.service
     dst: /usr/share/algod-loadb-mesh/algod-loadb-mesh.service
+    file_info: {mode: 0644}
+  - src: deploy/unattended-upgrades.conf
+    dst: /etc/apt/apt.conf.d/51algod-loadb-mesh-upgrades
+    type: config # a conffile: local edits and deletions survive upgrades
     file_info: {mode: 0644}
 scripts:
   postinstall: deploy/postinst.sh
