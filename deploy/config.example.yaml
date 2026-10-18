@@ -7,7 +7,7 @@
 # role: node                          # node (next to an algod) | balancer (no algod: routes to the fleet, see `config example -balancer`); default node
 mode: fallback                        # fallback (local node first) | loadbalancer (best-scoring node); default fallback, loadbalancer for a balancer
 listen: 0.0.0.0:4000                  # clients connect here; default 127.0.0.1:4000. Several interfaces: a YAML list of addresses, or one comma-separated string
-client_token_file: /var/lib/algorand/algod.token   # X-Algo-API-Token clients must send; here the node's own algod token
+client_token_file: /var/lib/algorand/algod.token   # X-Algo-API-Token clients must send; here the node's own algod token (absent when algod runs with DisableAPIAuth: drop this line)
 # client_token: s3cret                  # the same, inline; wins over client_token_file. No token at all: no auth
 # admin_token_file: /var/lib/algorand/algod.admin.token   # token for /loadb/* (health excepted), also valid as a client token; default: algod.admin.token in local.data_dir
 # admin_token: s3cret-admin             # the same, inline; wins over admin_token_file. No admin token: /loadb/* is closed (open only with no tokens at all)
@@ -18,7 +18,7 @@ log:
 
 local:
   id: k44                             # stable node name, at most 48 bytes; default: hostname
-  data_dir: /var/lib/algorand         # required: algod.net, algod.token, genesis.json, config.json
+  data_dir: /var/lib/algorand         # required: algod.net, genesis.json, and algod.token unless config.json sets DisableAPIAuth
   # network: mainnet-v1.0               # role balancer only, and required there: genesis id of the fleet it serves
   advertise_endpoints:                # how *other agents* reach this algod (WireGuard IPs); required with auto_register; http:// is assumed without a scheme
     - http://10.112.0.44:8080
