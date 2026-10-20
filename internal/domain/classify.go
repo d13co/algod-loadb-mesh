@@ -55,6 +55,136 @@ type RequestClass struct {
 	// Simulate marks POST /v2/transactions/simulate, whose body may carry a
 	// round the router refines the class with before it selects.
 	Simulate bool
+	// SimNeeds is what a simulate request's body asks of the node that runs
+	// it. The router fills it in once it has read the body (ApplySimulate);
+	// it is nil before that and for every other request.
+	SimNeeds *SimulateNeeds
+	// RoundHigh is the latest round a simulate request's "rounds" lists: a
+	// node must have reached it too, while Round, the earliest, is the one
+	// its window must cover. 0 when the request names at most one round.
+	RoundHigh uint64
+	// SimulateLimits marks GET /v2/transactions/simulate/limits, which the
+	// router answers for the fleet (dtalgorand).
+	SimulateLimits bool
+}
+
+// SimulateNeeds is what a simulate request needs of the node that runs it.
+// It is the router's preference, not algod's rule: when no node fits, the
+// router relaxes it (Relaxed) and sends the request on, so that a node
+// answers it, with its own error if need be, as a single algod would.
+type SimulateNeeds struct {
+	Groups            int    // len(txn-groups)
+	Rounds            int    // len(rounds), duplicates included
+	ExtraOpcodeBudget uint64 // extra-opcode-budget
+	// Fork marks an option only dtalgorand has: parallel-groups, a validity
+	// window mode or a protocol. Groups and Rounds beyond stock algod's are
+	// told by the limits instead.
+	Fork bool
+	// DeveloperAPI marks an execution trace or protocol future, which algod
+	// simulates only with EnableDeveloperAPI.
+	DeveloperAPI bool
+	// RoundsSpan marks Round and RoundHigh as taken from rounds, which a
+	// node answers round by round: one it cannot simulate is an error in
+	// that round's result, not in the response.
+	RoundsSpan bool
+	// Latest marks a rounds list with a 0 entry, which the node resolves to
+	// its own last round: the node must be in sync, even though it holds
+	// the past rounds the list names too.
+	Latest bool
+}
+
+// Fits reports whether a node with capabilities c accepts the request.
+func (n SimulateNeeds) Fits(c Capabilities) bool {
+	if n.Fork && c.Simulate == nil {
+		return false
+	}
+	if n.DeveloperAPI && !c.DeveloperAPI {
+		return false
+	}
+	l := c.SimulateLimits()
+	return uint64(n.Groups) <= l.MaxTxnGroups && uint64(n.Rounds) <= l.MaxRounds && n.ExtraOpcodeBudget <= l.MaxExtraOpcodeBudget
+}
+
+// SimulateBody is the part of a simulate request body routing reads. The
+// tags are algod's for both msgpack and JSON; every other field is skipped.
+type SimulateBody struct {
+	TxnGroups         []struct{} `codec:"txn-groups" json:"txn-groups"`
+	Round             uint64     `codec:"round" json:"round"`
+	Rounds            []uint64   `codec:"rounds" json:"rounds"`
+	ExtraOpcodeBudget int64      `codec:"extra-opcode-budget" json:"extra-opcode-budget"`
+	ExecTraceConfig   struct {
+		Enable bool `codec:"enable" json:"enable"`
+	} `codec:"exec-trace-config" json:"exec-trace-config"`
+	ParallelGroups        bool   `codec:"parallel-groups" json:"parallel-groups"`
+	SkipValidityWindow    bool   `codec:"skip-validity-window" json:"skip-validity-window"`
+	RewriteValidityWindow bool   `codec:"rewrite-validity-window" json:"rewrite-validity-window"`
+	Protocol              string `codec:"protocol" json:"protocol"`
+}
+
+// protocolFuture is the protocol name only a node with the developer API
+// simulates under (protocol.ConsensusFuture).
+const protocolFuture = "future"
+
+// ApplySimulate refines a simulate request's class with what its body asks.
+// A round other than 0 (which means the latest) needs a node holding it:
+// a plain node within its account-state lookback, a time-travel node at any
+// round. A rounds list needs a node holding every round it names other than
+// 0, so its earliest and latest bound the node's window.
+func (c *RequestClass) ApplySimulate(b SimulateBody) {
+	n := SimulateNeeds{Groups: len(b.TxnGroups), Rounds: len(b.Rounds),
+		Fork:         b.ParallelGroups || b.SkipValidityWindow || b.RewriteValidityWindow || b.Protocol != "",
+		DeveloperAPI: b.ExecTraceConfig.Enable || b.Protocol == protocolFuture}
+	if b.ExtraOpcodeBudget > 0 {
+		n.ExtraOpcodeBudget = uint64(b.ExtraOpcodeBudget)
+	}
+	setRound := func(r uint64) {
+		c.Round = &r
+		c.RoundWindow = WindowState
+		c.HistoryAnyRound = true
+	}
+	switch {
+	case b.Round != 0:
+		// With rounds as well the node rejects the request; routing it by
+		// round gets that answer from a node that would otherwise serve it.
+		setRound(b.Round)
+	case len(b.Rounds) > 0:
+		var lo, hi uint64
+		for _, r := range b.Rounds {
+			if r == 0 {
+				n.Latest = true // the node's own latest round
+				continue
+			}
+			if lo == 0 || r < lo {
+				lo = r
+			}
+			hi = max(hi, r)
+		}
+		if hi > 0 {
+			setRound(lo)
+			c.RoundHigh = hi
+			n.RoundsSpan = true
+		}
+	}
+	c.SimNeeds = &n
+}
+
+// Relaxed lists the classes selection falls back to, in order, when no
+// upstream is eligible for c. A simulate request with a rounds list first
+// drops the rounds, which the node reports one by one as it cannot simulate
+// them, then the rest of its needs, so that a node rejects the request with
+// its own message rather than the router with a 503. A single round is kept:
+// a node that lacks it would answer the latest state or an error.
+func (c RequestClass) Relaxed() []RequestClass {
+	if c.SimNeeds == nil {
+		return nil
+	}
+	var out []RequestClass
+	if c.SimNeeds.RoundsSpan {
+		c.Round, c.RoundHigh, c.RoundWindow, c.HistoryAnyRound = nil, 0, WindowBlock, false
+		out = append(out, c)
+	}
+	c.SimNeeds = nil
+	return append(out, c)
 }
 
 // Reply is a status and message the router answers with in algod's place.
@@ -68,6 +198,9 @@ func (c RequestClass) String() string {
 	var parts []string
 	if c.Round != nil {
 		parts = append(parts, fmt.Sprintf("round=%d", *c.Round))
+	}
+	if c.RoundHigh != 0 {
+		parts = append(parts, fmt.Sprintf("round_high=%d", c.RoundHigh))
 	}
 	if c.WaitAfter != nil {
 		parts = append(parts, fmt.Sprintf("wait_after=%d", *c.WaitAfter))
@@ -95,6 +228,23 @@ func (c RequestClass) String() string {
 	if c.HistoryAnyRound {
 		parts = append(parts, "history_any_round")
 	}
+	if n := c.SimNeeds; n != nil {
+		if n.Groups > 1 {
+			parts = append(parts, fmt.Sprintf("sim_groups=%d", n.Groups))
+		}
+		if n.Rounds > 0 {
+			parts = append(parts, fmt.Sprintf("sim_rounds=%d", n.Rounds))
+		}
+		if n.ExtraOpcodeBudget > StockMaxExtraOpcodeBudget {
+			parts = append(parts, fmt.Sprintf("sim_budget=%d", n.ExtraOpcodeBudget))
+		}
+		if n.Fork {
+			parts = append(parts, "sim_fork")
+		}
+		if n.DeveloperAPI {
+			parts = append(parts, "sim_dev")
+		}
+	}
 	if c.LocalOnly {
 		parts = append(parts, "local_only")
 	}
@@ -110,6 +260,10 @@ func (c RequestClass) StatKey() string {
 	case c.TimeTravel:
 		// A history read, whether ?round= or /versions, is its own bucket.
 		return "timetravel"
+	case c.Simulate:
+		// One simulation can run for seconds (many groups, many rounds):
+		// it must not skew the latency of the requests it would share with.
+		return "simulate"
 	case c.Round != nil:
 		return "round"
 	case c.Broadcast:
@@ -255,6 +409,9 @@ func Classify(method, path, rawQuery string) RequestClass {
 			c.PendingID = seg(3)
 		case seg(2) == "pending":
 			c.LocalOnly = true // pool dump is only meaningful per node
+		case seg(2) == "simulate" && seg(3) == "limits":
+			// dtalgorand's limits: a GET, answered for the fleet by the router.
+			c.SimulateLimits = method == "GET"
 		case seg(2) == "simulate":
 			c.Idempotent = true
 			c.Simulate = true

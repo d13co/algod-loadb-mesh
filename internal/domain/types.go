@@ -59,11 +59,16 @@ type Capabilities struct {
 	// round (the EnableTimeTravel fork), so it answers ?round= on state
 	// endpoints and the /versions history endpoints at any past round, even
 	// when Archival is off.
-	TimeTravel      bool   `json:"time_travel,omitempty"`
-	AlgodVersion    string `json:"algod_version,omitempty"`
-	GenesisID       string `json:"genesis_id,omitempty"`
-	StorageEngine   string `json:"storage_engine,omitempty"`
-	MaxAcctLookback uint64 `json:"max_acct_lookback,omitempty"`
+	TimeTravel bool `json:"time_travel,omitempty"`
+	// Simulate is what the node allows in a simulate request, as dtalgorand
+	// reports it at GET /v2/transactions/simulate/limits. nil is a stock
+	// algod (or an agent too old to ask): one transaction group, no rounds
+	// list, the upstream opcode budget limit and none of the fork's options.
+	Simulate        *SimulateLimits `json:"simulate,omitempty"`
+	AlgodVersion    string          `json:"algod_version,omitempty"`
+	GenesisID       string          `json:"genesis_id,omitempty"`
+	StorageEngine   string          `json:"storage_engine,omitempty"`
+	MaxAcctLookback uint64          `json:"max_acct_lookback,omitempty"`
 }
 
 // CapabilityOverrides are manual corrections from config or the registry.
@@ -73,6 +78,9 @@ type CapabilityOverrides struct {
 	DeveloperAPI *bool     `json:"developer_api,omitempty" yaml:"developer_api,omitempty"`
 	FollowMode   *bool     `json:"follow_mode,omitempty" yaml:"follow_mode,omitempty"`
 	TimeTravel   *bool     `json:"time_travel,omitempty" yaml:"time_travel,omitempty"`
+	// Simulate pins the simulate limits, for an upstream the agent cannot
+	// ask (an external) or one that answers wrongly.
+	Simulate *SimulateLimits `json:"simulate,omitempty" yaml:"simulate,omitempty"`
 }
 
 // Apply returns caps with the overrides applied, recomputing OldestRound.
@@ -93,7 +101,59 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 	if o.TimeTravel != nil {
 		c.TimeTravel = *o.TimeTravel
 	}
+	if o.Simulate != nil {
+		lim := *o.Simulate
+		c.Simulate = &lim
+	}
 	return c
+}
+
+// SimulateLimits is what a dtalgorand node allows in one simulate request.
+// The fields mirror GET /v2/transactions/simulate/limits; that response's
+// time-travel and developer-api are already Capabilities of their own.
+type SimulateLimits struct {
+	MaxTxnGroups            uint64 `json:"max_txn_groups" yaml:"max_txn_groups"`
+	MaxRounds               uint64 `json:"max_rounds" yaml:"max_rounds"` // 0: rounds is disabled
+	MaxExtraOpcodeBudget    uint64 `json:"max_extra_opcode_budget" yaml:"max_extra_opcode_budget"`
+	ResourceLimitMultiplier uint64 `json:"resource_limit_multiplier" yaml:"resource_limit_multiplier"`
+}
+
+// StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod
+// (simulation.MaxExtraOpcodeBudget).
+const StockMaxExtraOpcodeBudget = 320000
+
+// StockSimulateLimits is what a stock algod allows.
+var StockSimulateLimits = SimulateLimits{MaxTxnGroups: 1, MaxExtraOpcodeBudget: StockMaxExtraOpcodeBudget, ResourceLimitMultiplier: 1}
+
+// The ceilings dtalgorand clamps its simulate config to (simulation.
+// MaxSimulateGroups, MaxSimulateRounds, MaxExtraOpcodeBudgetCeiling and
+// MaxResourceLimitMultiplier).
+const (
+	maxSimulateGroups          = 256
+	maxSimulateRounds          = 256
+	maxExtraOpcodeBudget       = 1000 * StockMaxExtraOpcodeBudget
+	maxResourceLimitMultiplier = 1024
+)
+
+// SimulateLimits is what the node allows in a simulate request, with the
+// stock limits for a node that reports none. Values are read as dtalgorand
+// reads its config: fewer than one group counts as one, a zero budget as the
+// stock one, a multiplier below one as one, and each is clamped to the
+// fork's ceiling, so that a hand-written override promises neither less nor
+// more than a node can do.
+func (c Capabilities) SimulateLimits() SimulateLimits {
+	if c.Simulate == nil {
+		return StockSimulateLimits
+	}
+	l := *c.Simulate
+	l.MaxTxnGroups = min(max(l.MaxTxnGroups, 1), maxSimulateGroups)
+	l.MaxRounds = min(l.MaxRounds, maxSimulateRounds)
+	if l.MaxExtraOpcodeBudget == 0 {
+		l.MaxExtraOpcodeBudget = StockMaxExtraOpcodeBudget
+	}
+	l.MaxExtraOpcodeBudget = min(l.MaxExtraOpcodeBudget, maxExtraOpcodeBudget)
+	l.ResourceLimitMultiplier = min(max(l.ResourceLimitMultiplier, 1), maxResourceLimitMultiplier)
+	return l
 }
 
 // AgentInfo is how other agents reach this node's agent on the control plane.
@@ -225,7 +285,8 @@ func equalOverrides(a, b *CapabilityOverrides) bool {
 	eqD := (a.DeveloperAPI == nil && b.DeveloperAPI == nil) || (a.DeveloperAPI != nil && b.DeveloperAPI != nil && *a.DeveloperAPI == *b.DeveloperAPI)
 	eqF := (a.FollowMode == nil && b.FollowMode == nil) || (a.FollowMode != nil && b.FollowMode != nil && *a.FollowMode == *b.FollowMode)
 	eqT := (a.TimeTravel == nil && b.TimeTravel == nil) || (a.TimeTravel != nil && b.TimeTravel != nil && *a.TimeTravel == *b.TimeTravel)
-	return eqA && eqD && eqF && eqT
+	eqS := (a.Simulate == nil && b.Simulate == nil) || (a.Simulate != nil && b.Simulate != nil && *a.Simulate == *b.Simulate)
+	return eqA && eqD && eqF && eqT && eqS
 }
 
 // Health is the liveness/sync state of an upstream as seen by an agent.
