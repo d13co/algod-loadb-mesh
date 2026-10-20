@@ -161,12 +161,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.serve(sw, req, class)
 }
 
-// refineSimulate reads a simulate request body, whose "round" field asks for
-// the state at a past round, and marks the class so the request reaches a node
-// that can serve that round: a plain node within its account-state lookback,
-// or a time-travel node anywhere. The body is restored for forwarding, sized
-// like replayable so that a retry can send it again. It reports false only
-// when the body could not be read, which the caller answers with a 400.
+// refineSimulate reads a simulate request body and refines the class with
+// what it asks of the node (domain.ApplySimulate): the round or rounds it
+// simulates at, how many groups and rounds it holds, its extra opcode budget,
+// and the options only dtalgorand or the developer API allow. The body is
+// restored for forwarding, sized like replayable so that a retry can send it
+// again. It reports false only when the body could not be read, which the
+// caller answers with a 400.
 func (r *Router) refineSimulate(req *http.Request, class *domain.RequestClass) bool {
 	if req.Body == nil {
 		return true
@@ -176,28 +177,23 @@ func (r *Router) refineSimulate(req *http.Request, class *domain.RequestClass) b
 		return false
 	}
 	if len(prefix) > maxReplayBody {
-		// Too large to hold, so the round is not inspected. algod caps a
+		// Too large to hold, so the body is not inspected. algod caps a
 		// simulate request at 1 MB anyway, so this body is already invalid.
 		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), req.Body))
 		return true
 	}
 	req.Body = io.NopCloser(bytes.NewReader(prefix))
 	req.ContentLength = int64(len(prefix))
-	var body struct {
-		Round *uint64 `codec:"round" json:"round"`
-	}
+	var body domain.SimulateBody
 	// algod accepts msgpack or JSON; the SDKs post msgpack and set no
 	// Content-Type, so try msgpack first exactly as the node does.
 	if codec.NewDecoderBytes(prefix, &codec.MsgpackHandle{}).Decode(&body) != nil {
+		body = domain.SimulateBody{}
 		if json.Unmarshal(prefix, &body) != nil {
 			return true
 		}
 	}
-	if body.Round != nil {
-		class.Round = body.Round
-		class.RoundWindow = domain.WindowState
-		class.HistoryAnyRound = true
-	}
+	class.ApplySimulate(body)
 	return true
 }
 
@@ -282,6 +278,20 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	}
 	cands, best := r.dir.Snapshot()
 	w.Header().Set("X-Algod-Loadb-Mesh-Mode", string(r.opts.Mode))
+	if class.SimulateLimits {
+		if lim, ok := domain.FleetSimulateLimits(cands, best, r.opts.SyncTolerance); ok {
+			writeJSON(w, http.StatusOK, lim)
+			return
+		}
+		if anySimulateLimits(cands) {
+			// The nodes that report limits are all out for now: a stock
+			// node's 404 would tell the client the fleet has none.
+			r.metric.Inc("loadb_requests_unroutable", "class", class.StatKey())
+			writeMessage(w, 503, "algod-loadb-mesh: no node that reports simulate limits is available")
+			return
+		}
+		// No node reports limits: stock algod answers 404, as it does alone.
+	}
 	if class.WaitAfter != nil {
 		r.handleWait(w, req, class, cands, best)
 		return
@@ -384,6 +394,16 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
 }
 
+// anySimulateLimits reports whether any candidate advertises simulate limits.
+func anySimulateLimits(us []domain.Upstream) bool {
+	for _, u := range us {
+		if u.Caps.Simulate != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // anyTimeTravel reports whether any candidate advertises the history.
 func anyTimeTravel(us []domain.Upstream) bool {
 	for _, u := range us {
@@ -396,6 +416,27 @@ func anyTimeTravel(us []domain.Upstream) bool {
 
 func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	sel, cands, best, ok := r.pick(ctx, class, cands, best)
+	if !ok {
+		// No node in the fleet fits a simulate request: relax it so that a
+		// node answers it, rejecting what it cannot do as a lone algod
+		// would. Each step is taken only when no node could serve the one
+		// before, so that a fitting node that is briefly out gets the
+		// client a 503 to retry. The externals were already checked for
+		// the strict class.
+		prev := class
+		for _, rc := range class.Relaxed() {
+			if domain.CouldServe(cands, prev) {
+				break
+			}
+			prev = rc
+			if sel, ok = r.sel(cands, rc, best); ok {
+				r.metric.Inc("loadb_simulate_relaxed")
+				r.log.Debug("no upstream fits the simulate request, relaxed", "class", class.String(), "relaxed", rc.String())
+				class = rc
+				break
+			}
+		}
+	}
 	if !ok {
 		// No reachable node has the round yet: answer as algod does. best
 		// may count an external whose check has since expired, so the
@@ -486,6 +527,12 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 		}
 		last = r.forward(ctx, w, req, u, class, nil)
 		if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
+			return
+		}
+		if class.Simulate && errors.Is(last.Err, context.DeadlineExceeded) {
+			// A simulation that ran out of time would only run as long on
+			// the next node, for nothing: the client gets the timeout.
+			r.answerFailure(w, req, last)
 			return
 		}
 	}

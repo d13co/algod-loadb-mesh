@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -57,6 +58,9 @@ type LocalState struct {
 	LastError  string              `json:"last_error,omitempty"`
 	Endpoint   string              `json:"endpoint"`
 	Seq        uint64              `json:"seq"` // increments on every change
+	// LimitsKnown is set once the simulate limits were read (Caps.Simulate,
+	// nil for stock algod); until then they are asked again every round.
+	LimitsKnown bool `json:"limits_known"`
 }
 
 // Monitor follows the co-located algod with one status-after long-poll and
@@ -178,7 +182,7 @@ func capsFromConfig(cfg ports.NodeConfig, prev domain.Capabilities, lastRound ui
 		DeveloperAPI: cfg.EnableDeveloperAPI, FollowMode: cfg.EnableFollowMode, ExperimentalAPI: cfg.EnableExperimentalAPI,
 		TimeTravel: cfg.EnableTimeTravel,
 		GenesisID:  cfg.GenesisID, StorageEngine: cfg.StorageEngine, MaxAcctLookback: cfg.MaxAcctLookback,
-		AlgodVersion: prev.AlgodVersion,
+		AlgodVersion: prev.AlgodVersion, Simulate: prev.Simulate,
 	}
 	switch {
 	case cfg.Archival:
@@ -221,6 +225,12 @@ func (m *Monitor) awaitOnline(ctx context.Context, b *backoff) bool {
 		cancel()
 		if err == nil {
 			ver, verr := m.algod.Versions(ctx)
+			// The limits come from algod's config, which it reads only at
+			// start: once per (re)connection is enough.
+			lim, lerr := m.simulateLimits(ctx)
+			if lerr != nil {
+				m.log.Warn("simulate limits unavailable, asking again next round", "err", lerr)
+			}
 			m.update(func(s *LocalState) {
 				s.Online, s.LastRound, s.LastStatus, s.LastError = true, st.LastRound, st.Raw, ""
 				if verr == nil {
@@ -229,9 +239,14 @@ func (m *Monitor) awaitOnline(ctx context.Context, b *backoff) bool {
 						s.Caps.GenesisID = ver.GenesisID
 					}
 				}
+				s.LimitsKnown = lerr == nil
+				if lerr == nil {
+					s.Caps.Simulate = lim
+				}
 				s.Caps.OldestRound = domain.OldestRoundFor(s.Caps.Archival, s.LastRound)
+				s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
 			})
-			m.log.Info("local node online", "round", st.LastRound)
+			m.log.Info("local node online", "round", st.LastRound, "simulate_limits", fmtLimits(lim, lerr))
 			return true
 		}
 		m.update(func(s *LocalState) { s.Online = false; s.LastError = err.Error() })
@@ -268,7 +283,21 @@ func (m *Monitor) watch(ctx context.Context) {
 		}
 		m.metric.Inc("loadb_local_rounds")
 		m.log.Debug("round", "round", st.LastRound)
+		known := m.State().LimitsKnown
+		var lim *domain.SimulateLimits
+		if !known {
+			var lerr error
+			if lim, lerr = m.simulateLimits(ctx); lerr != nil {
+				m.log.Debug("simulate limits still unavailable", "err", lerr)
+			} else {
+				known = true
+				m.log.Info("simulate limits", "limits", fmtLimits(lim, nil))
+			}
+		}
 		m.update(func(s *LocalState) {
+			if known && !s.LimitsKnown {
+				s.LimitsKnown, s.Caps.Simulate = true, lim
+			}
 			s.Online, s.LastRound, s.LastStatus, s.LastError = true, st.LastRound, st.Raw, ""
 			s.Caps.OldestRound = domain.OldestRoundFor(s.Caps.Archival, s.LastRound)
 			s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
@@ -295,6 +324,7 @@ func (m *Monitor) verifyLoop(ctx context.Context) {
 			m.verifyOldest(ctx, true)
 		case <-tick:
 			m.verifyOldest(ctx, false)
+			m.refreshLimits(ctx)
 		}
 	}
 }
@@ -428,3 +458,38 @@ func (b *backoff) next() time.Duration {
 }
 
 func (b *backoff) reset() { b.cur = 0 }
+
+// refreshLimits reads the simulate limits again, for an algod restarted with
+// a new config without the agent seeing it go away.
+func (m *Monitor) refreshLimits(ctx context.Context) {
+	if !m.State().Online {
+		return
+	}
+	lim, err := m.simulateLimits(ctx)
+	if err != nil {
+		m.log.Debug("simulate limits re-read failed", "err", err)
+		return
+	}
+	m.update(func(s *LocalState) {
+		s.LimitsKnown, s.Caps.Simulate = true, lim
+		s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
+	})
+}
+
+// simulateLimits asks the local node for its simulate limits.
+func (m *Monitor) simulateLimits(ctx context.Context) (*domain.SimulateLimits, error) {
+	ctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
+	defer cancel()
+	return m.algod.SimulateLimits(ctx)
+}
+
+// fmtLimits renders the simulate limits for the log.
+func fmtLimits(l *domain.SimulateLimits, err error) string {
+	switch {
+	case err != nil:
+		return "unknown"
+	case l == nil:
+		return "stock"
+	}
+	return fmt.Sprintf("groups=%d rounds=%d budget=%d multiplier=%d", l.MaxTxnGroups, l.MaxRounds, l.MaxExtraOpcodeBudget, l.ResourceLimitMultiplier)
+}

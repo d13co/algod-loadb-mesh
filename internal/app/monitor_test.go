@@ -151,3 +151,43 @@ func TestStatsBreaker(t *testing.T) {
 		t.Fatal("inflight release is idempotent")
 	}
 }
+
+func TestMonitorReadsSimulateLimits(t *testing.T) {
+	lim := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 1}
+	run := func(o fakealgod.Options, ov *domain.CapabilityOverrides) (*Monitor, *fakealgod.Node) {
+		n := fakealgod.New(o)
+		t.Cleanup(n.Close)
+		m := NewMonitor(MonitorOptions{NodeID: o.ID, WaitTimeout: time.Second, Overrides: ov},
+			algodhttp.New(n.URL(), n.Token(), nil), fakealgod.ConfigReader{Node: n}, clock.Real{}, logging.Nop{}, metrics.New())
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go m.Run(ctx)
+		waitFor(t, 5*time.Second, func() bool { return m.State().Online && m.State().LimitsKnown })
+		return m, n
+	}
+
+	m, n := run(fakealgod.Options{ID: "dt", StartRound: 50, Simulate: &lim}, nil)
+	if got := m.State().Caps.Simulate; got == nil || *got != lim {
+		t.Fatalf("limits %+v, want %+v", got, lim)
+	}
+	// The limits survive the round updates, and are not asked again.
+	n.Advance(1)
+	waitFor(t, 2*time.Second, func() bool { return m.State().LastRound == 51 })
+	if m.State().Caps.Simulate == nil {
+		t.Fatal("limits dropped on round update")
+	}
+	if hits := n.Hits("/v2/transactions/simulate/limits"); hits != 1 {
+		t.Fatalf("limits asked %d times, want once", hits)
+	}
+
+	if m, _ := run(fakealgod.Options{ID: "stock", StartRound: 50}, nil); m.State().Caps.Simulate != nil {
+		t.Fatalf("stock node reported limits %+v", m.State().Caps.Simulate)
+	}
+
+	// An override wins over what the node reports.
+	pinned := domain.SimulateLimits{MaxTxnGroups: 2}
+	m, _ = run(fakealgod.Options{ID: "ov", StartRound: 50, Simulate: &lim}, &domain.CapabilityOverrides{Simulate: &pinned})
+	if got := m.State().Caps.Simulate; got == nil || *got != pinned {
+		t.Fatalf("overridden limits %+v, want %+v", got, pinned)
+	}
+}

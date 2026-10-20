@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/d13co/algod-loadb-mesh/internal/domain"
 	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
 	"github.com/d13co/algod-loadb-mesh/internal/ports"
 )
@@ -46,6 +47,15 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	}
 	if _, err := c.Box(ctx, 7, []byte("nope")); !errors.Is(err, ports.ErrNotFound) {
 		t.Fatalf("missing box: %v", err)
+	}
+	if lim, err := c.SimulateLimits(ctx); err != nil || lim != nil {
+		t.Fatalf("stock simulate limits: %v %+v", err, lim)
+	}
+	want := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 4, MaxExtraOpcodeBudget: 640000, ResourceLimitMultiplier: 2}
+	dt := fakealgod.New(fakealgod.Options{ID: "dt", StartRound: 5, Simulate: &want})
+	defer dt.Close()
+	if lim, err := New(dt.URL(), dt.Token(), nil).SimulateLimits(ctx); err != nil || lim == nil || *lim != want {
+		t.Fatalf("dtalgorand simulate limits: %v %+v", err, lim)
 	}
 	bad := New(n.URL(), "wrong", nil)
 	if _, err := bad.Status(ctx); err == nil {

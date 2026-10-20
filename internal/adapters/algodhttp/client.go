@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/d13co/algod-loadb-mesh/internal/domain"
 	"github.com/d13co/algod-loadb-mesh/internal/ports"
 )
 
@@ -131,6 +132,33 @@ func (c *Client) Versions(ctx context.Context) (ports.Versions, error) {
 	}
 	return ports.Versions{GenesisID: raw.GenesisID,
 		Build: fmt.Sprintf("%d.%d.%d-%s", raw.Build.Major, raw.Build.Minor, raw.Build.BuildNumber, raw.Build.Channel)}, nil
+}
+
+// SimulateLimits implements ports.AlgodClient. A 404 is a node without the
+// endpoint: stock algod, or a dtalgorand from before it.
+func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, error) {
+	const path = "/v2/transactions/simulate/limits"
+	code, body, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if code == 404 {
+		return nil, nil
+	}
+	if code != 200 {
+		return nil, fmt.Errorf("%s: status %d: %s", path, code, truncate(body))
+	}
+	var raw struct {
+		MaxTxnGroups            uint64 `json:"max-txn-groups"`
+		MaxRounds               uint64 `json:"max-rounds"`
+		MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
+		ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("%s: decode: %w", path, err)
+	}
+	return &domain.SimulateLimits{MaxTxnGroups: raw.MaxTxnGroups, MaxRounds: raw.MaxRounds,
+		MaxExtraOpcodeBudget: raw.MaxExtraOpcodeBudget, ResourceLimitMultiplier: raw.ResourceLimitMultiplier}, nil
 }
 
 // BoxNames implements ports.AlgodClient.

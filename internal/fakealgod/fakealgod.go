@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/d13co/algod-loadb-mesh/internal/domain"
 	"github.com/d13co/algod-loadb-mesh/internal/ports"
 )
 
@@ -30,6 +31,9 @@ type Options struct {
 	FollowMode   bool
 	TimeTravel   bool
 	Version      string
+	// Simulate makes the node a dtalgorand that reports these limits at
+	// GET /v2/transactions/simulate/limits; nil is a stock algod (404).
+	Simulate *domain.SimulateLimits
 }
 
 // poolTxn is what a pending lookup reports for one txid.
@@ -270,6 +274,15 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		n.pool[id] = poolTxn{txn: raw}
 		n.mu.Unlock()
 		writeJSON(w, 200, map[string]string{"txId": id})
+	case p == "/v2/transactions/simulate/limits" && r.Method == "GET":
+		l := n.opts.Simulate
+		if l == nil {
+			writeJSON(w, 404, map[string]string{"message": "Not Found"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
+			"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier,
+			"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI})
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
 		tx, ok := n.pool[seg(3)]

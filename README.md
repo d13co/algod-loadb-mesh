@@ -265,6 +265,27 @@ A node built from the time-travel fork (`EnableTimeTravel` in `config.json`) kee
 
 The agent detects the capability and sends it in its heartbeats, so a mixed fleet starts routing correctly as soon as the agents hear each other. If a round sits right at the edge of a stock node's window, the agent prefers a time-travel node, because the stock node may already have moved past it. To declare the capability on a node the agent can't inspect, set `time_travel: true` under `local.overrides`, `tiers.external[].capabilities`, or a static record's `declared`.
 
+### dtalgorand simulate
+
+dtalgorand (the time-travel fork) extends `POST /v2/transactions/simulate` beyond what stock algod accepts: several transaction groups (`MaxAPISimulateGroups`), one request at several rounds (`rounds`, `MaxAPISimulateRounds`), a larger `extra-opcode-budget` (`MaxAPISimulateExtraOpcodeBudget`), and the options `parallel-groups`, `skip-validity-window`, `rewrite-validity-window` and `protocol`. A stock node rejects such a request, so the router reads the body (JSON or msgpack) and sends it to a node that accepts it:
+
+- more groups, more `rounds` entries or a larger budget than stock algod allows go to a node whose limits cover them; any of the fork's options goes to a dtalgorand node;
+- an execution trace (`exec-trace-config.enable`) or `protocol: future` goes to a node with the developer API;
+- a `rounds` list needs a node that holds every round it names: its earliest round within the node's window, as for `round`, and its latest at or below the node's last round; a 0 entry is the node's own latest round, so a list with one also needs a node in sync;
+- `round: 0` is the latest round, as algod reads it, and no longer counts as a past round.
+
+When a node that fits is only out for now (offline, draining, breaker open, lagging), the client gets a 503 to retry. When no node in the fleet could ever fit, the router drops the `rounds` coverage first (the node reports each round it cannot simulate in that round's result), then the rest, and sends the request on, so that a node answers it with its own error as a lone algod would. A single `round` no node holds is still refused with a 503.
+
+A simulation that times out at one node (`routing.upstream_timeout`) is answered 504 and not run again on the next: it would take as long there. Raise the timeout if the fleet allows long `rounds` lists or large budgets.
+
+The agent reads its node's limits from `GET /v2/transactions/simulate/limits` when it connects, again on every `local.verify_interval`, and advertises them in its heartbeats; a stock algod answers 404 and is treated as one. `local.overrides.simulate` and `tiers.external.capabilities.simulate` pin them where they cannot be read, as a static record's `declared` does for a peer while no heartbeat is heard from it. Values are clamped as dtalgorand clamps its config (256 groups, 256 rounds, a budget of 320,000,000).
+
+The router answers `GET /v2/transactions/simulate/limits` itself for the fleet, from the nodes that are eligible right now (reachable, in sync, not draining). It reports the limits of one dtalgorand node in full, so that any request within them fits that node and is routed to it; limits taken from different nodes could promise a request that no node runs (many groups from one, many rounds from another). The node is the one with the largest limits, compared in order: `max-txn-groups`, `max-rounds`, `max-extra-opcode-budget`, `time-travel`, `developer-api`, then its id; a node at least as large on every field always wins. `resource-limit-multiplier` is the smallest of every eligible node instead, stock ones included: no request asks for it, so a request may go to any of them, and that is what it is sure to get. When the dtalgorand nodes are all out for now, the answer is a 503; a fleet with no dtalgorand node forwards the request, and stock algod answers 404.
+
+The answer is about request size and features, not rounds. With `time-travel` false it does not say which past rounds the node's window holds, and a `rounds` list whose latest round is the fleet's newest can miss a node lagging within `routing.sync_tolerance`. Because one node is reported, a smaller node's feature can be left out: with node A at 16 groups and node B at 8 groups with time travel, the answer is A's, `time-travel` false, though B serves past rounds with up to 8 groups.
+
+Simulate requests have their own latency bucket (`class="simulate"` in metrics), so that a slow many-round simulation does not skew the scores of other requests.
+
 ## Example layouts
 
 ### 1. One node with a public fallback

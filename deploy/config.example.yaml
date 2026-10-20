@@ -33,6 +33,7 @@ local:
   #   developer_api: true
   #   follow_mode: false
   #   time_travel: true                 # EnableTimeTravel node: serves ?round= and /versions at any past round
+  #   simulate: { max_txn_groups: 16, max_rounds: 16, max_extra_opcode_budget: 320000, resource_limit_multiplier: 1 }  # dtalgorand simulate limits; read from the node unless set
 
 registry:
   type: algorand                      # algorand | static | file | memory; default: algorand with app_id, file with file, else static
