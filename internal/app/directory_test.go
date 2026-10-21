@@ -867,3 +867,81 @@ func TestExternalCheckIsSharedByConcurrentCallers(t *testing.T) {
 	close(clients.block)
 	waitFor(t, time.Second, func() bool { return h.d.checkExternals(context.Background()) })
 }
+
+// routing.exclude keeps a peer and an external in the snapshot, marked
+// excluded, and never health-checks the excluded external.
+func TestExcludedUpstreams(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 10} // the externals' round, equal to the peer's heartbeat so ext is synced
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true, Exclude: []string{"b", "skip"},
+		Externals: []ExternalUpstream{{Name: "skip", URL: "http://skip"}, {Name: "ext", URL: "http://ext"}}}, clients)
+	h.d.SetRecords([]domain.NodeRecord{h.peerRecord(addrA)})
+	h.injectHeartbeat(addrA, 1)
+	waitFor(t, time.Second, func() bool {
+		ups, _ := h.d.Snapshot()
+		return upstream(t, ups, "b").Source == "heartbeat"
+	})
+	if !h.d.checkExternals(context.Background()) {
+		t.Fatal("included external not usable")
+	}
+	h.awaitExternalChecks()
+	if n := clients.count("http://skip"); n != 0 {
+		t.Fatalf("excluded external checked %d times", n)
+	}
+	ups, best := h.d.Snapshot()
+	if u := upstream(t, ups, "b"); !u.Excluded || u.Health != domain.HealthSynced {
+		t.Fatalf("excluded peer: %+v", u)
+	}
+	if u := upstream(t, ups, "skip"); !u.Excluded {
+		t.Fatalf("excluded external: %+v", u)
+	}
+	if u := upstream(t, ups, "ext"); u.Excluded {
+		t.Fatalf("included external marked excluded: %+v", u)
+	}
+	sel, ok := domain.Select(domain.ModeLoadBalancer, ups, domain.RequestClass{}, best, 0, domain.Weights{}, nil)
+	if !ok || sel.Chosen.ID != "ext" || len(sel.Alternates) != 0 {
+		t.Fatalf("selection: %+v ok=%v", sel, ok)
+	}
+}
+
+// An excluded peer whose agent is silent is not probed directly; another
+// silent peer is.
+func TestExcludedPeerIsNotProbed(t *testing.T) {
+	clients := &countingClients{calls: map[string]int{}, round: 10}
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true, Exclude: []string{"b"}}, clients)
+	recB := h.peerRecord(addrA)
+	recB.Endpoints = []string{"http://b"}
+	recC := domain.NodeRecord{ID: "c", Network: "n", Agent: domain.AgentInfo{Addrs: []string{addrB}, PubKey: []byte(h.peerPub)},
+		Endpoints: []string{"http://c"}}
+	h.d.SetRecords([]domain.NodeRecord{recB, recC})
+	h.d.probeSilentPeers(context.Background())
+	waitFor(t, time.Second, func() bool { return clients.count("http://c") == 1 })
+	time.Sleep(20 * time.Millisecond)
+	if n := clients.count("http://b"); n != 0 {
+		t.Fatalf("excluded peer probed %d times", n)
+	}
+}
+
+// An exclude id that names no peer or external is reported once, and again
+// only when the set of such ids changes.
+func TestUnmatchedExcludeIsReportedOnChange(t *testing.T) {
+	h := newHarnessWith(t, DirectoryOptions{NoLocal: true, Exclude: []string{"b", "ext", "typo"},
+		Externals: []ExternalUpstream{{Name: "ext", URL: "http://ext"}}}, &countingClients{calls: map[string]int{}})
+	check := func(want string) {
+		t.Helper()
+		h.d.mu.Lock()
+		got := h.d.unmatchedExcludeLocked()
+		h.d.mu.Unlock()
+		if strings.Join(got, ",") != want {
+			t.Fatalf("unmatched %q, want %q", got, want)
+		}
+	}
+	check("b,typo")
+	check("") // unchanged: not repeated
+	h.d.SetRecords([]domain.NodeRecord{h.peerRecord(addrA)})
+	check("") // SetRecords already reported the change to "typo"
+	h.d.mu.Lock()
+	if h.d.unmatched != "typo" {
+		t.Fatalf("after records: %q", h.d.unmatched)
+	}
+	h.d.mu.Unlock()
+}

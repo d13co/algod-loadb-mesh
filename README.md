@@ -418,7 +418,7 @@ algod binds only one address, so a node listening on `10.112.0.5:8080` can't be 
 | `registry` | `algorand` (app id, sync key), `static` list, or shared `file`; refresh interval, cache, auto-registration |
 | `mesh` | gossip `listen`/`advertise`, timeouts for suspect/down peers, keepalive, path probing, per-peer overrides |
 | `tiers.external` | last-resort RPCs: URL, token, tier, declared capabilities, health-check age |
-| `routing` | sync tolerance, lag grace and hysteresis, multi-broadcast, retry budget, timeouts, pending-txn stickiness, circuit breaker |
+| `routing` | sync tolerance, lag grace and hysteresis, multi-broadcast, retry budget, timeouts, pending-txn stickiness, circuit breaker, `exclude` (upstreams never routed to) |
 
 ## Development
 

@@ -84,7 +84,7 @@ func New(d Deps) (*Agent, error) {
 	dir := app.NewDirectory(app.DirectoryOptions{LocalID: c.Local.ID, LocalTier: c.Local.Tier, NoLocal: balancer,
 		SuspectAfter: c.Mesh.SuspectAfter, DownAfter: c.Mesh.DownAfter, ProbeInterval: c.Mesh.ProbeInterval,
 		KeepAlive: c.Mesh.KeepAlive, PathProbeInterval: c.Mesh.PathProbeInterval, PathTimeout: c.Mesh.PathTimeout, SyncTolerance: c.Routing.SyncTolerance, LagGrace: c.Routing.LagGrace, ReturnHysteresis: c.Routing.ReturnHysteresisRounds,
-		PeerOverrides: overrides, Externals: externals}, monitor, d.Gossip, d.Clients, stats, d.Clock, d.Log, d.Metrics, d.AgentKey)
+		PeerOverrides: overrides, Externals: externals, Exclude: c.Routing.Exclude}, monitor, d.Gossip, d.Clients, stats, d.Clock, d.Log, d.Metrics, d.AgentKey)
 
 	retry := -1 // every eligible mesh upstream, then the externals
 	if c.Routing.RetryBudget != nil {

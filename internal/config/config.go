@@ -288,6 +288,7 @@ type Routing struct {
 	PendingTTL             time.Duration `yaml:"pending_ttl"`
 	DrainTimeout           time.Duration `yaml:"drain_timeout"`
 	Breaker                Breaker       `yaml:"breaker"`
+	Exclude                []string      `yaml:"exclude"` // peer node ids and external names never routed to
 }
 
 type Breaker struct {
@@ -515,6 +516,20 @@ func (c *Config) Finish() error {
 			e.Tier = 100
 		}
 	}
+	exclude := make([]string, 0, len(c.Routing.Exclude))
+	excluded := map[string]bool{}
+	for _, id := range c.Routing.Exclude {
+		id = strings.TrimSpace(id)
+		switch {
+		case id == "" || excluded[id]:
+			continue
+		case id == c.Local.ID:
+			return fmt.Errorf("routing.exclude %q is this agent's own node (local.id)", id)
+		}
+		excluded[id] = true
+		exclude = append(exclude, id)
+	}
+	c.Routing.Exclude = exclude
 	if c.Routing.ReturnHysteresisRounds == 0 {
 		c.Routing.ReturnHysteresisRounds = 3
 	}

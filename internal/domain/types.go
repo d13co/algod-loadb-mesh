@@ -379,7 +379,10 @@ type Upstream struct {
 	LastRound uint64       `json:"last_round"`
 	Caps      Capabilities `json:"caps"`
 	Draining  bool         `json:"draining,omitempty"`
-	Stats     Stats        `json:"stats"`
+	// Excluded is set by routing.exclude: the upstream is shown and its
+	// round still counts, but no request is routed to it.
+	Excluded bool  `json:"excluded,omitempty"`
+	Stats    Stats `json:"stats"`
 	// Source says where the live facts come from: local, heartbeat, probe
 	// (agent silent, node answered directly), check (external health check)
 	// or none.

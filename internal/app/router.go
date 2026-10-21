@@ -394,20 +394,22 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
 }
 
-// anySimulateLimits reports whether any candidate advertises simulate limits.
+// anySimulateLimits reports whether any candidate that is not excluded
+// advertises simulate limits.
 func anySimulateLimits(us []domain.Upstream) bool {
 	for _, u := range us {
-		if u.Caps.Simulate != nil {
+		if u.Caps.Simulate != nil && !u.Excluded {
 			return true
 		}
 	}
 	return false
 }
 
-// anyTimeTravel reports whether any candidate advertises the history.
+// anyTimeTravel reports whether any candidate that is not excluded
+// advertises the history.
 func anyTimeTravel(us []domain.Upstream) bool {
 	for _, u := range us {
-		if u.Caps.TimeTravel {
+		if u.Caps.TimeTravel && !u.Excluded {
 			return true
 		}
 	}
