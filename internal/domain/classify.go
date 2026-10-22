@@ -66,7 +66,17 @@ type RequestClass struct {
 	// SimulateLimits marks GET /v2/transactions/simulate/limits, which the
 	// router answers for the fleet (dtalgorand).
 	SimulateLimits bool
+	// Versions marks an object history page (.../versions).
+	Versions bool
+	// Deltas marks GET /v2/deltas/{round}, which a time-travel node
+	// re-evaluates from its history for a round past its lookback.
+	Deltas bool
 }
+
+// Heavy reports whether the request can keep a node busy for long: a
+// simulation or a state delta. dtalgorand answers these with 503 and
+// Retry-After when its slots for them are full.
+func (c RequestClass) Heavy() bool { return c.Simulate || c.Deltas }
 
 // SimulateNeeds is what a simulate request needs of the node that runs it.
 // It is the router's preference, not algod's rule: when no node fits, the
@@ -91,6 +101,10 @@ type SimulateNeeds struct {
 	// its own last round: the node must be in sync, even though it holds
 	// the past rounds the list names too.
 	Latest bool
+	// ExecTrace marks exec-trace-config, and UnnamedResources
+	// allow-unnamed-resources: options a rate-limit plan may deny.
+	ExecTrace        bool
+	UnnamedResources bool
 }
 
 // Fits reports whether a node with capabilities c accepts the request.
@@ -115,6 +129,7 @@ type SimulateBody struct {
 	ExecTraceConfig   struct {
 		Enable bool `codec:"enable" json:"enable"`
 	} `codec:"exec-trace-config" json:"exec-trace-config"`
+	AllowUnnamedResources bool   `codec:"allow-unnamed-resources" json:"allow-unnamed-resources"`
 	ParallelGroups        bool   `codec:"parallel-groups" json:"parallel-groups"`
 	SkipValidityWindow    bool   `codec:"skip-validity-window" json:"skip-validity-window"`
 	RewriteValidityWindow bool   `codec:"rewrite-validity-window" json:"rewrite-validity-window"`
@@ -133,7 +148,8 @@ const protocolFuture = "future"
 func (c *RequestClass) ApplySimulate(b SimulateBody) {
 	n := SimulateNeeds{Groups: len(b.TxnGroups), Rounds: len(b.Rounds),
 		Fork:         b.ParallelGroups || b.SkipValidityWindow || b.RewriteValidityWindow || b.Protocol != "",
-		DeveloperAPI: b.ExecTraceConfig.Enable || b.Protocol == protocolFuture}
+		DeveloperAPI: b.ExecTraceConfig.Enable || b.Protocol == protocolFuture,
+		ExecTrace:    b.ExecTraceConfig.Enable, UnnamedResources: b.AllowUnnamedResources}
 	if b.ExtraOpcodeBudget > 0 {
 		n.ExtraOpcodeBudget = uint64(b.ExtraOpcodeBudget)
 	}
@@ -216,6 +232,12 @@ func (c RequestClass) String() string {
 	}
 	if c.TimeTravel {
 		parts = append(parts, "time_travel")
+	}
+	if c.Versions {
+		parts = append(parts, "versions")
+	}
+	if c.Deltas {
+		parts = append(parts, "deltas")
 	}
 	if c.Round != nil {
 		switch c.RoundWindow {
@@ -320,6 +342,7 @@ func Classify(method, path, rawQuery string) RequestClass {
 	// registered only when the node has EnableTimeTravel.
 	if seg(len(segs)-1) == "versions" {
 		c.TimeTravel = true
+		c.Versions = true
 		return c
 	}
 	switch seg(1) {
@@ -344,6 +367,7 @@ func Classify(method, path, rawQuery string) RequestClass {
 				// lookback; a time-travel node re-evaluates one whose block
 				// is still stored, so it stays on the block window.
 				c.RoundWindow = WindowDelta
+				c.Deltas = method == "GET"
 			}
 		}
 		if seg(1) == "blocks" && q.Get("header-only") == "true" {

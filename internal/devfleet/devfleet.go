@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"time"
 
@@ -59,6 +60,7 @@ type Options struct {
 	PathTimeout       time.Duration
 	Nets              int // gossip nets every agent is on by default; net 0 is "mem:<id>"; default 1
 	RegistryRefresh   time.Duration
+	RateLimit         config.RateLimit // every agent's ratelimit section
 	Log               ports.Logger
 	Timing            Timing
 }
@@ -161,6 +163,11 @@ func Start(ctx context.Context, o Options) (*Fleet, error) {
 		cfg.Routing.UpstreamTimeout = 10 * time.Second
 		cfg.Routing.Breaker.OpenFor = 2 * time.Second
 		cfg.Tiers.External = o.Externals
+		cfg.RateLimit = o.RateLimit
+		cfg.RateLimit.Tokens = slices.Clone(o.RateLimit.Tokens)
+		if f := o.RateLimit.StateFile; f != "" && len(specs) > 1 {
+			cfg.RateLimit.StateFile = f + "." + spec.ID // one file per agent
+		}
 		if err := cfg.Finish(); err != nil {
 			f.Close()
 			return nil, err

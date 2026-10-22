@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +62,8 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
-			if f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode] {
+			out.RetryAfter = retryAfter(resp.Header.Get("Retry-After"))
+			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
 				resp.Body.Close()
 				return upstreamRejected{resp.StatusCode}
 			}
@@ -86,6 +88,16 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		}
 	}
 	return out
+}
+
+// retryAfter reads a Retry-After in seconds; the HTTP-date form, which algod
+// does not send, reads as none.
+func retryAfter(v string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
 }
 
 // IsTimeout reports whether the outcome was a client/context timeout rather

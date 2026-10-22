@@ -68,7 +68,7 @@ func New(d Deps) (*Agent, error) {
 		Window: 50, Alpha: 0.2}, d.Clock)
 
 	balancer := c.Balancer()
-	monitor := app.NewMonitor(app.MonitorOptions{NodeID: c.Local.ID,
+	monitor := app.NewMonitor(app.MonitorOptions{NodeID: c.Local.ID, UpstreamTimeout: c.Routing.UpstreamTimeout,
 		VerifyInterval: c.Local.VerifyInterval, Overrides: c.Local.Overrides, Absent: balancer, Network: c.Local.Network},
 		d.Algod, d.ConfigReader, d.Clock, d.Log, d.Metrics)
 
@@ -92,7 +92,8 @@ func New(d Deps) (*Agent, error) {
 	}
 	router := app.NewRouter(app.RouterOptions{Mode: mode, Balancer: balancer, ClientToken: c.ClientToken, AdminToken: c.AdminToken, SyncTolerance: c.Routing.SyncTolerance,
 		UpstreamTimeout: c.Routing.UpstreamTimeout, WaitTimeout: c.Local.WaitTimeout, PendingTTL: c.Routing.PendingTTL,
-		RequestTimeout: c.Routing.RequestTimeout, RetryBudget: retry, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version},
+		RequestTimeout: c.Routing.RequestTimeout, RetryBudget: retry, MultiBroadcast: c.Routing.MultiBroadcast, Version: Version,
+		RateLimit: limiterOptions(c.RateLimit)},
 		dir, monitor, d.Forwarder, d.HTTPClient, stats, d.Clock, d.Log, d.Metrics, d.Rand, d.MetricsText)
 	if d.loopback != nil {
 		d.loopback.h = router
@@ -119,18 +120,48 @@ func New(d Deps) (*Agent, error) {
 	return &Agent{Monitor: monitor, Directory: dir, Router: router, Registry: reg, Handler: router, deps: d}, nil
 }
 
+// limiterOptions turns the ratelimit section into the router's; nil when
+// rate limits are off.
+func limiterOptions(r config.RateLimit) *app.LimiterOptions {
+	if !r.Enabled {
+		return nil
+	}
+	o := &app.LimiterOptions{Plans: map[string]domain.Plan{}, Weights: r.Weights, SimulatePerSecond: *r.SimulatePerSecond,
+		AnonymousPlan: *r.AnonymousPlan, TrustedProxies: r.TrustedPrefixes(), IPv6Prefix: r.IPv6Prefix, MaxKeys: r.MaxKeys,
+		StateFile: r.StateFile}
+	for name, p := range r.Plans {
+		o.Plans[name] = domain.Plan{
+			Minute: domain.Window{Capacity: p.PerMinute, Period: time.Minute},
+			Day:    domain.Window{Capacity: p.PerDay, Period: 24 * time.Hour},
+			Simulate: domain.SimulateCaps{MaxGroups: p.Simulate.MaxGroups, MaxRounds: p.Simulate.MaxRounds,
+				MaxExtraOpcodeBudget: p.Simulate.MaxExtraOpcodeBudget,
+				DenyUnnamedResources: p.Simulate.UnnamedResources != nil && !*p.Simulate.UnnamedResources,
+				DenyExecTrace:        p.Simulate.ExecTrace != nil && !*p.Simulate.ExecTrace},
+		}
+	}
+	for _, t := range r.Tokens {
+		o.Tokens = append(o.Tokens, app.LimitToken{Name: t.Name, Token: t.Token, Plan: t.Plan})
+	}
+	return o
+}
+
 // Run starts every service and blocks until ctx is done or one fails.
 func (a *Agent) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errc := make(chan error, 3)
-	go func() { errc <- a.Monitor.Run(ctx) }()
-	go func() { errc <- a.Directory.Run(ctx) }()
-	go func() { errc <- a.Registry.Run(ctx) }()
+	services := []func(context.Context) error{a.Monitor.Run, a.Directory.Run, a.Registry.Run}
+	if l := a.Router.Limiter(); l != nil {
+		services = append(services, l.Run)
+	}
+	errc := make(chan error, len(services))
+	for _, run := range services {
+		go func() { errc <- run(ctx) }()
+	}
 	err := <-errc
 	cancel()
-	<-errc
-	<-errc
+	for range services[1:] {
+		<-errc
+	}
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
@@ -186,6 +217,9 @@ func (a *Agent) Serve(ctx context.Context) error {
 	defer cancel()
 	// Shutdown closes every listener Serve was given.
 	err = srv.Shutdown(dctx)
+	if l := a.Router.Limiter(); l != nil {
+		l.Save() // the drained requests are billed too
+	}
 	if ps != nil {
 		_ = ps.Shutdown(dctx) // always nil; cut connections are logged
 	}

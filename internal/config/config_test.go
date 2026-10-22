@@ -304,3 +304,71 @@ func TestPassthrough(t *testing.T) {
 		t.Fatalf("warnings: %v", w)
 	}
 }
+
+func TestRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	tokFile := filepath.Join(dir, "acme")
+	if err := os.WriteFile(tokFile, []byte("acme-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const base = "local: {id: a, data_dir: /x}\nregistry: {type: memory, auto_register: false}\n"
+	c, err := load(t, base+`ratelimit:
+  enabled: true
+  trusted_proxies: [127.0.0.1, 10.0.0.0/8]
+  weights: {simulate: 7}
+  plans:
+    free: {per_minute: 300, per_day: 50000, simulate: {max_groups: 1, exec_trace: false}}
+    pro: {per_minute: 6000}
+  tokens:
+    - {name: acme, plan: pro, token_file: `+tokFile+`}
+    - {name: beta, plan: free, token: beta-secret}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.RateLimit
+	if *r.AnonymousPlan != "free" || *r.SimulatePerSecond != 20 || r.IPv6Prefix != 64 || r.MaxKeys != 200000 {
+		t.Fatalf("defaults: %+v", r)
+	}
+	if r.Weights["simulate"] != 7 || r.Weights["default"] != 1 || r.Weights["deltas_history"] != 50 {
+		t.Fatalf("weights: %v", r.Weights)
+	}
+	if r.Tokens[0].Token != "acme-secret" || len(r.TrustedPrefixes()) != 2 {
+		t.Fatalf("tokens %+v, proxies %v", r.Tokens, r.TrustedPrefixes())
+	}
+	// The agent finishes the loaded config again.
+	if err := c.Finish(); err != nil || c.RateLimit.Tokens[0].Token != "acme-secret" {
+		t.Fatalf("second Finish: %v, %+v", err, c.RateLimit.Tokens)
+	}
+	if p := r.Plans["free"].Simulate; p.ExecTrace == nil || *p.ExecTrace || p.UnnamedResources != nil {
+		t.Fatalf("simulate caps: %+v", p)
+	}
+	// Without a plan named free, no anonymous plan unless one is named.
+	c, err = load(t, base+"ratelimit: {enabled: true, plans: {pro: {}}}\n")
+	if err != nil || *c.RateLimit.AnonymousPlan != "" {
+		t.Fatalf("no free plan: %v %q", err, *c.RateLimit.AnonymousPlan)
+	}
+	// Off, nothing is checked.
+	if _, err := load(t, base+"client_token: x\nratelimit: {enabled: false, weights: {nope: 1}}\n"); err != nil {
+		t.Fatalf("disabled: %v", err)
+	}
+	for _, tc := range []struct{ yaml, want string }{
+		{"client_token: x\nratelimit: {enabled: true, plans: {free: {}}}\n", "client_token"},
+		{"ratelimit: {enabled: true}\n", "at least one plan"},
+		{"ratelimit: {enabled: true, plans: {free: {per_minute: -1}}}\n", "negative"},
+		{"ratelimit: {enabled: true, weights: {nope: 1}, plans: {free: {}}}\n", "weights.nope"},
+		{"ratelimit: {enabled: true, anonymous_plan: gold, plans: {free: {}}}\n", "gold"},
+		{"ratelimit: {enabled: true, trusted_proxies: [not-an-ip], plans: {free: {}}}\n", "trusted_proxies"},
+		{"ratelimit: {enabled: true, ipv6_prefix: 129, plans: {free: {}}}\n", "ipv6_prefix"},
+		{"ratelimit: {enabled: true, plans: {free: {}}, tokens: [{name: a, plan: gold, token: t}]}\n", "no such plan"},
+		{"ratelimit: {enabled: true, plans: {free: {}}, tokens: [{name: a, plan: free}]}\n", "one of token"},
+		{"ratelimit: {enabled: true, plans: {free: {}}, tokens: [{name: a, plan: free, token: x, token_file: " + tokFile + "}]}\n", "one of token"},
+		{"ratelimit: {enabled: true, plans: {free: {}}, tokens: [{name: a, plan: free, token: t}, {name: a, plan: free, token: u}]}\n", "twice"},
+		{"ratelimit: {enabled: true, plans: {free: {}}, tokens: [{name: a, plan: free, token: t}, {name: b, plan: free, token: t}]}\n", "same token"},
+		{"admin_token: t\nratelimit: {enabled: true, plans: {free: {}}, tokens: [{name: a, plan: free, token: t}]}\n", "admin token"},
+	} {
+		if _, err := load(t, base+tc.yaml); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error about %q", tc.yaml, err, tc.want)
+		}
+	}
+}

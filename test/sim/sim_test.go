@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"encoding/json"
 	"github.com/d13co/algod-loadb-mesh/internal/agent"
@@ -840,4 +841,56 @@ func TestMixedTopology(t *testing.T) {
 			t.Fatalf("C reaches %s via %s, not %s", l.Peer, want, l.Path)
 		}
 	}
+}
+
+// Rate limits on a running agent: anonymous clients by address, listed
+// tokens by plan, other tokens refused, the admin token unlimited; a
+// simulation that outruns its client's allowance is cancelled on the node;
+// the allowances are saved on shutdown.
+func TestRateLimits(t *testing.T) {
+	adminToken = "admin"
+	t.Cleanup(func() { adminToken = "" })
+	state := filepath.Join(t.TempDir(), "ratelimit.json")
+	perSecond := 40000.0
+	f := start(t, devfleet.Options{Nodes: threeNodes()[:1], Mode: "fallback", AdminToken: "admin",
+		RateLimit: config.RateLimit{Enabled: true, StateFile: state, SimulatePerSecond: &perSecond,
+			Plans:  map[string]config.RatePlan{"free": {PerMinute: 1000}, "pro": {PerMinute: 3}},
+			Tokens: []config.RateToken{{Name: "acme", Token: "acme-token", Plan: "pro"}}}})
+	u := f.Servers[0].URL
+	r := call(t, "GET", u+"/v2/status", "", "")
+	if r.code != 200 || r.header.Get("RateLimit-Policy") != `"minute";q=1000;w=60` || r.header.Get("X-Algod-Loadb-Mesh-Cost") != "1" {
+		t.Fatalf("anonymous: %d, policy %q, cost %q", r.code, r.header.Get("RateLimit-Policy"), r.header.Get("X-Algod-Loadb-Mesh-Cost"))
+	}
+	for range 3 {
+		if r := call(t, "GET", u+"/v2/status", "acme-token", ""); r.code != 200 {
+			t.Fatalf("token: %d", r.code)
+		}
+	}
+	if r := call(t, "GET", u+"/v2/status", "acme-token", ""); r.code != 429 || r.header.Get("Retry-After") == "" {
+		t.Fatalf("token past its plan: %d %s", r.code, r.body)
+	}
+	if r := call(t, "GET", u+"/v2/status", "nope", ""); r.code != 401 {
+		t.Fatalf("unknown token: %d", r.code)
+	}
+	if r := call(t, "GET", u+"/v2/status", "admin", ""); r.code != 200 || r.header.Get("RateLimit") != "" {
+		t.Fatalf("admin: %d, RateLimit %q", r.code, r.header.Get("RateLimit"))
+	}
+	// 40000 credits a second overdraw the 999 left within a tick, leaving a
+	// debt that takes minutes to refill.
+	node := f.Nodes[0]
+	node.SetSimulate(10*time.Second, 0, 0)
+	start := time.Now()
+	r = call(t, "POST", u+"/v2/transactions/simulate", "", `{"txn-groups":[{"txns":[]}]}`)
+	if r.code != 429 || time.Since(start) > 3*time.Second {
+		t.Fatalf("simulation past the allowance: %d after %s: %s", r.code, time.Since(start), r.body)
+	}
+	waitFor(t, 3*time.Second, "node sees the simulation cancelled", func() bool { return node.SimulatesCancelled() == 1 })
+	if r := call(t, "GET", u+"/v2/status", "", ""); r.code != 429 {
+		t.Fatalf("after the debt: %d", r.code)
+	}
+	f.Close()
+	waitFor(t, 3*time.Second, "allowances saved", func() bool {
+		b, err := os.ReadFile(state)
+		return err == nil && strings.Contains(string(b), `"token:acme"`) && strings.Contains(string(b), `"ip:127.0.0.1"`)
+	})
 }

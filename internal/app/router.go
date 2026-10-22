@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,9 @@ type RouterOptions struct {
 	MultiBroadcast  bool
 	Weights         domain.Weights
 	Version         string
+	// RateLimit limits each client's requests; nil serves every client
+	// that presents the client token (or none, when none is configured).
+	RateLimit *LimiterOptions
 }
 
 func (o *RouterOptions) defaults() {
@@ -75,6 +79,7 @@ type Router struct {
 	metric  ports.Metrics
 	rnd     domain.Rand
 	metrics io.WriterTo // Prometheus text, may be nil
+	limiter *Limiter    // nil without rate limits
 
 	inflight    atomic.Int64
 	draining    atomic.Bool
@@ -107,9 +112,17 @@ func NewRouter(o RouterOptions, dir *Directory, monitor *Monitor, fwd ports.Forw
 	if httpc == nil {
 		httpc = &http.Client{Timeout: o.UpstreamTimeout}
 	}
-	return &Router{opts: o, dir: dir, monitor: monitor, fwd: fwd, httpc: httpc, stats: stats, clock: clock,
+	r := &Router{opts: o, dir: dir, monitor: monitor, fwd: fwd, httpc: httpc, stats: stats, clock: clock,
 		log: log, metric: metric, rnd: rnd, metrics: metricsText, pins: newTxnPins(o.PendingTTL, clock.Now()), started: clock.Now()}
+	if o.RateLimit != nil {
+		r.limiter = NewLimiter(*o.RateLimit, clock, log, metric)
+	}
+	return r
 }
+
+// Limiter is the rate limiter, nil without rate limits. The composition root
+// runs it.
+func (r *Router) Limiter() *Limiter { return r.limiter }
 
 // PassthroughStatus is the algod pass-through as /loadb/status shows it:
 // the addresses bound for algod, the configured ones algod already covered,
@@ -204,6 +217,12 @@ func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.Req
 	if up := w.Header().Get("X-Algod-Loadb-Mesh-Upstream"); up != "" {
 		kv = append(kv, "upstream", up)
 	}
+	if w.client != "" {
+		kv = append(kv, "client", w.client)
+	}
+	if cost := w.Header().Get(costHeader); cost != "" {
+		kv = append(kv, "cost", cost)
+	}
 	if !class.Agent {
 		kv = append(kv, "class", class.String())
 	}
@@ -219,24 +238,34 @@ func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.Req
 
 // authorize checks X-Algo-API-Token and answers 401/403 itself when the
 // request may not proceed. /loadb/health is open; the rest of /loadb/* needs
-// the admin token; everything else needs the client or the admin token. With
-// neither token configured, auth is off.
-func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domain.RequestClass) bool {
+// the admin token. Everything else needs the admin token, or, with rate
+// limits, a configured token or none (the anonymous plan), or else the client
+// token. With no token configured at all, auth is off. It returns who the
+// request is billed to: nobody (Exempt) unless a rate limit applies.
+func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domain.RequestClass) (Identity, bool) {
 	tok := req.Header.Get("X-Algo-API-Token")
 	admin := r.opts.AdminToken != "" && tokenEqual(tok, r.opts.AdminToken)
+	exempt := Identity{Exempt: true}
 	switch {
-	case admin, isHealth(req, class), r.opts.AdminToken == "" && r.opts.ClientToken == "":
-		return true
+	case admin, isHealth(req, class):
+		return exempt, true
+	case class.Agent && r.opts.AdminToken == "" && r.opts.ClientToken == "" && r.limiter == nil:
+		return exempt, true // auth is off; a rate-limited endpoint is public, so /loadb never is
 	case class.Agent && r.opts.AdminToken == "":
 		r.metric.Inc("loadb_requests_unauthorized")
 		writeMessage(w, 403, "algod-loadb-mesh: /loadb endpoints need an admin token, and none is configured")
-		return false
-	case !class.Agent && (r.opts.ClientToken == "" || tokenEqual(tok, r.opts.ClientToken)):
-		return true
+		return Identity{}, false
+	case class.Agent:
+	case r.limiter != nil:
+		if id, ok := r.limiter.Identify(req, tok); ok {
+			return id, true
+		}
+	case r.opts.ClientToken == "" || tokenEqual(tok, r.opts.ClientToken):
+		return exempt, true
 	}
 	r.metric.Inc("loadb_requests_unauthorized")
 	writeMessage(w, 401, "Invalid API Token")
-	return false
+	return Identity{}, false
 }
 
 func tokenEqual(got, want string) bool {
@@ -269,7 +298,8 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		preflight(w, req)
 		return
 	}
-	if !r.authorize(w, req, class) {
+	id, ok := r.authorize(w, req, class)
+	if !ok {
 		return
 	}
 	if class.Agent {
@@ -277,6 +307,19 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		return
 	}
 	cands, best := r.dir.Snapshot()
+	var ticket *Ticket
+	if !id.Exempt {
+		t, denial := r.limiter.Admit(id, class, best)
+		if denial != nil {
+			denial.Write(w)
+			return
+		}
+		ticket = t
+		defer ticket.Done()
+		if sw, ok := w.(*statusWriter); ok {
+			sw.onHeader, sw.client = ticket.Responding, id.Key
+		}
+	}
 	w.Header().Set("X-Algod-Loadb-Mesh-Mode", string(r.opts.Mode))
 	if class.SimulateLimits {
 		if lim, ok := domain.FleetSimulateLimits(cands, best, r.opts.SyncTolerance); ok {
@@ -298,6 +341,15 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	}
 	ctx, cancel := r.requestCtx(req)
 	defer cancel()
+	if ticket != nil && class.Simulate {
+		// The limiter cancels the simulation once its client's allowance
+		// runs out; forwardSelected tells that cause apart.
+		var cancelCause context.CancelCauseFunc
+		ctx, cancelCause = context.WithCancelCause(ctx)
+		defer cancelCause(nil)
+		ctx = context.WithValue(ctx, ticketKey{}, ticket)
+		ticket.Track(cancelCause)
+	}
 	switch {
 	case class.Broadcast:
 		r.handleBroadcast(ctx, w, req, class, cands, best)
@@ -328,6 +380,21 @@ func preflight(w http.ResponseWriter, req *http.Request) {
 // from the request's deadline.
 func (r *Router) requestCtx(req *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(req.Context(), r.opts.RequestTimeout)
+}
+
+// ticketKey carries a metered request's Ticket in its context.
+type ticketKey struct{}
+
+// quotaExceeded reports whether the limiter cancelled the request.
+func quotaExceeded(ctx context.Context) bool { return errors.Is(context.Cause(ctx), errQuotaExceeded) }
+
+// answerQuotaExceeded tells the client its simulation was cut short.
+func answerQuotaExceeded(ctx context.Context, w http.ResponseWriter) {
+	if t, ok := ctx.Value(ticketKey{}).(*Ticket); ok {
+		t.Exhausted().Write(w)
+		return
+	}
+	writeMessage(w, http.StatusTooManyRequests, "algod-loadb-mesh: rate limit exceeded")
 }
 
 func (r *Router) sel(cands []domain.Upstream, class domain.RequestClass, best uint64) (domain.Selection, bool) {
@@ -365,15 +432,39 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
-	out := r.fwd.Forward(w, req.WithContext(ctx), ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry})
+	target := ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry}
+	timeLimited := class.Simulate || class.Deltas || class.Versions
+	if timeLimited {
+		target.PassStatus = timeLimitPass
+	}
+	out := r.fwd.Forward(w, req.WithContext(ctx), target)
 	release()
-	if req.Context().Err() == nil { // client still there: the outcome is about the upstream
+	switch {
+	case req.Context().Err() != nil, quotaExceeded(ctx):
+		// The client left, or its allowance ran out: nothing about the upstream.
+	case timeLimited && out.Status == http.StatusGatewayTimeout:
+		// dtalgorand's time limit on one request, not a failing node.
+	case class.Heavy() && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
+		// dtalgorand's slots for heavy requests are full: send them elsewhere
+		// for a while, and the rest as before.
+		r.stats.Busy(u.ID, min(out.RetryAfter, maxBusy))
+		r.metric.Inc("loadb_upstream_busy", "upstream", u.ID, "class", class.StatKey())
+	default:
 		r.stats.Record(u.ID, class.StatKey(), out)
 	}
 	r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
 	r.metric.Observe("loadb_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
 	return out
 }
+
+// timeLimitPass lets dtalgorand's 504 for a simulation, history page or
+// state delta past its time limit through to the client: the next node would
+// only run it as long.
+var timeLimitPass = map[int]bool{http.StatusGatewayTimeout: true}
+
+// maxBusy bounds how long a busy node is passed over for heavy requests,
+// whatever its Retry-After says.
+const maxBusy = 10 * time.Second
 
 func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	r.metric.Inc("loadb_requests_unroutable", "class", class.StatKey())
@@ -391,6 +482,11 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 		writeMessage(w, 503, "algod-loadb-mesh: this request needs a time-travel node and the fleet has none")
 		return
 	}
+	if class.Heavy() && anyBusy(cands) {
+		w.Header().Set("Retry-After", "1")
+		writeMessage(w, 503, "algod-loadb-mesh: every node able to serve this request is busy")
+		return
+	}
 	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
 }
 
@@ -398,6 +494,16 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 func anySimulateLimits(us []domain.Upstream) bool {
 	for _, u := range us {
 		if u.Caps.Simulate != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// anyBusy reports whether any candidate is busy with heavy requests.
+func anyBusy(us []domain.Upstream) bool {
+	for _, u := range us {
+		if u.Stats.Busy {
 			return true
 		}
 	}
@@ -436,6 +542,10 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 				break
 			}
 		}
+	}
+	if !ok && quotaExceeded(ctx) { // cancelled while selecting
+		answerQuotaExceeded(ctx, w)
+		return
 	}
 	if !ok {
 		// No reachable node has the round yet: answer as algod does. best
@@ -529,10 +639,14 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 		if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 			return
 		}
+		if quotaExceeded(ctx) {
+			answerQuotaExceeded(ctx, w)
+			return
+		}
 		if class.Simulate && errors.Is(last.Err, context.DeadlineExceeded) {
 			// A simulation that ran out of time would only run as long on
 			// the next node, for nothing: the client gets the timeout.
-			r.answerFailure(w, req, last)
+			r.answerFailure(w, req, class, last)
 			return
 		}
 	}
@@ -545,9 +659,17 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 			if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 				return
 			}
+			if quotaExceeded(ctx) {
+				answerQuotaExceeded(ctx, w)
+				return
+			}
 		}
 	}
-	r.answerFailure(w, req, last)
+	if quotaExceeded(ctx) { // between attempts
+		answerQuotaExceeded(ctx, w)
+		return
+	}
+	r.answerFailure(w, req, class, last)
 }
 
 // externalFallback is the last resort once every upstream tried has failed
@@ -578,7 +700,7 @@ func (r *Router) externalFallback(ctx context.Context, class domain.RequestClass
 	return sel.Chosen, ok
 }
 
-func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out ports.Outcome) {
+func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class domain.RequestClass, out ports.Outcome) {
 	if out.HeadersSent {
 		return
 	}
@@ -587,6 +709,9 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, out por
 		return
 	case out.Err != nil && errors.Is(out.Err, context.DeadlineExceeded):
 		writeMessage(w, 504, "algod-loadb-mesh: upstream timeout")
+	case class.Heavy() && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
+		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(out.RetryAfter), 10))
+		writeMessage(w, 503, "algod-loadb-mesh: every node able to serve this request is busy")
 	case out.Status >= 500 || out.Status == 429:
 		writeMessage(w, 502, fmt.Sprintf("algod-loadb-mesh: upstream answered %d", out.Status))
 	default:
@@ -1147,6 +1272,19 @@ type statusWriter struct {
 	origin bool // the request carried an Origin
 	status int
 	bytes  int64
+	// onHeader runs once, as the final headers go out: the rate limiter
+	// stops a simulation's meter and adds its headers.
+	onHeader func(http.Header)
+	client   string // who the rate limiter billed, for the log
+}
+
+// begin runs as the final status is set.
+func (s *statusWriter) begin(code int) {
+	s.status = code
+	if s.onHeader != nil {
+		s.onHeader(s.Header())
+	}
+	s.cors()
 }
 
 // cors runs as the final headers go out, after any upstream's were copied
@@ -1164,16 +1302,14 @@ func (s *statusWriter) cors() {
 
 func (s *statusWriter) WriteHeader(code int) {
 	if s.status == 0 && code >= 200 {
-		s.status = code
-		s.cors()
+		s.begin(code)
 	}
 	s.ResponseWriter.WriteHeader(code)
 }
 
 func (s *statusWriter) Write(b []byte) (int, error) {
 	if s.status == 0 {
-		s.status = http.StatusOK
-		s.cors()
+		s.begin(http.StatusOK)
 	}
 	n, err := s.ResponseWriter.Write(b)
 	s.bytes += int64(n)

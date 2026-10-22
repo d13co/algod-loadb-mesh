@@ -20,6 +20,7 @@ Point your apps, indexers and bots at the agent instead of at algod. They keep u
 - [Set up a fleet](#set-up-a-fleet)
 - [Connection model](#connection-model)
 - [How a request is routed](#how-a-request-is-routed)
+- [Rate limits](#rate-limits)
 - [Example layouts](#example-layouts)
 - [Strengths and weaknesses](#strengths-and-weaknesses)
 - [Operating it](#operating-it)
@@ -285,6 +286,43 @@ The router answers `GET /v2/transactions/simulate/limits` itself for the fleet, 
 The answer is about request size and features, not rounds. With `time-travel` false it does not say which past rounds the node's window holds, and a `rounds` list whose latest round is the fleet's newest can miss a node lagging within `routing.sync_tolerance`. Because one node is reported, a smaller node's feature can be left out: with node A at 16 groups and node B at 8 groups with time travel, the answer is A's, `time-travel` false, though B serves past rounds with up to 8 groups.
 
 Simulate requests have their own latency bucket (`class="simulate"` in metrics), so that a slow many-round simulation does not skew the scores of other requests.
+
+Two answers from dtalgorand get special handling. A 503 with `Retry-After` to a simulation or a state delta means the node's slots for them are full: the request goes to another node, and that node gets no simulations or deltas until `Retry-After` passes (10 seconds at most), while it keeps serving everything else. It does not count against the node's breaker. When every node is busy, the client gets the 503 with `Retry-After`. A 504 to a simulation, a history page (`/versions`) or a state delta means it ran past the node's time limit (`time-limit-seconds` in the limits). It goes to the client as it is, because the next node would only run it as long, and it does not count against the node either. The agent logs a warning when its node's time limit is not below `routing.upstream_timeout`: the agent would give up first, and the client would get the agent's 504 rather than the node's.
+
+## Rate limits
+
+With `ratelimit.enabled`, the agent limits each client by its own allowance. This suits a public endpoint, such as one entry agent or balancer in front of the fleet. Each agent counts only the requests it receives itself.
+
+**Who is limited.**
+- A request without a token is limited by its address under `ratelimit.anonymous_plan` (by default the plan named `free`). An IPv6 client is limited by its /64 prefix (`ipv6_prefix`).
+- A token listed in `ratelimit.tokens` is limited by its plan, from any address.
+- Any other token gets 401, so a mistyped paid token fails loudly instead of falling back to the free plan.
+- The admin token, `/loadb/health` and the agent's own registry reads are never limited.
+- `client_token` must be unset; the listed tokens take its place. `/loadb/*` (health excepted) then always needs the admin token: without one it answers 403, as the endpoint is public.
+- The access log names the client each request was billed to (`client`) and what it cost (`cost`).
+- Behind a reverse proxy, list the proxy in `trusted_proxies`. The client is then the last `X-Forwarded-For` address the trusted proxies did not add.
+
+**Credits.**
+- Each plan has two allowances: `per_minute` and `per_day` credits. Each refills steadily, so a client that stops is back to the full minute's allowance after a minute and to the full day's after 24 hours.
+- A request costs the `weights` of its kind: `default`, `round`, `timetravel` (state at a past round), `versions` (an object history page), `deltas_history` (a state delta re-evaluated from the history), `simulate`, `broadcast`, `pending`, `wait` and `teal`.
+- A simulation costs its weight once per transaction group and per round it asks for. It is charged up front, before anything is forwarded.
+- When either allowance cannot cover a request, the client gets 429 with `Retry-After`.
+- Every answer carries `RateLimit-Policy` and `RateLimit` (the IETF httpapi draft headers) for the plan's windows, and `X-Algod-Loadb-Mesh-Cost` with what the request cost.
+
+**Simulations.**
+- A plan's `simulate` caps bound what one request may ask for: `max_groups`, `max_rounds`, `max_extra_opcode_budget`, and whether `allow-unnamed-resources` and `exec-trace-config` are allowed. A request beyond them gets 403, as does one that costs more than a whole allowance, because waiting would not help.
+- While a simulation runs it also costs `simulate_per_second`. If that leaves the client's allowance below zero, every simulation the client has running is cancelled. The node sees the request end and stops (dtalgorand), and the client gets 429.
+- Once the node starts answering, its work is done: the meter stops and the request is no longer cancelled.
+- What a simulation ran up is billed in full, so an allowance can go into debt. The client then waits for it to refill.
+
+**Restarts.** With `state_file`, allowances that are not full are saved every minute and on shutdown, and loaded at start, so a restart or an unattended upgrade resets nobody's quota. Time spent down counts as refill. Without it, allowances are kept in memory only.
+
+**Metrics:**
+- `loadb_ratelimited{plan,class,reason}`, where `reason` is `minute`, `day` or `cap`;
+- `loadb_ratelimit_cancelled{plan}`;
+- `loadb_credits{plan,class}` (sum and count);
+- `loadb_ratelimit_keys`;
+- `loadb_upstream_busy{upstream,class}`.
 
 ## Example layouts
 

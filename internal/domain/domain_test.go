@@ -26,7 +26,7 @@ func TestClassify(t *testing.T) {
 		{method: "GET", path: "/v2/blocks/123/lightheader/proof", want: RequestClass{Round: u64(123), Ahead: tooHigh, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/transactions/TXID/proof", want: RequestClass{Round: u64(123),
 			Ahead: Reply{500, "failed to retrieve information from the ledger"}, Idempotent: true}},
-		{method: "GET", path: "/v2/deltas/55", want: RequestClass{Round: u64(55), Ahead: notFound, RoundWindow: WindowDelta, Idempotent: true}},
+		{method: "GET", path: "/v2/deltas/55", want: RequestClass{Round: u64(55), Ahead: notFound, RoundWindow: WindowDelta, Deltas: true, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/txids", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/lightheader", want: RequestClass{Round: u64(123), Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/transactions/TXID", want: RequestClass{Round: u64(123), Idempotent: true}},
@@ -60,11 +60,11 @@ func TestClassify(t *testing.T) {
 		// lookback, so a time-travel node merely extends its range.
 		{method: "GET", path: "/v2/applications/42/boxes", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, Idempotent: true}},
 		// Object histories are registered only with EnableTimeTravel.
-		{method: "GET", path: "/v2/accounts/ADDR/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/accounts/ADDR/assets/42/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/assets/42/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/applications/42/versions", want: RequestClass{TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/applications/42/box/versions", query: "name=str:k", want: RequestClass{TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/assets/42/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/assets/42/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/box/versions", query: "name=str:k", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 	}
 	for _, c := range cases {
 		got := Classify(c.method, c.path, c.query)

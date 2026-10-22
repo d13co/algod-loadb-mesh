@@ -115,8 +115,13 @@ type Target struct {
 	Token   string
 	// RetryStatus lists upstream statuses that must not be streamed to the
 	// client because the caller wants to try another upstream (e.g. 404 on
-	// a pending-transaction lookup). 502/503/504 are always in this set.
+	// a pending-transaction lookup). 502/503/504 are in this set unless
+	// PassStatus lists them.
 	RetryStatus map[int]bool
+	// PassStatus lists statuses streamed to the client even though they are
+	// otherwise withheld: dtalgorand's 504 for a simulation that ran out of
+	// time, which would run as long on the next node.
+	PassStatus map[int]bool
 }
 
 // Outcome is what happened when forwarding.
@@ -125,6 +130,7 @@ type Outcome struct {
 	Err         error         // transport or upstream-rejection error
 	HeadersSent bool          // true once anything reached the client
 	Duration    time.Duration // as measured by the forwarder
+	RetryAfter  time.Duration // the upstream's Retry-After, in seconds form; 0 when absent
 }
 
 // Failed is true when the outcome should count against the upstream.
