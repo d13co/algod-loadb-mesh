@@ -62,7 +62,8 @@ type Node struct {
 	simStatus     int
 	simRetryAfter int
 	simCancelled  int
-	pathStatus    map[string]int // requests for these paths answer this status
+	pathStatus    map[string]int    // requests for these paths answer this status
+	effort        map[string]string // answers for these paths carry this X-Algod-Effort
 	boxes         map[uint64]map[string][]byte
 	pool          map[string]poolTxn
 	hits          map[string]int
@@ -165,6 +166,18 @@ func (n *Node) SetPathStatus(path string, status int) {
 	n.pathStatus[path] = status
 }
 
+// SetEffort makes answers for path carry value as their X-Algod-Effort, as
+// dtalgorand's EnableEffortHeader does; "" removes it. A busy answer from
+// SetSimulate carries none, as on dtalgorand.
+func (n *Node) SetEffort(path, value string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.effort == nil {
+		n.effort = map[string]string{}
+	}
+	n.effort[path] = value
+}
+
 // SimulatesCancelled is how many simulations stopped because their client went.
 func (n *Node) SimulatesCancelled() int {
 	n.mu.Lock()
@@ -244,8 +257,11 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimSuffix(r.URL.Path, "/")
 	n.mu.Lock()
-	status := n.pathStatus[p]
+	status, effort := n.pathStatus[p], n.effort[p]
 	n.mu.Unlock()
+	if effort != "" {
+		w.Header().Set("X-Algod-Effort", effort)
+	}
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"message": fmt.Sprintf("fake node answers %d", status)})
 		return
@@ -400,6 +416,7 @@ func (n *Node) simulating(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.Header().Del("X-Algod-Effort") // busy: answered before any work
 	}
 	writeJSON(w, status, map[string]string{"message": fmt.Sprintf("fake simulate answers %d", status)})
 	return true

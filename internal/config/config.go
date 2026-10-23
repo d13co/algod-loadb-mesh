@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -47,8 +48,11 @@ type Config struct {
 // RateLimit limits each client in credits, per minute and per day. A request
 // costs its kind's weight; a simulation its weight per group and round, plus
 // simulate_per_second while it runs, and it is cancelled once the client's
-// allowance runs out. A client without a token is limited by address under
-// the anonymous plan; a listed token by its plan; any other token gets 401.
+// allowance runs out. When the node that answers reports the work it did
+// (dtalgorand's EnableEffortHeader), the request costs its weight plus that
+// work at the effort rates instead of its running time. A client without a
+// token is limited by address under the anonymous plan; a listed token by
+// its plan; any other token gets 401.
 type RateLimit struct {
 	Enabled        bool     `yaml:"enabled"`
 	StateFile      string   `yaml:"state_file"`      // the allowances survive restarts here; default: memory only
@@ -60,8 +64,25 @@ type RateLimit struct {
 	AnonymousPlan     *string             `yaml:"anonymous_plan"`
 	SimulatePerSecond *float64            `yaml:"simulate_per_second"` // default 20
 	Weights           map[string]float64  `yaml:"weights"`             // by cost key; unset keys keep their defaults
+	Effort            map[string]float64  `yaml:"effort"`              // units of reported work per credit, by EffortKeys; unset keys keep their defaults, 0 makes that work free
 	Plans             map[string]RatePlan `yaml:"plans"`
 	Tokens            []RateToken         `yaml:"tokens"`
+}
+
+// EffortKeys are the keys of ratelimit.effort.
+var EffortKeys = []string{"opcodes_per_credit", "lookups_per_credit", "history_per_credit", "scanned_per_credit", "trace_kb_per_credit"}
+
+// EffortRates is rates as a ratelimit.effort map.
+func EffortRates(r domain.EffortRates) map[string]float64 {
+	return map[string]float64{"opcodes_per_credit": r.OpcodesPerCredit, "lookups_per_credit": r.LookupsPerCredit,
+		"history_per_credit": r.HistoryPerCredit, "scanned_per_credit": r.ScannedPerCredit, "trace_kb_per_credit": r.TraceKBPerCredit}
+}
+
+// EffortRatesOf is the domain rates of a finished ratelimit.effort map.
+func (r RateLimit) EffortRatesOf() domain.EffortRates {
+	e := r.Effort
+	return domain.EffortRates{OpcodesPerCredit: e["opcodes_per_credit"], LookupsPerCredit: e["lookups_per_credit"],
+		HistoryPerCredit: e["history_per_credit"], ScannedPerCredit: e["scanned_per_credit"], TraceKBPerCredit: e["trace_kb_per_credit"]}
 }
 
 // RatePlan is one plan's allowance: credits per minute and per day, 0 for
@@ -131,8 +152,8 @@ func (r *RateLimit) finish(clientToken, adminToken string) error {
 		switch {
 		case name == "":
 			return errors.New("ratelimit.plans: a plan needs a name")
-		case p.PerMinute < 0 || p.PerDay < 0:
-			return fmt.Errorf("ratelimit.plans.%s: per_minute and per_day must not be negative", name)
+		case !nonNegative(p.PerMinute) || !nonNegative(p.PerDay):
+			return fmt.Errorf("ratelimit.plans.%s: per_minute and per_day must not be negative (0 is unlimited)", name)
 		case p.Simulate.MaxGroups < 0 || p.Simulate.MaxRounds < 0:
 			return fmt.Errorf("ratelimit.plans.%s.simulate: caps must not be negative", name)
 		}
@@ -145,17 +166,28 @@ func (r *RateLimit) finish(clientToken, adminToken string) error {
 		if _, ok := weights[k]; !ok {
 			return fmt.Errorf("ratelimit.weights.%s: unknown; want one of %s", k, strings.Join(domain.CostKeys, ", "))
 		}
-		if v < 0 {
-			return fmt.Errorf("ratelimit.weights.%s must not be negative", k)
+		if !nonNegative(v) {
+			return fmt.Errorf("ratelimit.weights.%s: want a number, 0 or more", k)
 		}
 		weights[k] = v
 	}
 	r.Weights = weights
+	effort := EffortRates(domain.DefaultEffortRates)
+	for k, v := range r.Effort {
+		if _, ok := effort[k]; !ok {
+			return fmt.Errorf("ratelimit.effort.%s: unknown; want one of %s", k, strings.Join(EffortKeys, ", "))
+		}
+		if !nonNegative(v) {
+			return fmt.Errorf("ratelimit.effort.%s: want a number, 0 or more", k)
+		}
+		effort[k] = v
+	}
+	r.Effort = effort
 	if r.SimulatePerSecond == nil {
 		v := 20.0
 		r.SimulatePerSecond = &v
 	}
-	if *r.SimulatePerSecond < 0 {
+	if !nonNegative(*r.SimulatePerSecond) {
 		return errors.New("ratelimit.simulate_per_second must not be negative")
 	}
 	if r.IPv6Prefix == 0 {
@@ -824,3 +856,7 @@ func (c *Config) KeyMaterial() ([]byte, error) {
 	sum := sha256.Sum256([]byte("algod-loadb-mesh-shared-secret:" + c.Mesh.SharedSecret))
 	return sum[:], nil
 }
+
+// nonNegative is whether v is a finite number, 0 or more: YAML reads .nan
+// and .inf, and either would make a bucket admit everything or nothing.
+func nonNegative(v float64) bool { return v >= 0 && !math.IsInf(v, 1) }

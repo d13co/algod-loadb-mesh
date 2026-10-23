@@ -315,12 +315,21 @@ With `ratelimit.enabled`, the agent limits each client by its own allowance. Thi
 - Once the node starts answering, its work is done: the meter stops and the request is no longer cancelled.
 - What a simulation ran up is billed in full, so an allowance can go into debt. The client then waits for it to refill.
 
+**Billing by the node's own figures.** With dtalgorand's `EnableEffortHeader`, the node reports the work it did for each simulation, history page, state delta and `?round=` read in `X-Algod-Effort`. Such a request costs its weight (for a simulation, already scaled by its groups and rounds) plus that work at the `effort` rates, in place of `simulate_per_second`. Then the same request costs the same on fast and slow hardware.
+- The rates are units of work per credit: `opcodes_per_credit`, `lookups_per_credit`, `history_per_credit` (reads that went to the time-travel store, on top of their lookup), `scanned_per_credit` (entries a history page or `?round=` list visited) and `trace_kb_per_credit`. 0 makes that work free.
+- The wall-time meter still runs while the node works, so a client that runs out is still cut off. Once the node answers, its figures replace the time.
+- Only mesh nodes are believed, other operators' included, so join a mesh only with operators you trust to report honestly; an external's header is dropped. A billed client gets the cost in credits, not the node's figures. The admin token sees them as the node sent them, which helps when setting the rates, and so does every client while `ratelimit` is off.
+- A node that does not send the header, or sends one missing any of `opcodes`, `lookups`, `history`, `scanned` and `trace-bytes`, is billed by time, as before; `loadb_effort_unreadable` counts the latter.
+- A busy answer (503 with `Retry-After`) for which no node reported any work costs no more than the `default` weight.
+
 **Restarts.** With `state_file`, allowances that are not full are saved every minute and on shutdown, and loaded at start, so a restart or an unattended upgrade resets nobody's quota. Time spent down counts as refill. Without it, allowances are kept in memory only.
 
 **Metrics:**
 - `loadb_ratelimited{plan,class,reason}`, where `reason` is `minute`, `day` or `cap`;
 - `loadb_ratelimit_cancelled{plan}`;
-- `loadb_credits{plan,class}` (sum and count);
+- `loadb_credits{plan,class,by}` (sum and count), where `by` is `effort`, `time` or `base`;
+- `loadb_ratelimit_refunded{plan,class}`, busy answers that cost only the `default` weight;
+- `loadb_effort_unreadable{upstream}`;
 - `loadb_ratelimit_keys`;
 - `loadb_upstream_busy{upstream,class}`.
 

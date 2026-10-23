@@ -108,3 +108,47 @@ func TestCostBase(t *testing.T) {
 		}
 	}
 }
+
+func TestParseEffort(t *testing.T) {
+	const rest = ", history=0, scanned=0, trace-bytes=0"
+	for _, tc := range []struct {
+		v    string
+		want Effort
+		ok   bool
+	}{
+		{"opcodes=184220, lookups=912, history=640, scanned=0, trace-bytes=0, eval-us=5310",
+			Effort{Opcodes: 184220, Lookups: 912, History: 640, EvalUS: 5310}, true},
+		{"trace-bytes=9,scanned=2,history=1,lookups=3,opcodes=7", Effort{7, 3, 1, 2, 9, 0}, true},         // order and spacing are free; eval-us may be left out
+		{"opcodes=7;x=1, future=?1, other=\"s\", lookups=1" + rest, Effort{Opcodes: 7, Lookups: 1}, true}, // parameters and unknown keys are ignored
+		{"", Effort{}, false},
+		{" , ", Effort{}, false},
+		{"foo=1", Effort{}, false}, // no billed keys
+		{"opcodes=7, lookups=3", Effort{}, false},
+		{"opcodes=-1, lookups=1" + rest, Effort{}, false},
+		{"opcodes=1.5, lookups=1" + rest, Effort{}, false},
+		{"opcodes, lookups=1" + rest, Effort{}, false},              // a boolean, not a count
+		{"opcodes;a=1, lookups=1" + rest, Effort{}, false},          // likewise with a parameter
+		{"opcodes=9, opcodes=0, lookups=1" + rest, Effort{}, false}, // a key twice
+		{"opcodes =5, lookups=1" + rest, Effort{}, false},
+		{"opcodes=abc, lookups=1" + rest, Effort{}, false},
+	} {
+		got, ok := ParseEffort(tc.v)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("%q: %+v %v, want %+v %v", tc.v, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestEffortCredits(t *testing.T) {
+	r := EffortRates{OpcodesPerCredit: 1000, LookupsPerCredit: 100, HistoryPerCredit: 10, ScannedPerCredit: 50, TraceKBPerCredit: 1}
+	e := Effort{Opcodes: 2000, Lookups: 200, History: 20, Scanned: 100, TraceBytes: 2048, EvalUS: 1 << 30}
+	if c := r.Credits(e); c != 2+2+2+2+2 {
+		t.Fatalf("credits %v, want 10 (eval-us is not billed)", c)
+	}
+	if c := (EffortRates{}).Credits(e); c != 0 {
+		t.Fatalf("no rates: %v", c)
+	}
+	if s := e.Add(e); s.Opcodes != 4000 || s.TraceBytes != 4096 {
+		t.Fatalf("add: %+v", s)
+	}
+}

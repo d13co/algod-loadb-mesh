@@ -341,13 +341,16 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	}
 	ctx, cancel := r.requestCtx(req)
 	defer cancel()
+	if ticket != nil {
+		// forward hands the ticket what the nodes report doing.
+		ctx = context.WithValue(ctx, ticketKey{}, ticket)
+	}
 	if ticket != nil && class.Simulate {
 		// The limiter cancels the simulation once its client's allowance
 		// runs out; forwardSelected tells that cause apart.
 		var cancelCause context.CancelCauseFunc
 		ctx, cancelCause = context.WithCancelCause(ctx)
 		defer cancelCause(nil)
-		ctx = context.WithValue(ctx, ticketKey{}, ticket)
 		ticket.Track(cancelCause)
 	}
 	switch {
@@ -382,7 +385,7 @@ func (r *Router) requestCtx(req *http.Request) (context.Context, context.CancelF
 	return context.WithTimeout(req.Context(), r.opts.RequestTimeout)
 }
 
-// ticketKey carries a metered request's Ticket in its context.
+// ticketKey carries a billed request's Ticket in its context.
 type ticketKey struct{}
 
 // quotaExceeded reports whether the limiter cancelled the request.
@@ -437,6 +440,9 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	if timeLimited {
 		target.PassStatus = timeLimitPass
 	}
+	if t, ok := ctx.Value(ticketKey{}).(*Ticket); ok {
+		target.OnResponse = r.effortReader(t, u)
+	}
 	out := r.fwd.Forward(w, req.WithContext(ctx), target)
 	release()
 	switch {
@@ -455,6 +461,31 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
 	r.metric.Observe("loadb_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
 	return out
+}
+
+// effortReader takes the work a node reports doing off its answer to a
+// billed client, and bills it to the client's ticket. Only mesh nodes are
+// believed: an external could bill clients anything. The client sees the
+// cost in credits, not the node's figures; an exempt client (the admin)
+// sees them as the node sent them.
+func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(int, http.Header) {
+	return func(_ int, h http.Header) {
+		vs := h.Values(domain.EffortHeader)
+		if len(vs) == 0 {
+			return
+		}
+		h.Del(domain.EffortHeader)
+		v := strings.Join(vs, ",") // RFC 9651: field lines join with commas
+		if u.Kind == domain.KindExternal {
+			return
+		}
+		e, ok := domain.ParseEffort(v)
+		if !ok {
+			r.metric.Inc("loadb_effort_unreadable", "upstream", u.ID)
+			return
+		}
+		t.Reported(e)
+	}
 }
 
 // timeLimitPass lets dtalgorand's 504 for a simulation, history page or
@@ -1126,7 +1157,8 @@ func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, tar
 func writeFan(w http.ResponseWriter, res fanResult) {
 	for k, vs := range res.resp.Header {
 		switch k {
-		case "Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "Trailer", "Upgrade":
+		case "Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "Trailer", "Upgrade",
+			domain.EffortHeader: // a node's figures are for billing, and broadcasts are not billed by them
 			continue
 		}
 		w.Header()[k] = vs
@@ -1274,7 +1306,7 @@ type statusWriter struct {
 	bytes  int64
 	// onHeader runs once, as the final headers go out: the rate limiter
 	// stops a simulation's meter and adds its headers.
-	onHeader func(http.Header)
+	onHeader func(int, http.Header)
 	client   string // who the rate limiter billed, for the log
 }
 
@@ -1282,10 +1314,14 @@ type statusWriter struct {
 func (s *statusWriter) begin(code int) {
 	s.status = code
 	if s.onHeader != nil {
-		s.onHeader(s.Header())
+		s.onHeader(code, s.Header())
 	}
 	s.cors()
 }
+
+// exposedHeaders are the mesh's own that a browser client may read: where
+// its answer came from, and what it cost and has left.
+const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", X-Algod-Loadb-Mesh-Upstream, X-Algod-Loadb-Mesh-Tier"
 
 // cors runs as the final headers go out, after any upstream's were copied
 // in: Set leaves one Access-Control-Allow-Origin where a proxied algod
@@ -1297,6 +1333,7 @@ func (s *statusWriter) cors() {
 	}
 	if s.origin {
 		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Expose-Headers", exposedHeaders)
 	}
 }
 

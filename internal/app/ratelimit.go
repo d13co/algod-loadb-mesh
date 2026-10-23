@@ -46,6 +46,10 @@ type LimiterOptions struct {
 	// SimulatePerSecond is what a simulation costs per second while it runs,
 	// on top of its base cost.
 	SimulatePerSecond float64
+	// Effort prices the work a mesh node reports (domain.EffortHeader). A
+	// request it reports for is billed base + that, in place of the
+	// running time; nil uses domain.DefaultEffortRates.
+	Effort *domain.EffortRates
 	// TrustedProxies are the peers whose X-Forwarded-For names the client.
 	TrustedProxies []netip.Prefix
 	IPv6Prefix     int    // anonymous IPv6 clients are keyed by this prefix; default 64
@@ -58,6 +62,10 @@ type LimiterOptions struct {
 func (o *LimiterOptions) defaults() {
 	if o.Weights == nil {
 		o.Weights = domain.DefaultCostWeights
+	}
+	if o.Effort == nil {
+		r := domain.DefaultEffortRates
+		o.Effort = &r
 	}
 	if o.IPv6Prefix == 0 {
 		o.IPv6Prefix = 64
@@ -84,7 +92,8 @@ type Identity struct {
 // client, one refilled over a minute and one over a day. A request is
 // charged its base cost up front and refused with 429 when either bucket
 // lacks it. A simulation is also metered while it runs, and cancelled once
-// what it has run up leaves either bucket overdrawn.
+// what it has run up leaves either bucket overdrawn. When the node that
+// answers reports the work it did, that is billed instead of the time.
 type Limiter struct {
 	opts   LimiterOptions
 	plans  map[string]*domain.Plan
@@ -107,7 +116,7 @@ type limitKey struct {
 	plan    *domain.Plan
 	minute  domain.Bucket
 	day     domain.Bucket
-	flights map[*Ticket]struct{} // metered requests in flight
+	flights map[*Ticket]struct{} // billed requests in flight
 }
 
 // NewLimiter builds a limiter. Nothing runs until Run.
@@ -257,8 +266,10 @@ func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*T
 		return nil, &Denial{Status: http.StatusBadRequest, Header: k.header(), Message: "algod-loadb-mesh: cannot read the simulate request"}
 	}
 	t := &Ticket{l: l, k: k, costKey: costKey, base: cost, metered: class.Simulate, start: now}
+	// Every request in flight keeps its key: one billed by effort is charged
+	// at Done, and a key swept before then would lose the charge.
+	k.flights[t] = struct{}{}
 	if t.metered {
-		k.flights[t] = struct{}{}
 		l.active[k] = struct{}{}
 	}
 	return t, nil
@@ -299,13 +310,23 @@ func (k *limitKey) charge(c float64) {
 	}
 }
 
-// owed is what the key's metered requests in flight have run up so far.
+// owed is what the key's requests in flight have run up so far.
 func (k *limitKey) owed() float64 {
 	var sum float64
 	for t := range k.flights {
 		sum += t.extra
 	}
 	return sum
+}
+
+// metering is whether any of the key's requests in flight is metered.
+func (k *limitKey) metering() bool {
+	for t := range k.flights {
+		if t.metered {
+			return true
+		}
+	}
+	return false
 }
 
 // shortfall is how long until both (refilled) buckets, less what is owed,
@@ -370,11 +391,36 @@ type Ticket struct {
 	metered bool
 	start   time.Time
 	// Guarded by l.mu:
-	extra     float64 // what the meter ran up, billed when the request ends
-	frozen    bool    // extra is final: the response began, or the request was cancelled
+	extra     float64       // what the meter ran up, or the reported effort costs; billed when the request ends
+	frozen    bool          // extra is final: the response began, or the request was cancelled
+	effort    domain.Effort // what mesh nodes reported doing for it, over every attempt
+	reported  bool          // a mesh node reported its effort
+	refunded  bool
 	cancel    context.CancelCauseFunc
 	cancelled bool
 	done      bool
+}
+
+// Reported adds the work a mesh node reported doing for one attempt. The
+// request is then billed by its effort rather than its running time; the
+// meter still runs until the response, so that a client can be cut off
+// while the work goes on.
+func (t *Ticket) Reported(e domain.Effort) {
+	t.l.mu.Lock()
+	defer t.l.mu.Unlock()
+	t.effort, t.reported = t.effort.Add(e), true
+}
+
+// settle makes extra what the request costs beyond its base by now: the
+// reported effort, else the running time; l.mu is held.
+func (t *Ticket) settle(now time.Time) {
+	switch {
+	case t.frozen:
+	case t.reported:
+		t.extra = t.l.opts.Effort.Credits(t.effort)
+	case t.metered:
+		t.extra = t.meter(now)
+	}
 }
 
 // Track lets the limiter cancel the request once its client is overdrawn.
@@ -384,17 +430,21 @@ func (t *Ticket) Track(cancel context.CancelCauseFunc) {
 	t.l.mu.Unlock()
 }
 
-// Responding is called as the response headers go out. The meter stops, as
-// the work is done by the time a node answers, and the request is no longer
-// cancelled. It adds the RateLimit headers and the cost to h.
-func (t *Ticket) Responding(h http.Header) {
+// Responding is called as the response headers go out, with the status.
+// The meter stops, as the work is done by the time a node answers, and the
+// request is no longer cancelled. A busy answer (503 with Retry-After) that
+// no node reported effort for did no work: it costs no more than the
+// cheapest request. Responding adds the RateLimit headers and the cost to h.
+func (t *Ticket) Responding(status int, h http.Header) {
 	l := t.l
 	now := l.clock.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if t.metered && !t.frozen {
-		t.extra, t.frozen = t.meter(now), true
+	if status == http.StatusServiceUnavailable && h.Get("Retry-After") != "" && !t.reported && !t.refunded {
+		t.refund()
 	}
+	t.settle(now)
+	t.frozen = true
 	t.k.refill(now)
 	for k, vs := range t.k.header() {
 		h[k] = vs
@@ -412,17 +462,32 @@ func (t *Ticket) Done() {
 		return
 	}
 	t.done = true
-	if t.metered {
-		if !t.frozen {
-			t.extra = t.meter(now)
-		}
-		delete(t.k.flights, t)
-		if len(t.k.flights) == 0 {
-			delete(l.active, t.k)
-		}
-		t.k.charge(t.extra)
+	t.settle(now)
+	delete(t.k.flights, t)
+	if !t.k.metering() {
+		delete(l.active, t.k)
 	}
-	l.metric.Observe("loadb_credits", t.base+t.extra, "plan", t.k.plan.Name, "class", t.costKey)
+	t.k.charge(t.extra)
+	by := "base"
+	switch {
+	case t.reported:
+		by = "effort"
+	case t.metered && !t.refunded:
+		by = "time"
+	}
+	l.metric.Observe("loadb_credits", t.base+t.extra, "plan", t.k.plan.Name, "class", t.costKey, "by", by)
+}
+
+// refund gives back the base cost of a request that did no work, down to
+// the default weight, and stops its meter; l.mu is held.
+func (t *Ticket) refund() {
+	floor := t.l.opts.Weights["default"]
+	if back := t.base - floor; back > 0 {
+		t.k.charge(-back)
+		t.base = floor
+	}
+	t.extra, t.frozen, t.refunded = 0, true, true
+	t.l.metric.Inc("loadb_ratelimit_refunded", "plan", t.k.plan.Name, "class", t.costKey)
 }
 
 // Exhausted is the answer to a simulation cancelled for an exhausted
@@ -451,7 +516,7 @@ func (l *Limiter) tick() {
 	defer l.mu.Unlock()
 	for k := range l.active {
 		for t := range k.flights {
-			if !t.frozen {
+			if t.metered && !t.frozen {
 				t.extra = t.meter(now)
 			}
 		}

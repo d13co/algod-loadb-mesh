@@ -316,6 +316,7 @@ func TestRateLimit(t *testing.T) {
   enabled: true
   trusted_proxies: [127.0.0.1, 10.0.0.0/8]
   weights: {simulate: 7}
+  effort: {opcodes_per_credit: 1000, trace_kb_per_credit: 0}
   plans:
     free: {per_minute: 300, per_day: 50000, simulate: {max_groups: 1, exec_trace: false}}
     pro: {per_minute: 6000}
@@ -332,6 +333,9 @@ func TestRateLimit(t *testing.T) {
 	}
 	if r.Weights["simulate"] != 7 || r.Weights["default"] != 1 || r.Weights["deltas_history"] != 50 {
 		t.Fatalf("weights: %v", r.Weights)
+	}
+	if e := r.EffortRatesOf(); e.OpcodesPerCredit != 1000 || e.TraceKBPerCredit != 0 || e.HistoryPerCredit != 1000 {
+		t.Fatalf("effort rates: %+v", e)
 	}
 	if r.Tokens[0].Token != "acme-secret" || len(r.TrustedPrefixes()) != 2 {
 		t.Fatalf("tokens %+v, proxies %v", r.Tokens, r.TrustedPrefixes())
@@ -357,6 +361,13 @@ func TestRateLimit(t *testing.T) {
 		{"ratelimit: {enabled: true}\n", "at least one plan"},
 		{"ratelimit: {enabled: true, plans: {free: {per_minute: -1}}}\n", "negative"},
 		{"ratelimit: {enabled: true, weights: {nope: 1}, plans: {free: {}}}\n", "weights.nope"},
+		{"ratelimit: {enabled: true, effort: {nope: 1}, plans: {free: {}}}\n", "effort.nope"},
+		{"ratelimit: {enabled: true, effort: {opcodes_per_credit: -1}, plans: {free: {}}}\n", "effort.opcodes_per_credit"},
+		{"ratelimit: {enabled: true, effort: {opcodes_per_credit: .nan}, plans: {free: {}}}\n", "effort.opcodes_per_credit"},
+		{"ratelimit: {enabled: true, effort: {lookups_per_credit: .inf}, plans: {free: {}}}\n", "effort.lookups_per_credit"},
+		{"ratelimit: {enabled: true, weights: {simulate: .nan}, plans: {free: {}}}\n", "weights.simulate"},
+		{"ratelimit: {enabled: true, simulate_per_second: .nan, plans: {free: {}}}\n", "simulate_per_second"},
+		{"ratelimit: {enabled: true, plans: {free: {per_day: .nan}}}\n", "negative"},
 		{"ratelimit: {enabled: true, anonymous_plan: gold, plans: {free: {}}}\n", "gold"},
 		{"ratelimit: {enabled: true, trusted_proxies: [not-an-ip], plans: {free: {}}}\n", "trusted_proxies"},
 		{"ratelimit: {enabled: true, ipv6_prefix: 129, plans: {free: {}}}\n", "ipv6_prefix"},

@@ -63,6 +63,9 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
 			out.RetryAfter = retryAfter(resp.Header.Get("Retry-After"))
+			if t.OnResponse != nil {
+				t.OnResponse(resp.StatusCode, resp.Header)
+			}
 			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
 				resp.Body.Close()
 				return upstreamRejected{resp.StatusCode}

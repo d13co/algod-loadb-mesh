@@ -264,7 +264,7 @@ func TestRateLimitResponseStopsMeter(t *testing.T) {
 	tk.Track(func(error) { cancelled = true })
 	fc.Advance(2 * time.Second)
 	h := http.Header{}
-	tk.Responding(h)
+	tk.Responding(200, h)
 	if h.Get(costHeader) != "5" {
 		t.Fatalf("cost at the response: %q", h.Get(costHeader))
 	}
@@ -436,5 +436,174 @@ func TestQuotaExceededCause(t *testing.T) {
 	}
 	if quotaExceeded(context.Background()) {
 		t.Fatal("no cause")
+	}
+}
+
+// A node that reports its effort is billed by it: the base, plus the work
+// at the effort rates, in place of the running time.
+func TestRateLimitBillsReportedEffort(t *testing.T) {
+	fc := clock.NewFake(time.Unix(1000, 0))
+	rates := domain.EffortRates{OpcodesPerCredit: 1000, LookupsPerCredit: 100}
+	l := NewLimiter(LimiterOptions{Plans: map[string]domain.Plan{"free": {Minute: perMinute(100)}}, AnonymousPlan: "free",
+		Weights: testWeights, SimulatePerSecond: 2, Effort: &rates}, fc, logging.Nop{}, metrics.New())
+	id := Identity{Key: "ip:x", Plan: "free"}
+	left := func() float64 {
+		k := l.keys["ip:x"]
+		k.refill(fc.Now())
+		return k.minute.Level
+	}
+	sim := domain.Classify("POST", "/v2/transactions/simulate", "")
+	tk, _ := l.Admit(id, sim, 0)
+	fc.Advance(10 * time.Second) // 20 credits by the meter
+	tk.Reported(domain.Effort{Opcodes: 3000, Lookups: 100})
+	h := http.Header{}
+	tk.Responding(200, h)
+	tk.Done()
+	if h.Get(costHeader) != "5" {
+		t.Fatalf("cost %q, want 1 + 3 + 1", h.Get(costHeader))
+	}
+	// 1 up front leaves 99, refilled to the full 100 by the response, less
+	// the 4 reported: by the meter it would be 20.
+	if got := left(); got != 96 {
+		t.Fatalf("billed: %v left, want 96", got)
+	}
+	// A history page is not metered, but its effort is billed all the same.
+	before := left()
+	tk, _ = l.Admit(id, domain.Classify("GET", "/v2/accounts/A/versions", ""), 0)
+	tk.Reported(domain.Effort{Lookups: 500})
+	tk.Responding(200, http.Header{})
+	tk.Done()
+	if got := left(); got != before-6 {
+		t.Fatalf("versions billed %v, want 1 + 5", before-got)
+	}
+	// Two attempts that both did work are both billed.
+	before = left()
+	tk, _ = l.Admit(id, sim, 0)
+	tk.Reported(domain.Effort{Opcodes: 1000})
+	tk.Reported(domain.Effort{Opcodes: 1000})
+	tk.Done()
+	if got := left(); got != before-3 {
+		t.Fatalf("two attempts billed %v, want 1 + 1 + 1", before-got)
+	}
+}
+
+// A slow history read keeps its key past a sweep, so that the work it
+// reports is billed to the same allowance, and owed in the meantime.
+func TestRateLimitSweepKeepsReadsInFlight(t *testing.T) {
+	fc := clock.NewFake(time.Unix(1000, 0))
+	rates := domain.EffortRates{LookupsPerCredit: 100}
+	l := NewLimiter(LimiterOptions{Plans: map[string]domain.Plan{"free": {Minute: perMinute(100)}}, AnonymousPlan: "free",
+		Weights: testWeights, SimulatePerSecond: 2, Effort: &rates}, fc, logging.Nop{}, metrics.New())
+	id := Identity{Key: "ip:x", Plan: "free"}
+	tk, _ := l.Admit(id, domain.Classify("GET", "/v2/accounts/A/versions", ""), 0)
+	k := l.keys["ip:x"]
+	fc.Advance(time.Minute) // the base has refilled
+	l.sweep()
+	if l.keys["ip:x"] != k {
+		t.Fatal("a key with a request in flight was swept")
+	}
+	l.tick() // not metered: nothing runs up, and it is not cancelled
+	if tk.extra != 0 || tk.cancelled {
+		t.Fatalf("a read was metered: extra %v, cancelled %v", tk.extra, tk.cancelled)
+	}
+	tk.Reported(domain.Effort{Lookups: 1000})
+	tk.Responding(200, http.Header{})
+	if got := k.owed(); got != 10 {
+		t.Fatalf("owed %v before Done, want the 10 reported", got)
+	}
+	tk.Done()
+	k.refill(fc.Now())
+	if k.minute.Level != 90 {
+		t.Fatalf("%v left, want 90", k.minute.Level)
+	}
+	if _, ok := l.active[k]; ok {
+		t.Fatal("a key with no simulation in flight is metered")
+	}
+	l.sweep()
+	if _, ok := l.keys["ip:x"]; !ok {
+		t.Fatal("a key in debt was swept")
+	}
+}
+
+// A busy answer that no node reported work for costs no more than the
+// cheapest request; one after reported work is billed as usual.
+func TestRateLimitRefundsBusy(t *testing.T) {
+	fc := clock.NewFake(time.Unix(1000, 0))
+	w := domain.CostWeights{}
+	for k, v := range testWeights {
+		w[k] = v
+	}
+	w["simulate"] = 5
+	l := NewLimiter(LimiterOptions{Plans: map[string]domain.Plan{"free": {Minute: perMinute(100)}}, AnonymousPlan: "free",
+		Weights: w, SimulatePerSecond: 2}, fc, logging.Nop{}, metrics.New())
+	id := Identity{Key: "ip:x", Plan: "free"}
+	sim := domain.Classify("POST", "/v2/transactions/simulate", "")
+	sim.ApplySimulate(domain.SimulateBody{TxnGroups: make([]struct{}, 3)})
+	tk, _ := l.Admit(id, sim, 0)
+	h := http.Header{"Retry-After": {"1"}}
+	tk.Responding(503, h)
+	tk.Done()
+	k := l.keys["ip:x"]
+	k.refill(fc.Now())
+	if h.Get(costHeader) != "1" || k.minute.Level > 99+1e-9 {
+		t.Fatalf("busy: cost %q, %v left, want 1 and 99", h.Get(costHeader), k.minute.Level)
+	}
+	// A 503 without Retry-After is no busy answer; one after reported work did work.
+	for _, tc := range []struct {
+		name     string
+		h        http.Header
+		reported bool
+	}{{"no Retry-After", http.Header{}, false}, {"reported", http.Header{"Retry-After": {"1"}}, true}} {
+		tk, _ := l.Admit(id, sim, 0)
+		if tc.reported {
+			tk.Reported(domain.Effort{})
+		}
+		tk.Responding(503, tc.h)
+		tk.Done()
+		if c := tc.h.Get(costHeader); c == "1" {
+			t.Errorf("%s: refunded", tc.name)
+		}
+	}
+}
+
+// The router bills what a mesh node reports and keeps the figures from a
+// billed client, who sees the cost; an external is not believed.
+func TestRateLimitEffortThroughRouter(t *testing.T) {
+	f := newLimitedFleet(t, domain.Plan{Minute: perMinute(1000)}, domain.Plan{}, 1)
+	const effort = "opcodes=660000, lookups=0, history=0, scanned=0, trace-bytes=0, eval-us=5"
+	f.b.SetEffort("/v2/transactions/simulate", effort)
+	f.c.SetEffort("/v2/transactions/simulate", effort)
+	rec := f.call("POST", "/v2/transactions/simulate", "", clientA, `{"txn-groups":[{}]}`)
+	if rec.Code != 200 || rec.Header().Get(costHeader) != "3" || rec.Header().Get(domain.EffortHeader) != "" {
+		t.Fatalf("billed client: %d, cost %q, effort %q", rec.Code, rec.Header().Get(costHeader), rec.Header().Get(domain.EffortHeader))
+	}
+	// The admin is not billed and sees the node's own figures.
+	rec = f.call("POST", "/v2/transactions/simulate", "admin-token", clientA, `{"txn-groups":[{}]}`)
+	if rec.Header().Get(domain.EffortHeader) != effort {
+		t.Fatalf("admin: effort %q", rec.Header().Get(domain.EffortHeader))
+	}
+	// An unreadable report falls back to the running time.
+	f.b.SetEffort("/v2/transactions/simulate", "opcodes=lots")
+	f.c.SetEffort("/v2/transactions/simulate", "opcodes=lots")
+	if rec = f.call("POST", "/v2/transactions/simulate", "", clientA, `{"txn-groups":[{}]}`); rec.Header().Get(costHeader) != "1" {
+		t.Fatalf("unreadable effort: cost %q", rec.Header().Get(costHeader))
+	}
+	// An external's report is dropped, not billed.
+	fc := clock.NewFake(time.Unix(1000, 0))
+	l := NewLimiter(LimiterOptions{Plans: map[string]domain.Plan{"free": {}}, AnonymousPlan: "free", Weights: testWeights},
+		fc, logging.Nop{}, metrics.New())
+	tk, _ := l.Admit(Identity{Key: "ip:x", Plan: "free"}, domain.Classify("POST", "/v2/transactions/simulate", ""), 0)
+	h := http.Header{domain.EffortHeader: {effort}}
+	f.r.effortReader(tk, domain.Upstream{ID: "ext", Kind: domain.KindExternal})(200, h)
+	if h.Get(domain.EffortHeader) != "" || tk.reported {
+		t.Fatalf("external: header %q, reported %v", h.Get(domain.EffortHeader), tk.reported)
+	}
+	// A report on two field lines is read whole, and neither line reaches
+	// the client.
+	tk, _ = l.Admit(Identity{Key: "ip:y", Plan: "free"}, domain.Classify("POST", "/v2/transactions/simulate", ""), 0)
+	h = http.Header{domain.EffortHeader: {"opcodes=7, lookups=3", "history=0, scanned=0, trace-bytes=0"}}
+	f.r.effortReader(tk, domain.Upstream{ID: "b", Kind: domain.KindPeer})(200, h)
+	if len(h.Values(domain.EffortHeader)) != 0 || tk.effort != (domain.Effort{Opcodes: 7, Lookups: 3}) {
+		t.Fatalf("two lines: header %q, effort %+v", h.Values(domain.EffortHeader), tk.effort)
 	}
 }

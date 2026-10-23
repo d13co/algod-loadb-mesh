@@ -564,10 +564,15 @@ func TestCORSLikeAlgod(t *testing.T) {
 		"Access-Control-Allow-Origin": {"*"},
 		"Vary":                        {"Origin"},
 	})
-	check("proxied", do("GET", "/v2/status", "https://x.example", "secret"), 200, http.Header{
+	proxied := do("GET", "/v2/status", "https://x.example", "secret")
+	check("proxied", proxied, 200, http.Header{
 		"Access-Control-Allow-Origin": {"*"},
 		"Vary":                        {"Origin"},
 	})
+	// A browser may read what a request cost and what is left.
+	if e := proxied.Header.Get("Access-Control-Expose-Headers"); !strings.Contains(e, "RateLimit") || !strings.Contains(e, "X-Algod-Loadb-Mesh-Cost") {
+		t.Errorf("proxied: Access-Control-Expose-Headers = %q", e)
+	}
 	check("proxied without origin", do("GET", "/v2/status", "", "secret"), 200, http.Header{
 		"Access-Control-Allow-Origin": nil,
 		"Vary":                        {"Origin"},

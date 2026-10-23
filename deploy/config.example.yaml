@@ -125,6 +125,13 @@ routing:
 #     pending: 1
 #     wait: 1
 #     teal: 1
+#   effort:                           # with dtalgorand's EnableEffortHeader, a request the node reports its work for costs its weight plus that work, in place of simulate_per_second;
+#                                     # units of work per credit, 0 makes that work free. Believed from mesh nodes only, never from externals
+#     opcodes_per_credit: 330000      # app and logicsig budget consumed
+#     lookups_per_credit: 10000       # ledger object reads
+#     history_per_credit: 1000        # the reads that went to the time-travel store, on top of their lookup
+#     scanned_per_credit: 10000       # entries visited by a history page or a ?round= list
+#     trace_kb_per_credit: 1024       # exec trace size
 #   plans:
 #     free:
 #       per_minute: 300               # credits per minute, refilled steadily; 0: no limit

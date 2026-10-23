@@ -122,6 +122,10 @@ type Target struct {
 	// otherwise withheld: dtalgorand's 504 for a simulation that ran out of
 	// time, which would run as long on the next node.
 	PassStatus map[int]bool
+	// OnResponse, when set, sees each upstream answer's status and headers
+	// before anything is decided or copied to the client, and may change
+	// the headers: the rate limiter reads and strips a node's effort.
+	OnResponse func(status int, h http.Header)
 }
 
 // Outcome is what happened when forwarding.

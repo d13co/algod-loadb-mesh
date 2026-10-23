@@ -126,7 +126,8 @@ func limiterOptions(r config.RateLimit) *app.LimiterOptions {
 	if !r.Enabled {
 		return nil
 	}
-	o := &app.LimiterOptions{Plans: map[string]domain.Plan{}, Weights: r.Weights, SimulatePerSecond: *r.SimulatePerSecond,
+	effort := r.EffortRatesOf()
+	o := &app.LimiterOptions{Plans: map[string]domain.Plan{}, Weights: r.Weights, SimulatePerSecond: *r.SimulatePerSecond, Effort: &effort,
 		AnonymousPlan: *r.AnonymousPlan, TrustedProxies: r.TrustedPrefixes(), IPv6Prefix: r.IPv6Prefix, MaxKeys: r.MaxKeys,
 		StateFile: r.StateFile}
 	for name, p := range r.Plans {
