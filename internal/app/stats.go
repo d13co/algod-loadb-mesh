@@ -39,6 +39,7 @@ type upstreamStats struct {
 	probing        bool
 	openUntil      time.Time
 	throttledUntil time.Time
+	busyUntil      time.Time
 }
 
 // NewStatsBook creates an empty book.
@@ -106,6 +107,16 @@ func (b *StatsBook) Record(id, key string, out ports.Outcome) {
 	}
 }
 
+// Busy marks an upstream that answered a heavy request with 503 and
+// Retry-After: its slots for them are full for d. It is not a failure.
+func (b *StatsBook) Busy(id string, d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if until := b.clock.Now().Add(d); until.After(b.get(id).busyUntil) {
+		b.get(id).busyUntil = until
+	}
+}
+
 // Snapshot returns the current stats for an upstream.
 func (b *StatsBook) Snapshot(id string) domain.Stats {
 	b.mu.Lock()
@@ -130,7 +141,8 @@ func (b *StatsBook) Snapshot(id string) domain.Stats {
 		lat[k] = v
 	}
 	st := domain.Stats{LatencyMS: lat, Inflight: s.inflight,
-		BreakerOpen: now.Before(s.openUntil), Throttled: now.Before(s.throttledUntil)}
+		BreakerOpen: now.Before(s.openUntil), Throttled: now.Before(s.throttledUntil),
+		Busy: now.Before(s.busyUntil)}
 	if n > 0 {
 		st.ErrorRate = float64(fails) / float64(n)
 	}

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -56,9 +57,16 @@ type Node struct {
 	hang      bool // every request blocks until the client gives up
 	rejecting bool // every broadcast answers 400, as algod does for a rejected transaction
 	latency   time.Duration
-	boxes     map[uint64]map[string][]byte
-	pool      map[string]poolTxn
-	hits      map[string]int
+	// simulate requests: how long one runs, and what it answers instead
+	simDelay      time.Duration
+	simStatus     int
+	simRetryAfter int
+	simCancelled  int
+	pathStatus    map[string]int    // requests for these paths answer this status
+	effort        map[string]string // answers for these paths carry this X-Algod-Effort
+	boxes         map[uint64]map[string][]byte
+	pool          map[string]poolTxn
+	hits          map[string]int
 }
 
 // New starts a fake node.
@@ -139,6 +147,44 @@ func (n *Node) SetFailing(f bool) {
 	n.mu.Unlock()
 }
 
+// SetSimulate makes each simulate request run for delay, stopping early
+// when its client goes as dtalgorand does, then answer status (0: as any
+// request) with Retry-After when retryAfter > 0.
+func (n *Node) SetSimulate(delay time.Duration, status, retryAfter int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.simDelay, n.simStatus, n.simRetryAfter = delay, status, retryAfter
+}
+
+// SetPathStatus makes requests for path answer status; 0 restores it.
+func (n *Node) SetPathStatus(path string, status int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.pathStatus == nil {
+		n.pathStatus = map[string]int{}
+	}
+	n.pathStatus[path] = status
+}
+
+// SetEffort makes answers for path carry value as their X-Algod-Effort, as
+// dtalgorand's EnableEffortHeader does; "" removes it. A busy answer from
+// SetSimulate carries none, as on dtalgorand.
+func (n *Node) SetEffort(path, value string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.effort == nil {
+		n.effort = map[string]string{}
+	}
+	n.effort[path] = value
+}
+
+// SimulatesCancelled is how many simulations stopped because their client went.
+func (n *Node) SimulatesCancelled() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.simCancelled
+}
+
 // SetLatency adds a fixed delay to every response.
 func (n *Node) SetLatency(d time.Duration) {
 	n.mu.Lock()
@@ -210,6 +256,16 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := strings.TrimSuffix(r.URL.Path, "/")
+	n.mu.Lock()
+	status, effort := n.pathStatus[p], n.effort[p]
+	n.mu.Unlock()
+	if effort != "" {
+		w.Header().Set("X-Algod-Effort", effort)
+	}
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"message": fmt.Sprintf("fake node answers %d", status)})
+		return
+	}
 	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
 	seg := func(i int) string {
 		if i < len(segs) {
@@ -274,6 +330,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		n.pool[id] = poolTxn{txn: raw}
 		n.mu.Unlock()
 		writeJSON(w, 200, map[string]string{"txId": id})
+	case p == "/v2/transactions/simulate" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/transactions/simulate/limits" && r.Method == "GET":
 		l := n.opts.Simulate
 		if l == nil {
@@ -282,6 +339,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
 			"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier,
+			"max-exec-trace-bytes": l.MaxExecTraceBytes, "time-limit-seconds": l.TimeLimitSeconds,
 			"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI})
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
@@ -332,6 +390,36 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 200, map[string]any{"node": n.opts.ID, "path": p, "method": r.Method, "round": round})
 	}
+}
+
+// simulating runs a simulate request as SetSimulate says; false leaves the
+// answer to the generic handler.
+func (n *Node) simulating(w http.ResponseWriter, r *http.Request) bool {
+	n.mu.Lock()
+	delay, status, retryAfter := n.simDelay, n.simStatus, n.simRetryAfter
+	n.mu.Unlock()
+	if delay > 0 {
+		// Read the body as algod does: the server notices the client
+		// leave only once the body is consumed.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			n.mu.Lock()
+			n.simCancelled++
+			n.mu.Unlock()
+			return true
+		}
+	}
+	if status == 0 {
+		return false
+	}
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		w.Header().Del("X-Algod-Effort") // busy: answered before any work
+	}
+	writeJSON(w, status, map[string]string{"message": fmt.Sprintf("fake simulate answers %d", status)})
+	return true
 }
 
 func (n *Node) status(round uint64) map[string]any {
