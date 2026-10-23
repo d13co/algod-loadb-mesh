@@ -300,8 +300,9 @@ func directTxID(t *testing.T, n *fakealgod.Node, body string) string {
 // mesh node.
 type twoPeerHarness struct {
 	*waitHarness
-	c   *fakealgod.Node
-	ext *fakealgod.Node
+	c    *fakealgod.Node
+	cKey ed25519.PrivateKey
+	ext  *fakealgod.Node
 }
 
 func newTwoPeerHarness(t *testing.T, multiBroadcast bool) *twoPeerHarness {
@@ -348,7 +349,7 @@ func newTwoPeerHarnessOpts(t *testing.T, dopts func(*DirectoryOptions), ropts fu
 		}
 		return false
 	})
-	return &twoPeerHarness{waitHarness: wh, c: c, ext: ext}
+	return &twoPeerHarness{waitHarness: wh, c: c, cKey: cKey, ext: ext}
 }
 
 // Every eligible mesh node is tried once before the external, for reads
@@ -788,5 +789,82 @@ func TestRequestTimeoutBoundsExternalCheck(t *testing.T) {
 	}
 	if n := clients.count("http://ext"); n != 1 {
 		t.Fatalf("%d checks, want 1", n)
+	}
+}
+
+// An excluded peer gets no request, not even as a retry: a failing peer
+// falls back to the external.
+func TestExcludedPeerIsNeverTried(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, func(o *DirectoryOptions) { o.Exclude = []string{"c"} }, nil)
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
+		t.Fatalf("read: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	h.n.SetFailing(true)
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
+		t.Fatalf("retry: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if n := h.c.Hits("/v2/status"); n != 0 {
+		t.Fatalf("excluded peer hit %d times", n)
+	}
+}
+
+// A held wait-for-block-after is not released by an excluded peer reaching
+// the round, only by a peer requests may go to.
+func TestExcludedPeerDoesNotReleaseWait(t *testing.T) {
+	cPub, cKey, _ := ed25519.GenerateKey(crand.Reader)
+	h := newWaitHarness(t, 5*time.Second)
+	h.d.opts.Exclude = []string{"c"}
+	h.d.excluded = map[string]bool{"c": true}
+	recB := h.peerRecord(addrA)
+	recB.Endpoints, recB.Token = []string{h.n.URL()}, h.n.Token()
+	recC := domain.NodeRecord{ID: "c", Network: "n", Agent: domain.AgentInfo{Addrs: []string{addrB}, PubKey: []byte(cPub)}}
+	h.d.SetRecords([]domain.NodeRecord{recB, recC})
+	h.heartbeat(1, 10)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- h.get("/v2/status/wait-for-block-after/10") }()
+	time.Sleep(50 * time.Millisecond)
+	wire, _ := domain.EncodeHeartbeat(cKey, domain.Heartbeat{NodeID: "c", Seq: 1, Online: true, LastRound: 11})
+	h.inject(addrB, wire)
+	select {
+	case rec := <-done:
+		t.Fatalf("released by the excluded peer: %d %s", rec.Code, rec.Body.String())
+	case <-time.After(150 * time.Millisecond):
+	}
+	if hits := h.n.Hits("/v2/status/wait-for-block-after"); hits != 0 {
+		t.Fatalf("forwarded on the excluded peer's round: %d hits", hits)
+	}
+	h.n.Advance(1)
+	h.heartbeat(2, 11)
+	select {
+	case rec := <-done:
+		if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" || lastRound(t, rec) != 11 {
+			t.Fatalf("wait answer: %d %s", rec.Code, rec.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("still held after the routable peer's heartbeat")
+	}
+}
+
+// An excluded peer far ahead of the fleet does not make the routable peers
+// lag: requests stay on them rather than moving to the external, and the
+// fleet's best round is theirs.
+func TestExcludedPeerAheadDoesNotMakeOthersLag(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, func(o *DirectoryOptions) { o.Exclude = []string{"c"} }, nil)
+	wire, _ := domain.EncodeHeartbeat(h.cKey, domain.Heartbeat{NodeID: "c", Seq: 2, Online: true, LastRound: 20})
+	h.inject(addrB, wire)
+	waitFor(t, 2*time.Second, func() bool {
+		cands, _ := h.d.Snapshot()
+		return upstream(t, cands, "c").LastRound == 20
+	})
+	cands, best := h.d.Snapshot()
+	if u := upstream(t, cands, "b"); u.Health != domain.HealthSynced || best != 10 {
+		t.Fatalf("routable peer judged against the excluded one: %s best=%d", u.Health, best)
+	}
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
+		t.Fatalf("status: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if n := h.ext.Hits("/"); n != 0 {
+		t.Fatalf("external hit %d times", n)
 	}
 }

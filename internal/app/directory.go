@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,11 @@ type DirectoryOptions struct {
 	ReturnHysteresis  int
 	PeerOverrides     map[string]PeerOverride
 	Externals         []ExternalUpstream
+	// Exclude lists peer ids and external names that are never routed to.
+	// They stay in the snapshot, marked Excluded, but their rounds do not
+	// count toward the fleet's best round or release a held wait. An
+	// excluded external is never health-checked.
+	Exclude []string
 }
 
 func (o *DirectoryOptions) defaults() {
@@ -171,6 +177,9 @@ type Directory struct {
 	metric  ports.Metrics
 	priv    ed25519.PrivateKey
 
+	excluded  map[string]bool // DirectoryOptions.Exclude; read-only after NewDirectory
+	unmatched string          // exclude ids last warned about as matching nothing, under mu
+
 	// onUnknown is called (outside the lock) when a heartbeat arrives from a
 	// node the registry has not told us about yet.
 	onUnknown func(id string)
@@ -207,6 +216,13 @@ func NewDirectory(o DirectoryOptions, monitor *Monitor, gossip ports.Gossip, cli
 			e.HealthCheck = time.Minute
 		}
 		d.externals[e.Name] = &extState{cfg: e, client: clients.NewAlgodClient(e.URL, e.Token)}
+	}
+	d.excluded = make(map[string]bool, len(o.Exclude))
+	for _, id := range o.Exclude {
+		d.excluded[id] = true
+	}
+	if len(o.Exclude) > 0 {
+		log.Info("routing.exclude: never routing to these upstreams", "ids", o.Exclude)
 	}
 	return d
 }
@@ -264,12 +280,38 @@ func (d *Directory) SetRecords(recs []domain.NodeRecord) {
 		}
 	}
 	d.balancers = balancers
+	unmatched := d.unmatchedExcludeLocked()
 	d.mu.Unlock()
+	if unmatched != nil {
+		d.log.Warn("routing.exclude: no peer or external has these ids", "ids", unmatched)
+	}
 	if switched {
 		d.nudgeHeartbeat()
 	}
 	d.metric.Gauge("loadb_peers", float64(len(seen)))
 	d.metric.Gauge("loadb_balancers", float64(len(balancers)))
+}
+
+// unmatchedExcludeLocked lists the routing.exclude ids that name no peer
+// and no external, a likely typo. It returns nil when the list is the same
+// as the last call's, so a registry refresh does not repeat the warning.
+func (d *Directory) unmatchedExcludeLocked() []string {
+	var out []string
+	for _, id := range d.opts.Exclude {
+		if _, ok := d.peers[id]; ok {
+			continue
+		}
+		if _, ok := d.externals[id]; ok {
+			continue
+		}
+		out = append(out, id)
+	}
+	key := strings.Join(out, ",")
+	if key == d.unmatched {
+		return nil
+	}
+	d.unmatched = key
+	return out
 }
 
 // syncLink brings a link up to date with its record: measurements of
@@ -614,7 +656,9 @@ func (d *Directory) handleLocked(msg ports.GossipMessage, env domain.Envelope) (
 	d.metric.Inc("loadb_heartbeats_received")
 	logMsg("accepted")
 	p.hb, p.seenAt, p.hasHB, p.silent = hb, now, true, false
-	if hb.Online {
+	// A held wait-for-block-after is released by a round a request may be
+	// routed to, so an excluded peer's round does not wake it.
+	if hb.Online && !d.excluded[env.NodeID] {
 		d.noteRoundLocked(hb.LastRound)
 	}
 	p.judge.Judge(now, hb.Online, hb.LastRound, d.bestRoundLocked(d.monitor.State()))
@@ -706,7 +750,9 @@ func (d *Directory) probeSilentPeers(ctx context.Context) {
 				}
 			}
 		}
-		if silent && now.Sub(p.probeAt) >= d.opts.ProbeInterval && len(p.rec.Endpoints) > 0 {
+		// The direct probe keeps a peer routable while its agent is silent,
+		// so an excluded peer is not probed; its paths are still pinged.
+		if silent && !d.excluded[id] && now.Sub(p.probeAt) >= d.opts.ProbeInterval && len(p.rec.Endpoints) > 0 {
 			p.probeAt = now
 			jobs = append(jobs, job{id, domain.EndpointFor(p.rec.Endpoints, p.hosts, p.ln.curAddr()), p.rec.Token})
 		}
@@ -866,7 +912,10 @@ func (d *Directory) LinkSnapshot() []LinkStatus {
 func (d *Directory) checkExternals(ctx context.Context) bool {
 	now := d.clock.Now()
 	d.mu.Lock()
-	for _, e := range d.externals {
+	for n, e := range d.externals {
+		if d.excluded[n] {
+			continue
+		}
 		// A check is repeated once it expires or, while it is valid or
 		// failed, once the debounce has passed: a valid external is kept
 		// current (its round is compared with the mesh's) at one status
@@ -904,7 +953,10 @@ func (d *Directory) externalsLocked() (fresh, inflight bool, done chan struct{})
 	now := d.clock.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, e := range d.externals {
+	for n, e := range d.externals {
+		if d.excluded[n] {
+			continue
+		}
 		fresh = fresh || e.fresh(now)
 		inflight = inflight || e.inflight != nil
 	}
@@ -951,18 +1003,26 @@ func boolStr(b bool) string {
 // bestRoundLocked is the highest round among local, fresh peers and
 // externals. An external's round may be old, since it is only checked on
 // demand, but the chain only moves forward so it is still a lower bound.
+// Excluded upstreams do not count: a node that is behind them is not
+// lagging any node a request could go to instead.
 func (d *Directory) bestRoundLocked(local LocalState) uint64 {
 	now := d.clock.Now()
 	best := uint64(0)
 	if local.Online {
 		best = local.LastRound
 	}
-	for _, p := range d.peers {
+	for id, p := range d.peers {
+		if d.excluded[id] {
+			continue
+		}
 		if r, ok := d.peerRoundLocked(p, now); ok && r > best {
 			best = r
 		}
 	}
-	for _, e := range d.externals {
+	for n, e := range d.externals {
+		if d.excluded[n] {
+			continue
+		}
 		if e.ok && e.round > best {
 			best = e.round
 		}
@@ -1006,7 +1066,7 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 	for _, id := range ids {
 		p := d.peers[id]
 		u := domain.Upstream{ID: id, Kind: domain.KindPeer, Tier: p.rec.Tier, Token: p.rec.Token,
-			Stats: d.stats.Snapshot(id), Health: domain.HealthOffline}
+			Stats: d.stats.Snapshot(id), Health: domain.HealthOffline, Excluded: d.excluded[id]}
 		// The endpoint on the host of the current heartbeat path, so algod
 		// traffic fails over with it; else the first.
 		u.BaseURL = domain.EndpointFor(p.rec.Endpoints, p.hosts, p.ln.curAddr())
@@ -1047,7 +1107,7 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 		// judge with grace and hysteresis for it: its checks are sparse,
 		// on demand, and when it is the only option it should serve.
 		u := domain.Upstream{ID: n, Kind: domain.KindExternal, Tier: e.cfg.Tier, BaseURL: e.cfg.URL, Token: e.cfg.Token,
-			LastRound: e.round, Caps: caps, Stats: d.stats.Snapshot(n), Health: domain.HealthOffline, Source: "none"}
+			LastRound: e.round, Caps: caps, Stats: d.stats.Snapshot(n), Health: domain.HealthOffline, Source: "none", Excluded: d.excluded[n]}
 		if e.fresh(now) {
 			u.Source = "check"
 			u.Health = domain.SyncHealth(domain.HealthOnline, e.round, best, d.opts.SyncTolerance)

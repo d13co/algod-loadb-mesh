@@ -37,7 +37,12 @@ func newSimFleet(t *testing.T, cCaps domain.Capabilities) *simFleet {
 
 func newSimFleetWith(t *testing.T, cCaps domain.Capabilities, o RouterOptions) *simFleet {
 	t.Helper()
-	h := newHarnessWith(t, DirectoryOptions{}, algodhttp.Factory{})
+	return newSimFleetDir(t, cCaps, o, DirectoryOptions{})
+}
+
+func newSimFleetDir(t *testing.T, cCaps domain.Capabilities, o RouterOptions, do DirectoryOptions) *simFleet {
+	t.Helper()
+	h := newHarnessWith(t, do, algodhttp.Factory{})
 	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 100})
 	t.Cleanup(b.Close)
 	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 100, Simulate: cCaps.Simulate, TimeTravel: cCaps.TimeTravel})
@@ -237,5 +242,36 @@ func TestSimulateNotRetriedAfterTimeout(t *testing.T) {
 	}
 	if n := f.c.Hits("/v2/transactions/simulate"); n != 0 {
 		t.Fatalf("timed-out simulation retried %d times", n)
+	}
+}
+
+// With the only dtalgorand node excluded, the fleet answers as a stock one:
+// the limits request is forwarded and gets algod's 404, and a time-travel
+// request is told the fleet has no such node.
+func TestExcludedDtalgorandIsAbsent(t *testing.T) {
+	f := newSimFleetDir(t, domain.Capabilities{Simulate: &testLimits, TimeTravel: true},
+		RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1}, DirectoryOptions{Exclude: []string{"c"}})
+	if rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil); rec.Code != 404 {
+		t.Fatalf("limits with the dtalgorand node excluded: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := f.c.Hits("/v2/transactions/simulate/limits"); n != 0 {
+		t.Fatalf("excluded node hit %d times", n)
+	}
+	cands, _ := f.h.d.Snapshot()
+	if anyTimeTravel(cands) {
+		t.Fatal("excluded time-travel node counted")
+	}
+}
+
+// A busy excluded node does not make the router tell a heavy request that
+// every node able to serve it is busy: no retry would reach that node.
+func TestExcludedBusyNodeIsNotReported(t *testing.T) {
+	busy := domain.Upstream{ID: "x", Stats: domain.Stats{Busy: true}}
+	if !anyBusy([]domain.Upstream{busy}) {
+		t.Fatal("busy node not counted")
+	}
+	busy.Excluded = true
+	if anyBusy([]domain.Upstream{busy}) {
+		t.Fatal("busy excluded node counted")
 	}
 }

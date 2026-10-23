@@ -98,6 +98,11 @@ routing:
   #                                   # (a held wait-for-block-after adds wait_for_block_timeout before its attempts start)
   pending_ttl: 10s                    # pending-txn lookups stick to the node that accepted the txn for ttl..2*ttl; default 10s
   drain_timeout: 10s                  # grace for in-flight requests on shutdown; default 10s
+  # exclude: [bambi, nodely]          # peer node ids and tiers.external names never routed to; default: none
+  #                                   # excluded peers still gossip and show in /loadb/status as excluded, but their rounds
+  #                                   # do not count toward the fleet's best round (no node is judged lagging behind them),
+  #                                   # and they are not probed directly while their agent is silent; an excluded external
+  #                                   # is never health-checked. The local node cannot be excluded
   breaker:
     threshold: 5                      # consecutive failures that open an upstream's breaker; default 5
     open_for: 10s                     # how long an open breaker refuses requests; default 10s

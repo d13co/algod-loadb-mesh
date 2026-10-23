@@ -3,15 +3,16 @@ package domain
 // Eligible reports whether an upstream may serve a request of class c given
 // the best round known across the fleet and the sync tolerance.
 //
-// The rules, in order: reachable; not draining; breaker closed; not
-// throttled, nor busy for a heavy request; time-travel history when the request needs it; synced (within
-// tolerance of best) unless the class is local-only or the request is for a
-// specific round the node holds; the round is in the window the class needs
-// (block or account state), and every round a simulation lists has been
-// reached; developer API when needed; the simulate limits and options the
-// request needs; no broadcast to followers.
+// The rules, in order: not excluded by config; reachable; not draining;
+// breaker closed; not throttled, nor busy for a heavy request; time-travel
+// history when the request needs it; synced (within tolerance of best)
+// unless the class is local-only or the request is for a specific round the
+// node holds; the round is in the window the class needs (block or account
+// state), and every round a simulation lists has been reached; developer API
+// when needed; the simulate limits and options the request needs; no
+// broadcast to followers.
 func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
-	if !u.Health.Reachable() || u.Draining {
+	if u.Excluded || !u.Health.Reachable() || u.Draining {
 		return false
 	}
 	if u.Stats.BreakerOpen || u.Stats.Throttled || u.Stats.Busy && c.Heavy() {
@@ -129,13 +130,14 @@ func SyncHealth(h Health, round, best, tol uint64) Health {
 	return HealthLagging
 }
 
-// BestRound returns the highest last round among upstreams that are reachable.
+// BestRound returns the highest last round among upstreams that are reachable
+// and not excluded: the round some upstream a request may go to has reached.
 // External upstreams count too: if the whole mesh is lagging behind the world
 // we want to know.
 func BestRound(us []Upstream) uint64 {
 	var best uint64
 	for _, u := range us {
-		if u.Health.Reachable() && u.LastRound > best {
+		if u.Health.Reachable() && !u.Excluded && u.LastRound > best {
 			best = u.LastRound
 		}
 	}

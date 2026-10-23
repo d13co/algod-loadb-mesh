@@ -118,6 +118,7 @@ func TestEligible(t *testing.T) {
 		{"lagging default", up("p", KindPeer, 1, HealthLagging, 999), RequestClass{}, 1000, false},
 		{"offline", up("p", KindPeer, 1, HealthOffline, 1000), RequestClass{}, 1000, false},
 		{"draining", func() Upstream { u := local; u.Draining = true; return u }(), RequestClass{}, 1000, false},
+		{"excluded", func() Upstream { u := up("p", KindPeer, 1, HealthSynced, 1000); u.Excluded = true; return u }(), RequestClass{}, 1000, false},
 		{"breaker", func() Upstream { u := local; u.Stats.BreakerOpen = true; return u }(), RequestClass{}, 1000, false},
 		{"round in window", local, RequestClass{Round: u64(500)}, 1000, true},
 		{"round pruned", up("l", KindLocal, 1, HealthSynced, 5000), RequestClass{Round: u64(1)}, 5000, false},
@@ -652,5 +653,14 @@ func TestNormalizeAddr(t *testing.T) {
 		if got := NormalizeAddr(in); got != want {
 			t.Errorf("%s: got %s want %s", in, got, want)
 		}
+	}
+}
+
+// An excluded upstream's round does not count: no request can go there.
+func TestBestRoundSkipsExcluded(t *testing.T) {
+	ex := up("x", KindPeer, 1, HealthSynced, 20)
+	ex.Excluded = true
+	if got := BestRound([]Upstream{up("a", KindPeer, 1, HealthSynced, 10), ex}); got != 10 {
+		t.Fatalf("best round %d, want 10", got)
 	}
 }

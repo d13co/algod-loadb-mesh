@@ -43,6 +43,18 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nrouting: {request_timeout: -1s}\n"); err == nil || !strings.Contains(err.Error(), "request_timeout") {
 		t.Fatalf("negative request_timeout must fail: %v", err)
 	}
+	ex, err := load(t, "local: {id: a, data_dir: /x}\nregistry: {type: memory, auto_register: false}\nrouting: {exclude: [\" b \", c, b, \"\"]}\n")
+	if err != nil || strings.Join(ex.Routing.Exclude, ",") != "b,c" {
+		t.Fatalf("routing.exclude trimmed and deduplicated: %q %v", ex.Routing.Exclude, err)
+	}
+	if _, err := load(t, "local: {id: a, data_dir: /x}\nrouting: {exclude: [a]}\n"); err == nil || !strings.Contains(err.Error(), "routing.exclude") {
+		t.Fatalf("excluding the local node must fail: %v", err)
+	}
+	if host, herr := os.Hostname(); herr == nil && host != "" {
+		if _, err := load(t, "local: {data_dir: /x}\nrouting: {exclude: ["+host+"]}\n"); err == nil || !strings.Contains(err.Error(), "routing.exclude") {
+			t.Fatalf("excluding the local node by its default id (hostname) must fail: %v", err)
+		}
+	}
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nunknown_key: 1\n"); err == nil {
 		t.Fatal("unknown keys must fail")
 	}
