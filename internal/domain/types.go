@@ -379,8 +379,9 @@ type Upstream struct {
 	LastRound uint64       `json:"last_round"`
 	Caps      Capabilities `json:"caps"`
 	Draining  bool         `json:"draining,omitempty"`
-	// Excluded is set by routing.exclude: the upstream is shown and its
-	// round still counts, but no request is routed to it.
+	// Excluded is set by routing.exclude: the upstream is shown, but no
+	// request is routed to it and its round does not count toward the
+	// fleet's best.
 	Excluded bool  `json:"excluded,omitempty"`
 	Stats    Stats `json:"stats"`
 	// Source says where the live facts come from: local, heartbeat, probe

@@ -51,8 +51,9 @@ type DirectoryOptions struct {
 	PeerOverrides     map[string]PeerOverride
 	Externals         []ExternalUpstream
 	// Exclude lists peer ids and external names that are never routed to.
-	// They stay in the snapshot, marked Excluded; an excluded external is
-	// never health-checked.
+	// They stay in the snapshot, marked Excluded, but their rounds do not
+	// count toward the fleet's best round or release a held wait. An
+	// excluded external is never health-checked.
 	Exclude []string
 }
 
@@ -1002,18 +1003,26 @@ func boolStr(b bool) string {
 // bestRoundLocked is the highest round among local, fresh peers and
 // externals. An external's round may be old, since it is only checked on
 // demand, but the chain only moves forward so it is still a lower bound.
+// Excluded upstreams do not count: a node that is behind them is not
+// lagging any node a request could go to instead.
 func (d *Directory) bestRoundLocked(local LocalState) uint64 {
 	now := d.clock.Now()
 	best := uint64(0)
 	if local.Online {
 		best = local.LastRound
 	}
-	for _, p := range d.peers {
+	for id, p := range d.peers {
+		if d.excluded[id] {
+			continue
+		}
 		if r, ok := d.peerRoundLocked(p, now); ok && r > best {
 			best = r
 		}
 	}
-	for _, e := range d.externals {
+	for n, e := range d.externals {
+		if d.excluded[n] {
+			continue
+		}
 		if e.ok && e.round > best {
 			best = e.round
 		}

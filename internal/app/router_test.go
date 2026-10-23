@@ -300,8 +300,9 @@ func directTxID(t *testing.T, n *fakealgod.Node, body string) string {
 // mesh node.
 type twoPeerHarness struct {
 	*waitHarness
-	c   *fakealgod.Node
-	ext *fakealgod.Node
+	c    *fakealgod.Node
+	cKey ed25519.PrivateKey
+	ext  *fakealgod.Node
 }
 
 func newTwoPeerHarness(t *testing.T, multiBroadcast bool) *twoPeerHarness {
@@ -348,7 +349,7 @@ func newTwoPeerHarnessOpts(t *testing.T, dopts func(*DirectoryOptions), ropts fu
 		}
 		return false
 	})
-	return &twoPeerHarness{waitHarness: wh, c: c, ext: ext}
+	return &twoPeerHarness{waitHarness: wh, c: c, cKey: cKey, ext: ext}
 }
 
 // Every eligible mesh node is tried once before the external, for reads
@@ -842,5 +843,28 @@ func TestExcludedPeerDoesNotReleaseWait(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("still held after the routable peer's heartbeat")
+	}
+}
+
+// An excluded peer far ahead of the fleet does not make the routable peers
+// lag: requests stay on them rather than moving to the external, and the
+// fleet's best round is theirs.
+func TestExcludedPeerAheadDoesNotMakeOthersLag(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, func(o *DirectoryOptions) { o.Exclude = []string{"c"} }, nil)
+	wire, _ := domain.EncodeHeartbeat(h.cKey, domain.Heartbeat{NodeID: "c", Seq: 2, Online: true, LastRound: 20})
+	h.inject(addrB, wire)
+	waitFor(t, 2*time.Second, func() bool {
+		cands, _ := h.d.Snapshot()
+		return upstream(t, cands, "c").LastRound == 20
+	})
+	cands, best := h.d.Snapshot()
+	if u := upstream(t, cands, "b"); u.Health != domain.HealthSynced || best != 10 {
+		t.Fatalf("routable peer judged against the excluded one: %s best=%d", u.Health, best)
+	}
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
+		t.Fatalf("status: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	}
+	if n := h.ext.Hits("/"); n != 0 {
+		t.Fatalf("external hit %d times", n)
 	}
 }
