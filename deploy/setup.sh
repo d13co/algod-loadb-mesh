@@ -230,20 +230,52 @@ main() {
 	systemctl enable --now "$svc"
 	sleep 1
 	if systemctl is-active --quiet "$svc"; then
-		local data_dir listen
-		data_dir=$(sed -n 's/^  data_dir: //p' "$target" | head -n1)
+		local summary listen
+		summary=$("$mesh" config check -config "$target")
 		# `config check` prints the resolved listen addresses; take the first.
-		listen=$("$mesh" config check -config "$target" | sed -n 's/^listen \([^,]*\).*/\1/p' | head -n1)
+		listen=$(printf '%s\n' "$summary" | sed -n 's/^listen \([^,]*\).*/\1/p' | head -n1)
 		case "$listen" in
 		0.0.0.0:*) listen=127.0.0.1:${listen##*:} ;;
 		\[::\]:*) listen=[::1]:${listen##*:} ;;
 		esac
 		say "$svc is running"
-		say "peers: curl -H \"X-Algo-API-Token: \$(sudo cat $data_dir/algod.admin.token)\" http://$listen/loadb/peers"
+		say "peers: $(peers_hint "$target" "$summary" "http://$listen/loadb/peers")"
 	else
 		systemctl --no-pager --lines=20 status "$svc" || true
 		die "the service did not start"
 	fi
+}
+
+# peers_hint CONFIG SUMMARY URL prints a command that fetches URL with the
+# admin token the agent uses. SUMMARY (from `config check`) says whether there
+# is one; the config says where it comes from, in the agent's order:
+# admin_token, then admin_token_file, then algod.admin.token in the data dir.
+peers_hint() {
+	case "$2" in
+	*"no tokens: open to anyone"*)
+		echo "curl $3"
+		return
+		;;
+	*"admin token none"*)
+		echo "none: $1 has no admin token, so only /loadb/health is open; set admin_token_file to read the rest"
+		return
+		;;
+	esac
+	local file
+	if [ -n "$(yaml_value admin_token "$1")" ]; then
+		echo "curl -H \"X-Algo-API-Token: <admin_token from $1>\" $3"
+		return
+	fi
+	file=$(yaml_value admin_token_file "$1")
+	[ -n "$file" ] || file=$(printf '%s\n' "$2" | sed -n 's/.*, data dir \(.*\)$/\1/p' | head -n1)/algod.admin.token
+	echo "curl -H \"X-Algo-API-Token: \$(sudo cat $file)\" $3"
+}
+
+# yaml_value KEY FILE prints the value of top-level KEY in FILE, without
+# quotes or a trailing comment.
+yaml_value() {
+	sed -n "s/^$1:[[:space:]]*//p" "$2" | head -n1 |
+		sed -e 's/[[:space:]]#.*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
 }
 
 # help prints this file's header comment, without the hashes.
