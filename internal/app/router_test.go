@@ -15,11 +15,11 @@ import (
 
 	"github.com/algorand/go-codec/codec"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/proxy"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/proxy"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/fakealgod"
 )
 
 // waitHarness is a directory whose local node is absent, one peer backed by
@@ -105,19 +105,19 @@ func TestPeerWaitHoldsUntilHeartbeatThenForwards(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("still held after the heartbeat")
 	}
-	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" || lastRound(t, rec) != 11 {
-		t.Fatalf("wait answer: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" || lastRound(t, rec) != 11 {
+		t.Fatalf("wait answer: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if hits := h.n.Hits("/v2/status/wait-for-block-after"); hits != 1 {
 		t.Fatalf("wait forwarded %d times", hits)
 	}
-	if !strings.Contains(h.metricsText(), "loadb_wait_held_total 1") {
+	if !strings.Contains(h.metricsText(), "mesh_wait_held_total 1") {
 		t.Fatalf("held wait not counted:\n%s", h.metricsText())
 	}
 
 	// The client's next request, for the block the answer announced, finds
 	// the peer at that round.
-	if rec := h.get("/v2/blocks/11"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
+	if rec := h.get("/v2/blocks/11"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" {
 		t.Fatalf("block after the wait: %d %s", rec.Code, rec.Body.String())
 	}
 }
@@ -131,7 +131,7 @@ func TestPeerWaitPastRoundForwardsAtOnce(t *testing.T) {
 	if rec.Code != 200 || lastRound(t, rec) != 12 || time.Since(start) > time.Second {
 		t.Fatalf("wait for a past round: %d %s after %s", rec.Code, rec.Body.String(), time.Since(start))
 	}
-	if strings.Contains(h.metricsText(), "loadb_wait_held") {
+	if strings.Contains(h.metricsText(), "mesh_wait_held") {
 		t.Fatalf("a wait that never blocked was counted as held:\n%s", h.metricsText())
 	}
 }
@@ -140,8 +140,8 @@ func TestPeerWaitTimeoutAnswersWithStatus(t *testing.T) {
 	h := newWaitHarness(t, 300*time.Millisecond)
 	h.heartbeat(1, 10)
 	rec := h.get("/v2/status/wait-for-block-after/10")
-	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" || lastRound(t, rec) != 10 {
-		t.Fatalf("timed-out wait: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" || lastRound(t, rec) != 10 {
+		t.Fatalf("timed-out wait: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if hits := h.n.Hits("/v2/status/wait-for-block-after"); hits != 0 {
 		t.Fatalf("timed-out wait was forwarded %d times", hits)
@@ -189,8 +189,8 @@ func TestPeerWaitWakesOnLocalProgress(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("still held after the local node passed the round")
 	}
-	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "me" || lastRound(t, rec) != 11 {
-		t.Fatalf("wait answer: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "me" || lastRound(t, rec) != 11 {
+		t.Fatalf("wait answer: %d upstream=%q body=%s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if hits := h.n.Hits("/v2/status/wait-for-block-after"); hits != 0 {
 		t.Fatalf("forwarded to the peer %d times", hits)
@@ -215,7 +215,7 @@ func TestPeerWaitNotHeldForLaggingPeer(t *testing.T) {
 	if rec.Code != 503 || time.Since(start) > time.Second {
 		t.Fatalf("wait with only a lagging peer: %d %s after %s", rec.Code, rec.Body.String(), time.Since(start))
 	}
-	if strings.Contains(h.metricsText(), "loadb_wait_held") {
+	if strings.Contains(h.metricsText(), "mesh_wait_held") {
 		t.Fatalf("counted as held:\n%s", h.metricsText())
 	}
 }
@@ -238,31 +238,31 @@ func TestFailedMeshForwardFallsBackToExternal(t *testing.T) {
 	wh := &waitHarness{harness: h, n: n, r: r}
 	wh.heartbeat(1, 10)
 
-	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
-		t.Fatalf("healthy peer: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" {
+		t.Fatalf("healthy peer: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	if n := ext.Hits("/"); n != 0 {
 		t.Fatalf("external touched %d times while the peer serves", n)
 	}
 
 	n.SetFailing(true)
-	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if c, f := ext.Hits("/v2/status"), n.Hits("/v2/status"); c != 2 || f != 2 {
 		t.Fatalf("external hit %d times (check and request), peer %d", c, f)
 	}
 	// The check is still valid: no new one, the external is an alternate.
-	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("second fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := wh.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("second fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	if c := ext.Hits("/v2/status"); c != 3 {
 		t.Fatalf("external hit %d times, want one more request and no check", c)
 	}
 	// A write falls back too, with its body intact.
 	post := wh.post("/v2/transactions", "txnbytes")
-	if post.Code != 200 || post.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("broadcast fallback: %d %s %s", post.Code, post.Header().Get("X-Algod-Loadb-Mesh-Upstream"), post.Body.String())
+	if post.Code != 200 || post.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("broadcast fallback: %d %s %s", post.Code, post.Header().Get("X-Algod-Mesh-Upstream"), post.Body.String())
 	}
 	if id, want := txIDFrom(post.Body.Bytes()), directTxID(t, ext, "txnbytes"); id == "" || id != want {
 		t.Fatalf("broadcast body not replayed to the external: got id %q want %q", id, want)
@@ -359,16 +359,16 @@ func TestEveryMeshNodeIsTriedBeforeTheExternal(t *testing.T) {
 	h.n.SetFailing(true)
 	h.c.SetFailing(true)
 
-	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("read fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("read fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	if b, c := h.n.Hits("/v2/status"), h.c.Hits("/v2/status"); b != 1 || c != 1 {
 		t.Fatalf("mesh nodes tried b=%d c=%d, want once each", b, c)
 	}
 
 	rec := h.post("/v2/transactions", "txnbytes")
-	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("write fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("write fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if b, c := h.n.Hits("/v2/transactions"), h.c.Hits("/v2/transactions"); b != 1 || c != 1 {
 		t.Fatalf("mesh nodes tried for the write b=%d c=%d, want once each", b, c)
@@ -376,7 +376,7 @@ func TestEveryMeshNodeIsTriedBeforeTheExternal(t *testing.T) {
 	if id, want := txIDFrom(rec.Body.Bytes()), directTxID(t, h.ext, "txnbytes"); id != want {
 		t.Fatalf("body not replayed: got id %q want %q", id, want)
 	}
-	if !strings.Contains(h.metricsText(), "loadb_retries_total 4") {
+	if !strings.Contains(h.metricsText(), "mesh_retries_total 4") {
 		t.Fatalf("retries not counted:\n%s", h.metricsText())
 	}
 }
@@ -388,8 +388,8 @@ func TestRejectedTransactionIsNotRetried(t *testing.T) {
 	h.n.SetRejecting(true)
 
 	rec := h.post("/v2/transactions", "txnbytes")
-	if rec.Code != 400 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
-		t.Fatalf("rejection: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec.Code != 400 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" {
+		t.Fatalf("rejection: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if c, e := h.c.Hits("/v2/transactions"), h.ext.Hits("/"); c != 0 || e != 0 {
 		t.Fatalf("rejection retried: peer c %d, external %d", c, e)
@@ -402,8 +402,8 @@ func TestMultiBroadcastFallsBackToExternalWhenNoNodeAnswers(t *testing.T) {
 	h.n.SetFailing(true)
 	h.c.SetFailing(true)
 	rec := h.post("/v2/transactions", "txnbytes")
-	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("multi-broadcast fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), rec.Body.String())
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("multi-broadcast fallback: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
 	}
 	if id, want := txIDFrom(rec.Body.Bytes()), directTxID(t, h.ext, "txnbytes"); id != want {
 		t.Fatalf("body not replayed: got id %q want %q", id, want)
@@ -458,13 +458,13 @@ func TestRetryBudgetCapsMeshAttempts(t *testing.T) {
 	h.n.SetFailing(true)
 	h.c.SetFailing(true)
 	rec := h.get("/v2/status")
-	if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("capped fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("capped fallback: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	if b, c := h.n.Hits("/v2/status"), h.c.Hits("/v2/status"); b+c != 1 {
 		t.Fatalf("mesh attempts b=%d c=%d, want one in all", b, c)
 	}
-	if !strings.Contains(h.metricsText(), "loadb_retries_total 1") {
+	if !strings.Contains(h.metricsText(), "mesh_retries_total 1") {
 		t.Fatalf("retries:\n%s", h.metricsText())
 	}
 }
@@ -481,7 +481,7 @@ func TestOversizedBodyIsSentOnce(t *testing.T) {
 	if b, c, e := h.n.Hits("/v2/transactions"), h.c.Hits("/v2/transactions"), h.ext.Hits("/"); b+c != 1 || e != 0 {
 		t.Fatalf("attempts b=%d c=%d ext=%d, want one in all", b, c, e)
 	}
-	if strings.Contains(h.metricsText(), "loadb_retries_total") {
+	if strings.Contains(h.metricsText(), "mesh_retries_total") {
 		t.Fatalf("oversized write retried:\n%s", h.metricsText())
 	}
 }
@@ -513,8 +513,8 @@ func TestUpstreamTimeoutPassesOverHangingNodes(t *testing.T) {
 	h.c.SetHang(true)
 	start := time.Now()
 	rec := h.get("/v2/status")
-	if el := time.Since(start); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" || el > 2*time.Second {
-		t.Fatalf("hanging mesh with time to spare: %d %s after %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"), el)
+	if el := time.Since(start); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" || el > 2*time.Second {
+		t.Fatalf("hanging mesh with time to spare: %d %s after %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), el)
 	}
 }
 
@@ -556,7 +556,7 @@ func TestBalancerWaitStatusTimeout(t *testing.T) {
 	}
 }
 
-// A probe of /loadb/health finds nothing in the mesh and checks the
+// A probe of /mesh/health finds nothing in the mesh and checks the
 // externals, as a request would: an agent that would serve from one is
 // healthy before any request reaches it, so a probe that gates traffic on
 // the answer does not wait for a request that can never arrive.
@@ -568,14 +568,14 @@ func TestHealthChecksExternalsWhenMeshCannotServe(t *testing.T) {
 		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
 	wh := &waitHarness{harness: h, r: r}
 
-	if rec := wh.get("/loadb/health"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"best_round":500`) {
+	if rec := wh.get("/mesh/health"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"best_round":500`) {
 		t.Fatalf("health with an unchecked external: %d %s", rec.Code, rec.Body.String())
 	}
 	if n := clients.count("http://ext"); n != 1 {
 		t.Fatalf("%d checks, want 1", n)
 	}
 	// While the check is valid a probe repeats nothing.
-	if rec := wh.get("/loadb/health"); rec.Code != 200 || clients.count("http://ext") != 1 {
+	if rec := wh.get("/mesh/health"); rec.Code != 200 || clients.count("http://ext") != 1 {
 		t.Fatalf("health within the validity: %d, %d checks", rec.Code, clients.count("http://ext"))
 	}
 	// An external that fails its check leaves the agent unhealthy.
@@ -583,7 +583,7 @@ func TestHealthChecksExternalsWhenMeshCannotServe(t *testing.T) {
 	clients.fail = true
 	clients.mu.Unlock()
 	h.fc.Advance(6 * time.Second)
-	if rec := wh.get("/loadb/health"); rec.Code != 503 || clients.count("http://ext") != 2 {
+	if rec := wh.get("/mesh/health"); rec.Code != 503 || clients.count("http://ext") != 2 {
 		t.Fatalf("health with a failing external: %d, %d checks", rec.Code, clients.count("http://ext"))
 	}
 }
@@ -666,7 +666,7 @@ func TestTimeTravelRoutesToHistoryNode(t *testing.T) {
 		return rec
 	}
 	upstream := func(rec *httptest.ResponseRecorder) string {
-		return rec.Header().Get("X-Algod-Loadb-Mesh-Upstream")
+		return rec.Header().Get("X-Algod-Mesh-Upstream")
 	}
 
 	if rec := get("/v2/status"); rec.Code != 200 || upstream(rec) != "b" {
@@ -796,12 +796,12 @@ func TestRequestTimeoutBoundsExternalCheck(t *testing.T) {
 // falls back to the external.
 func TestExcludedPeerIsNeverTried(t *testing.T) {
 	h := newTwoPeerHarnessOpts(t, func(o *DirectoryOptions) { o.Exclude = []string{"c"} }, nil)
-	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
-		t.Fatalf("read: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" {
+		t.Fatalf("read: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	h.n.SetFailing(true)
-	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "ext" {
-		t.Fatalf("retry: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "ext" {
+		t.Fatalf("retry: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	if n := h.c.Hits("/v2/status"); n != 0 {
 		t.Fatalf("excluded peer hit %d times", n)
@@ -838,7 +838,7 @@ func TestExcludedPeerDoesNotReleaseWait(t *testing.T) {
 	h.heartbeat(2, 11)
 	select {
 	case rec := <-done:
-		if rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" || lastRound(t, rec) != 11 {
+		if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" || lastRound(t, rec) != 11 {
 			t.Fatalf("wait answer: %d %s", rec.Code, rec.Body.String())
 		}
 	case <-time.After(2 * time.Second):
@@ -861,8 +861,8 @@ func TestExcludedPeerAheadDoesNotMakeOthersLag(t *testing.T) {
 	if u := upstream(t, cands, "b"); u.Health != domain.HealthSynced || best != 10 {
 		t.Fatalf("routable peer judged against the excluded one: %s best=%d", u.Health, best)
 	}
-	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
-		t.Fatalf("status: %d %s", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := h.get("/v2/status"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" {
+		t.Fatalf("status: %d %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	if n := h.ext.Hits("/"); n != 0 {
 		t.Fatalf("external hit %d times", n)

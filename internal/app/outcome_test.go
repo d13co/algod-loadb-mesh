@@ -3,7 +3,7 @@ package app
 import (
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 func outcome(status, ms int) ports.Outcome {

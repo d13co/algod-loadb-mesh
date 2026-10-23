@@ -21,9 +21,9 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/crypto"
 	"github.com/algorand/go-algorand-sdk/v2/transaction"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryalgo"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/registryalgo"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 var (

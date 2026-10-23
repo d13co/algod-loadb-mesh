@@ -11,7 +11,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // Hub routes datagrams between endpoints by address.

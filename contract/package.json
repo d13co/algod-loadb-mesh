@@ -1,7 +1,7 @@
 {
-  "name": "algod-loadb-mesh-registry-contract",
+  "name": "algod-mesh-registry-contract",
   "version": "1.0.0",
-  "description": "algod-loadb-mesh registry application (docs/REGISTRY_CONTRACT.md)",
+  "description": "algod-mesh registry application (docs/REGISTRY_CONTRACT.md)",
   "main": "smart_contracts/index.ts",
   "scripts": {
     "build": "algokit compile ts smart_contracts --out-dir artifacts --output-bytecode --output-source-map --no-output-arc32 --target-avm-version 10 && algokit generate client smart_contracts/artifacts --output {app_spec_dir}/{contract_name}Client.ts",

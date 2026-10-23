@@ -12,7 +12,7 @@ import (
 
 	"github.com/algorand/go-algorand-sdk/v2/types"
 
-	"github.com/d13co/algod-loadb-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/config"
 )
 
 // The examples must keep up with the config schema: every key known, and
@@ -298,7 +298,7 @@ func TestAutoconfigInstance(t *testing.T) {
 	if c.Local.ID != "k44-testnet" {
 		t.Errorf("id = %q", c.Local.ID)
 	}
-	if c.Registry.Cache != "/var/lib/algod-loadb-mesh/testnet.registry.cache" {
+	if c.Registry.Cache != "/var/lib/algod-mesh/testnet.registry.cache" {
 		t.Errorf("cache = %q", c.Registry.Cache)
 	}
 	if c.Listen.String() != "10.112.0.44:4002" || c.Mesh.Listen.String() != "10.112.0.44:4003" {
@@ -307,7 +307,7 @@ func TestAutoconfigInstance(t *testing.T) {
 	// --id still wins.
 	c = autoconfigRun(t, t.TempDir(), "{}", "0.0.0.0:8080", "", nil, "--no-nodely", "--address", "10.112.0.44",
 		"--instance", "testnet", "--app-id", "7", "--sync-key-file", writeSyncKey(t, dir))
-	if c.Local.ID != "k44" || c.Registry.Cache != "/var/lib/algod-loadb-mesh/testnet.registry.cache" {
+	if c.Local.ID != "k44" || c.Registry.Cache != "/var/lib/algod-mesh/testnet.registry.cache" {
 		t.Errorf("--id with --instance: id %q, cache %q", c.Local.ID, c.Registry.Cache)
 	}
 }

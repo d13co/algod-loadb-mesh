@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 func recv(t *testing.T, tr *Transport) ports.GossipMessage {

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // Status is the subset of algod's /v2/status the agent uses.

@@ -37,7 +37,7 @@ Settled with the user:
 Why not iptables: DNAT needs root / CAP_NET_ADMIN and persistence across
 reboots, conntrack plus WireGuard cryptokey routing make the return path easy
 to get wrong (the source-selection problem MULTI.md §5 solved for UDP, but in
-the kernel and invisible), and nothing shows it in `/loadb/status` or a test.
+the kernel and invisible), and nothing shows it in `/mesh/status` or a test.
 A userspace splice terminates TCP locally so the reply leaves by the socket
 that accepted it, costs one copy per direction on REST-sized traffic, runs as
 the `algorand` user under the existing systemd hardening, and is testable.
@@ -126,7 +126,7 @@ host:port is in none of `local.advertise_endpoints` (compare via `url.Parse` +
 resolves publicly does not warn; accepted, the entries are mesh IPs by
 construction and autoconfig never writes a hostname.
 
-`config check` (`cmd/algod-loadb-mesh/main.go:175-183`): node branch adds a
+`config check` (`cmd/algod-mesh/main.go:175-183`): node branch adds a
 `passthrough %s` line via `orNone` **after** the `listen …, advertising …`
 line, so `deploy/setup.sh`'s `sed -n 's/^listen \([^,]*\).*/\1/p'` still
 matches.
@@ -172,10 +172,10 @@ func HostPort(baseURL string) string
 `context.Canceled` racing `case <-ctx.Done()` would skip the whole shutdown
 sequence on SIGTERM. `Serve` is never built with zero listeners (§5).
 
-Per connection: `Inc("loadb_passthrough_accepted", "addr", ln)`; `t :=
-target()`; empty → `Inc("loadb_passthrough_dial_failures", "reason",
+Per connection: `Inc("mesh_passthrough_accepted", "addr", ln)`; `t :=
+target()`; empty → `Inc("mesh_passthrough_dial_failures", "reason",
 "no_target")`, close; `net.Dialer.DialContext` with a 5 s timeout, failure →
-`reason=dial`, one debug log; then `active++` / `Gauge("loadb_passthrough_active")`,
+`reason=dial`, one debug log; then `active++` / `Gauge("mesh_passthrough_active")`,
 two `io.Copy` goroutines, each followed by `CloseWrite()` on the side it
 finished writing to (type-assert `interface{ CloseWrite() error }`, else
 `Close`); wait for both; on teardown `active--`, re-`Gauge`, delete from
@@ -273,7 +273,7 @@ Router: `type PassthroughStatus struct { Addrs []string; Skipped []string;
 Target string; Active int64 }` (json tags `addrs`, `skipped,omitempty`,
 `target`, `active`) and `func (r *Router) SetPassthrough(f func()
 PassthroughStatus)` (an `atomic.Pointer`, set from `agent.Serve`).
-`serveAgent`'s `/loadb/status` map (`router.go:632`) gains `"passthrough"`
+`serveAgent`'s `/mesh/status` map (`router.go:632`) gains `"passthrough"`
 only when set, next to `"links"`. It is set whenever `local.passthrough` is
 configured, even when every entry was skipped (`addrs: []`, `skipped` full,
 `target` still filled), so an operator can tell "configured, redundant" from
@@ -317,10 +317,10 @@ traffic keeps using the node's first endpoint"; say a peer proxies to the
 advertised endpoint on the host of its current heartbeat path, else the first;
 then the pass-through paragraph: what `local.passthrough` does, the startup
 skip and why, that algod moving to a wildcard needs the entry removed and a
-restart, the `/loadb/status` key and metrics, that peers only use an
+restart, the `/mesh/status` key and metrics, that peers only use an
 address that is also in `advertise_endpoints`, and the exposure in one
 sentence: the splice publishes algod itself on those addresses, outside the
-agent's listener (no client token, no routing, breaker or retry, no `/loadb`
+agent's listener (no client token, no routing, breaker or retry, no `/mesh`
 view of those requests), so a host on the mesh holding the node's algod token
 reaches algod directly, as it already can on the address algod binds. The
 autoconfig recap (`README.md` ~83-92) replaces "the first one hosts the algod
@@ -367,7 +367,7 @@ proxied traffic follows the path too", rather than rewriting the old plan.
   `gossipudp/udp_test.go:30-33`), so a `Listen` failure for any other reason
   is a real failure. `TestSplice`: an `httptest.Server` on 127.0.0.1,
   pass-through on `127.0.0.2:0`, `http.Get` through it returns the body and
-  `loadb_passthrough_accepted` is 1. `TestHalfClose`: against a raw TCP echo
+  `mesh_passthrough_accepted` is 1. `TestHalfClose`: against a raw TCP echo
   server, the client `CloseWrite`s and still reads everything back.
   `TestDialFailure`: closed target port → client sees EOF,
   `dial_failures{reason="dial"}`; `target()` returning `""` →
@@ -402,12 +402,12 @@ proxied traffic follows the path too", rather than rewriting the old plan.
   warning per drop. `TestServeSkipsCoveredPassthrough`: a fake
   `ConfigReader` with `NetAddr` `0.0.0.0:8080` and `passthrough:
   [127.0.0.2:8080]` → `Serve` is still running after the services have
-  started, `/loadb/status` shows `passthrough.addrs` empty and `skipped`
+  started, `/mesh/status` shows `passthrough.addrs` empty and `skipped`
   full, and cancelling returns `nil`; this is the regression the design most
   needs. `TestServePassthrough`: `NetAddr` set to a loopback `httptest`
   server, one pass-through entry on `127.0.0.2` at a free port → a GET through
   it returns the body, then cancel returns `nil` and the port is free again.
-- `cmd/algod-loadb-mesh` — pull the node-branch summary of `config check`
+- `cmd/algod-mesh` — pull the node-branch summary of `config check`
   into `func checkSummary(c config.Config) string` and add `main_test.go`:
   the output's `listen` line, fed through the exact `sed` expression from
   `deploy/setup.sh:136`, yields the first client address, and a
@@ -438,8 +438,8 @@ proxied traffic follows the path too", rather than rewriting the old plan.
    and the "127.0.0.3:8080 is not in local.advertise_endpoints" warning.
 3. `run`: `ss -ltn` shows `127.0.0.2:8080` and `127.0.0.3:8080`;
    `curl http://127.0.0.2:8080/` returns the directory listing;
-   `/loadb/status` shows `passthrough: {addrs, target: "127.0.0.1:8080",
-   active}`; `/loadb/metrics` shows `loadb_passthrough_accepted`.
+   `/mesh/status` shows `passthrough: {addrs, target: "127.0.0.1:8080",
+   active}`; `/mesh/metrics` shows `mesh_passthrough_accepted`.
 4. Skip: `algod.net` = `0.0.0.0:8080` (server rebound with `--bind 0.0.0.0`),
    restart the agent: the log warns both entries are covered, nothing extra
    is bound. Then `algod.net` = `127.0.0.2:8080` with the server there: only

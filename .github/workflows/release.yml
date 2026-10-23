@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   release:
-    if: github.repository == 'd13co/algod-loadb-mesh'
+    if: github.repository == 'd13co/algod-mesh' || github.repository == 'd13co/algod-loadb-mesh' # the old name, until the repo is renamed
     runs-on: ubuntu-latest
     permissions:
       contents: write # the release, and the stable push
@@ -30,7 +30,7 @@ jobs:
       - run: make lint
       - run: make test
       - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-      # amd64 last: the version check below runs bin/algod-loadb-mesh.
+      # amd64 last: the version check below runs bin/algod-mesh.
       - name: Build the binaries and .debs
         env:
           GOOS: linux
@@ -38,13 +38,13 @@ jobs:
           mkdir -p dist
           for arch in arm64 amd64; do
             GOARCH=$arch make build
-            cp bin/algod-loadb-mesh dist/algod-loadb-mesh-linux-$arch
+            cp bin/algod-mesh dist/algod-mesh-linux-$arch
             DEB_VERSION=${GITHUB_REF_NAME#v} ARCH=$arch nfpm pkg -p deb -t dist/
           done
-          cd dist && sha256sum algod-loadb-mesh-linux-* *.deb > checksums.txt
+          cd dist && sha256sum algod-mesh-linux-* *.deb > checksums.txt
       - name: Check the version is stamped
         run: |
-          v=$(./bin/algod-loadb-mesh version | awk '{print $2}')
+          v=$(./bin/algod-mesh version | awk '{print $2}')
           [ "$v" = "${GITHUB_REF_NAME}" ] || { echo "binary says $v, tag is $GITHUB_REF_NAME"; exit 1; }
       - name: Publish the release
         env:
@@ -90,5 +90,5 @@ jobs:
           v=${GITHUB_REF_NAME#v}
           for a in amd64 arm64; do
             curl -fsS https://apt.d13.co/dists/stable/main/binary-$a/Packages?v=$v |
-              grep -qx "Filename: pool/algod-loadb-mesh_${v}_$a.deb" || { echo "no $v for $a"; exit 1; }
+              grep -qx "Filename: pool/algod-mesh_${v}_$a.deb" || { echo "no $v for $a"; exit 1; }
           done

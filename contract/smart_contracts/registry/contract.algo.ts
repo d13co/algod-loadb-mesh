@@ -1,7 +1,7 @@
 import { abimethod, assert, baremethod, BoxMap, bytes, Contract, Global, Txn, uint64 } from '@algorandfoundation/algorand-typescript'
 
 /**
- * algod-loadb-mesh fleet registry (docs/REGISTRY_CONTRACT.md §7).
+ * algod-mesh fleet registry (docs/REGISTRY_CONTRACT.md §7).
  *
  * ARC-4 application. Boxes named `n<tag>` hold one sealed NodeRecord each,
  * where the tag is a 16-byte keyed hash of the node id computed off chain, so

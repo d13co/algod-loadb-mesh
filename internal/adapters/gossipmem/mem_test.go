@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 func got(e *Endpoint) (ports.GossipMessage, bool) {

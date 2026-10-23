@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // ExternalUpstream is a static third-party RPC with no agent.
@@ -127,7 +127,7 @@ type link struct {
 	heardAt    time.Time // last authenticated heartbeat from this peer, any path; zero = never
 }
 
-// LinkStatus is one link as /loadb/status shows it.
+// LinkStatus is one link as /mesh/status shows it.
 type LinkStatus struct {
 	Peer     string       `json:"peer"`
 	Balancer bool         `json:"balancer,omitempty"`
@@ -288,8 +288,8 @@ func (d *Directory) SetRecords(recs []domain.NodeRecord) {
 	if switched {
 		d.nudgeHeartbeat()
 	}
-	d.metric.Gauge("loadb_peers", float64(len(seen)))
-	d.metric.Gauge("loadb_balancers", float64(len(balancers)))
+	d.metric.Gauge("mesh_peers", float64(len(seen)))
+	d.metric.Gauge("mesh_balancers", float64(len(balancers)))
 }
 
 // unmatchedExcludeLocked lists the routing.exclude ids that name no peer
@@ -399,7 +399,7 @@ func (d *Directory) chooseLocked(l *link, now time.Time) bool {
 		addr, rtt = l.paths[idx].addr, l.paths[idx].rtt
 	}
 	l.cur, l.switchedAt = idx, now
-	d.metric.Inc("loadb_path_switches", "reason", reason)
+	d.metric.Inc("mesh_path_switches", "reason", reason)
 	d.log.Info("mesh path", "peer", l.id, "addr", addr, "was", was, "rtt_ms", rtt.Milliseconds(), "reason", reason)
 	return true
 }
@@ -519,7 +519,7 @@ func (d *Directory) sendHeartbeat(ctx context.Context, st LocalState) {
 		jobs[i].wire = wire
 	}
 	d.send(ctx, jobs)
-	d.metric.Inc("loadb_heartbeats_sent")
+	d.metric.Inc("mesh_heartbeats_sent")
 	d.log.Debug("heartbeat sent", "seq", hb.Seq, "round", hb.LastRound, "online", hb.Online, "to", len(jobs))
 }
 
@@ -573,7 +573,7 @@ func (d *Directory) receiveLoop(ctx context.Context) {
 func (d *Directory) handle(ctx context.Context, msg ports.GossipMessage) {
 	env, err := domain.DecodeMessage(msg.Payload)
 	if err != nil {
-		d.metric.Inc("loadb_heartbeats_rejected", "reason", "decode")
+		d.metric.Inc("mesh_heartbeats_rejected", "reason", "decode")
 		d.log.Debug("udp received", "from", msg.From, "bytes", len(msg.Payload), "result", "undecodable", "err", err)
 		return
 	}
@@ -597,9 +597,9 @@ func (d *Directory) handle(ctx context.Context, msg ports.GossipMessage) {
 // path of a link changed.
 func (d *Directory) handleLocked(msg ports.GossipMessage, env domain.Envelope) (*domain.Probe, bool) {
 	from := domain.NormalizeAddr(msg.From)
-	kind, rejected := "loadb_heartbeats_rejected", "heartbeat"
+	kind, rejected := "mesh_heartbeats_rejected", "heartbeat"
 	if env.Probe != nil {
-		kind, rejected = "loadb_probes_rejected", env.Probe.Type
+		kind, rejected = "mesh_probes_rejected", env.Probe.Type
 	}
 	logMsg := func(result string) {
 		if env.HB != nil {
@@ -653,7 +653,7 @@ func (d *Directory) handleLocked(msg ports.GossipMessage, env domain.Envelope) (
 		logMsg("stale")
 		return nil, false // stale or duplicate
 	}
-	d.metric.Inc("loadb_heartbeats_received")
+	d.metric.Inc("mesh_heartbeats_received")
 	logMsg("accepted")
 	p.hb, p.seenAt, p.hasHB, p.silent = hb, now, true, false
 	// A held wait-for-block-after is released by a round a request may be
@@ -677,7 +677,7 @@ func (d *Directory) handleProbeLocked(l *link, from string, pr domain.Probe, now
 	var reply *domain.Probe
 	switch pr.Type {
 	case domain.ProbePing:
-		d.metric.Inc("loadb_probes_received", "type", "ping")
+		d.metric.Inc("mesh_probes_received", "type", "ping")
 		logMsg("ping")
 		reply = &domain.Probe{Type: domain.ProbePong, NodeID: d.opts.LocalID, Nonce: pr.Nonce, HeardMS: l.heardMS(now)}
 	case domain.ProbePong:
@@ -692,10 +692,10 @@ func (d *Directory) handleProbeLocked(l *link, from string, pr domain.Probe, now
 					path.rtt = time.Duration(0.8*float64(path.rtt) + 0.2*float64(sample))
 				}
 				path.nonce, path.pongedAt, path.fails, path.deaf, path.noRoute = 0, now, 0, false, false
-				d.metric.Gauge("loadb_path_rtt_ms", float64(path.rtt.Microseconds())/1000, "peer", l.id, "addr", path.addr)
+				d.metric.Gauge("mesh_path_rtt_ms", float64(path.rtt.Microseconds())/1000, "peer", l.id, "addr", path.addr)
 			}
 		}
-		d.metric.Inc("loadb_probes_received", "type", "pong", "matched", boolStr(matched))
+		d.metric.Inc("mesh_probes_received", "type", "pong", "matched", boolStr(matched))
 		if !matched {
 			logMsg("pong_unmatched")
 			return nil, false
@@ -763,7 +763,7 @@ func (d *Directory) probeSilentPeers(ctx context.Context) {
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			st, err := d.clients.NewAlgodClient(j.url, j.tok).Status(pctx)
-			d.metric.Inc("loadb_peer_probes", "ok", boolStr(err == nil))
+			d.metric.Inc("mesh_peer_probes", "ok", boolStr(err == nil))
 			d.mu.Lock()
 			defer d.mu.Unlock()
 			p, ok := d.peers[j.id]
@@ -804,7 +804,7 @@ func (d *Directory) checkPaths(ctx context.Context) {
 			if path.nonce != 0 && now.Sub(path.pingedAt) >= d.opts.PathTimeout {
 				path.nonce = 0
 				path.fails++
-				d.metric.Inc("loadb_path_losses", "peer", l.id)
+				d.metric.Inc("mesh_path_losses", "peer", l.id)
 				d.log.Debug("mesh path ping lost", "peer", l.id, "addr", path.addr, "losses", path.fails)
 			}
 			if path.nonce != 0 {
@@ -859,7 +859,7 @@ func (d *Directory) checkPaths(ctx context.Context) {
 	}
 }
 
-// LinkSnapshot reports every link and its candidate paths for /loadb/status.
+// LinkSnapshot reports every link and its candidate paths for /mesh/status.
 func (d *Directory) LinkSnapshot() []LinkStatus {
 	now := d.clock.Now()
 	d.mu.Lock()
@@ -971,7 +971,7 @@ func (d *Directory) checkExternal(e *extState, done chan struct{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), externalCheckTimeout)
 	defer cancel()
 	st, err := e.client.Status(ctx)
-	d.metric.Inc("loadb_external_checks", "name", e.cfg.Name, "ok", boolStr(err == nil))
+	d.metric.Inc("mesh_external_checks", "name", e.cfg.Name, "ok", boolStr(err == nil))
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e.inflight = nil

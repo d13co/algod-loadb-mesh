@@ -14,11 +14,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/passthrough"
-	"github.com/d13co/algod-loadb-mesh/internal/app"
-	"github.com/d13co/algod-loadb-mesh/internal/config"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/adapters/passthrough"
+	"github.com/d13co/algod-mesh/internal/app"
+	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // Version is set by the build.
@@ -44,7 +44,7 @@ type Deps struct {
 	loopback     *loopback // set when the registry goes through the router
 }
 
-// Agent is one running loadb instance.
+// Agent is one running mesh agent.
 type Agent struct {
 	Monitor   *app.Monitor
 	Directory *app.Directory
@@ -229,7 +229,7 @@ func (a *Agent) Serve(ctx context.Context) error {
 }
 
 // passthrough binds local.passthrough minus what algod already covers, judged
-// from algod.net now, and publishes the outcome in /loadb/status. It returns
+// from algod.net now, and publishes the outcome in /mesh/status. It returns
 // nil when nothing is configured or nothing is left to bind: a Server with no
 // listeners would return from Serve at once and stop the agent.
 func (a *Agent) passthrough() (*passthrough.Server, error) {

@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // errQuotaExceeded is the cause a simulation in flight is cancelled with once
@@ -27,7 +27,7 @@ import (
 var errQuotaExceeded = errors.New("rate limit: allowance exhausted during the request")
 
 // costHeader tells the client what a request cost, in credits.
-const costHeader = "X-Algod-Loadb-Mesh-Cost"
+const costHeader = "X-Algod-Mesh-Cost"
 
 // loopbackAddr is the RemoteAddr of the agent's own registry reads, which go
 // through the router in-process (agent.loopback). No network client has it:
@@ -235,8 +235,8 @@ func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*T
 	unreadable := class.Simulate && class.SimNeeds == nil && plan.Simulate != (domain.SimulateCaps{})
 	if class.Simulate && class.SimNeeds != nil {
 		if msg := plan.Simulate.Check(*class.SimNeeds); msg != "" {
-			l.metric.Inc("loadb_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
-			return nil, &Denial{Status: http.StatusForbidden, Message: "algod-loadb-mesh: " + msg}
+			l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
+			return nil, &Denial{Status: http.StatusForbidden, Message: "algod-mesh: " + msg}
 		}
 	}
 	cost := l.opts.Weights.Base(class, best)
@@ -245,9 +245,9 @@ func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*T
 		domain.Window
 	}{{"minute", plan.Minute}, {"day", plan.Day}} {
 		if w.Limited() && cost > w.Capacity {
-			l.metric.Inc("loadb_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
+			l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
 			return nil, &Denial{Status: http.StatusForbidden,
-				Message: fmt.Sprintf("algod-loadb-mesh: this request costs %s credits, more than this plan allows per %s (%s)", credits(cost), w.name, credits(w.Capacity))}
+				Message: fmt.Sprintf("algod-mesh: this request costs %s credits, more than this plan allows per %s (%s)", credits(cost), w.name, credits(w.Capacity))}
 		}
 	}
 	now := l.clock.Now()
@@ -256,14 +256,14 @@ func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*T
 	k := l.key(id, plan)
 	k.refill(now)
 	if wait, window := k.shortfall(cost); window != "" {
-		l.metric.Inc("loadb_ratelimited", "plan", plan.Name, "class", costKey, "reason", window)
+		l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", window)
 		return nil, &Denial{Status: http.StatusTooManyRequests, RetryAfter: wait, Header: k.header(),
-			Message: fmt.Sprintf("algod-loadb-mesh: rate limit exceeded: this plan's %s allowance is used up", perWindow(window))}
+			Message: fmt.Sprintf("algod-mesh: rate limit exceeded: this plan's %s allowance is used up", perWindow(window))}
 	}
 	k.charge(cost)
 	if unreadable {
-		l.metric.Inc("loadb_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
-		return nil, &Denial{Status: http.StatusBadRequest, Header: k.header(), Message: "algod-loadb-mesh: cannot read the simulate request"}
+		l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
+		return nil, &Denial{Status: http.StatusBadRequest, Header: k.header(), Message: "algod-mesh: cannot read the simulate request"}
 	}
 	t := &Ticket{l: l, k: k, costKey: costKey, base: cost, metered: class.Simulate, start: now}
 	// Every request in flight keeps its key: one billed by effort is charged
@@ -475,7 +475,7 @@ func (t *Ticket) Done() {
 	case t.metered && !t.refunded:
 		by = "time"
 	}
-	l.metric.Observe("loadb_credits", t.base+t.extra, "plan", t.k.plan.Name, "class", t.costKey, "by", by)
+	l.metric.Observe("mesh_credits", t.base+t.extra, "plan", t.k.plan.Name, "class", t.costKey, "by", by)
 }
 
 // refund gives back the base cost of a request that did no work, down to
@@ -487,7 +487,7 @@ func (t *Ticket) refund() {
 		t.base = floor
 	}
 	t.extra, t.frozen, t.refunded = 0, true, true
-	t.l.metric.Inc("loadb_ratelimit_refunded", "plan", t.k.plan.Name, "class", t.costKey)
+	t.l.metric.Inc("mesh_ratelimit_refunded", "plan", t.k.plan.Name, "class", t.costKey)
 }
 
 // Exhausted is the answer to a simulation cancelled for an exhausted
@@ -499,7 +499,7 @@ func (t *Ticket) Exhausted() *Denial {
 	t.k.refill(l.clock.Now())
 	wait, _ := t.k.shortfall(t.base)
 	return &Denial{Status: http.StatusTooManyRequests, RetryAfter: max(wait, time.Second), Header: t.k.header(),
-		Message: "algod-loadb-mesh: rate limit exceeded: the allowance ran out during the simulation"}
+		Message: "algod-mesh: rate limit exceeded: the allowance ran out during the simulation"}
 }
 
 // meter is what the request has run up by now; l.mu is held.
@@ -530,7 +530,7 @@ func (l *Limiter) tick() {
 			}
 			t.frozen, t.cancelled = true, true
 			t.cancel(errQuotaExceeded)
-			l.metric.Inc("loadb_ratelimit_cancelled", "plan", k.plan.Name)
+			l.metric.Inc("mesh_ratelimit_cancelled", "plan", k.plan.Name)
 			l.log.Debug("rate limit: simulation cancelled, allowance exhausted", "client", k.id, "billed", credits(t.base+t.extra))
 		}
 	}
@@ -557,7 +557,7 @@ func (l *Limiter) sweep() {
 			l.overflow = nil
 		}
 	}
-	l.metric.Gauge("loadb_ratelimit_keys", float64(len(l.keys)))
+	l.metric.Gauge("mesh_ratelimit_keys", float64(len(l.keys)))
 }
 
 // Run meters simulations in flight, and sweeps and saves the allowances,

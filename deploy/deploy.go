@@ -1,5 +1,5 @@
 // Package deploy embeds the example configurations so the binary can print
-// them (`algod-loadb-mesh config example`).
+// them (`algod-mesh config example`).
 package deploy
 
 import _ "embed"

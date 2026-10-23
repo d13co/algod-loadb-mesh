@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // Forwarder holds the shared transport.

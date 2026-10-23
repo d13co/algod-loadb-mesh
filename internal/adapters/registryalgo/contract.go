@@ -7,7 +7,7 @@ import (
 
 	"github.com/algorand/go-algorand-sdk/v2/abi"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // The registry application, an ARC-4 contract. Boxes named n<tag> hold one

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // RegistrySyncOptions configures registry polling and self-registration.
@@ -104,12 +104,12 @@ func (s *RegistrySync) refresh(ctx context.Context, registered *bool) bool {
 	recs, round, err := s.reg.List(rctx)
 	cancel()
 	if err != nil {
-		s.metric.Inc("loadb_registry_reads", "ok", "false")
+		s.metric.Inc("mesh_registry_reads", "ok", "false")
 		s.log.Warn("registry read failed", "err", err)
 		return false
 	}
-	s.metric.Inc("loadb_registry_reads", "ok", "true")
-	s.metric.Gauge("loadb_registry_round", float64(round))
+	s.metric.Inc("mesh_registry_reads", "ok", "true")
+	s.metric.Gauge("mesh_registry_round", float64(round))
 	if s.opts.AutoRegister && !*registered {
 		if want, ok := s.local(); ok {
 			rec, changed, err := s.register(ctx, recs, want, round)
@@ -146,11 +146,11 @@ func (s *RegistrySync) register(ctx context.Context, recs []domain.NodeRecord, w
 	wctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	if err := s.reg.Put(wctx, want); err != nil {
-		s.metric.Inc("loadb_registry_writes", "ok", "false")
+		s.metric.Inc("mesh_registry_writes", "ok", "false")
 		s.log.Warn("self-registration failed", "err", err)
 		return want, false, err
 	}
-	s.metric.Inc("loadb_registry_writes", "ok", "true")
+	s.metric.Inc("mesh_registry_writes", "ok", "true")
 	s.log.Info("registered this node", "id", want.ID, "version", want.Version, "endpoints", want.Endpoints)
 	return want, true, nil
 }

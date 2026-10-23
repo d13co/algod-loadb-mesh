@@ -1,4 +1,4 @@
-// Package domain holds the pure core of algod-loadb-mesh: value types and the
+// Package domain holds the pure core of algod-mesh: value types and the
 // functions that decide where a request goes. Nothing in this package does
 // I/O, reads the clock or touches a socket; time and randomness are always
 // passed in. Every function here is unit-testable with plain values.

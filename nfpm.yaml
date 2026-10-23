@@ -3,35 +3,41 @@
 #   GOARCH=arm64 make build && DEB_VERSION=1.2.3 ARCH=arm64 nfpm pkg -p deb -t dist/
 #
 # Like install.sh it configures nothing but its own upgrades (it lets
-# unattended-upgrades install from apt.d13.co): algod-loadb-mesh-setup writes
+# unattended-upgrades install from apt.d13.co): algod-mesh-setup writes
 # the config and the unit (from the template in /usr/share) and starts the service.
-name: algod-loadb-mesh
+name: algod-mesh
 arch: ${ARCH}
 version: ${DEB_VERSION}
 maintainer: Tasos Bitsios <bit@d13.co>
 description: Mesh load balancer for algod REST endpoints
-homepage: https://github.com/d13co/algod-loadb-mesh
+homepage: https://github.com/d13co/algod-mesh
 section: net
 depends:
   - iproute2 # autoconfig reads the mesh interfaces
+# The package was called algod-loadb-mesh: installing this one removes it.
+# Its config, state and units stay behind; README "Moving from algod-loadb-mesh".
+replaces:
+  - algod-loadb-mesh
+conflicts:
+  - algod-loadb-mesh
 recommends:
   - openssl # autoconfig decodes rekeyed bundles with it
   - unattended-upgrades # installs new releases, see the apt.conf.d file below
 contents:
-  - src: bin/algod-loadb-mesh
-    dst: /usr/bin/algod-loadb-mesh
+  - src: bin/algod-mesh
+    dst: /usr/bin/algod-mesh
     file_info: {mode: 0755} # modes are explicit: the build host's umask leaks otherwise
   - src: deploy/autoconfig.sh
-    dst: /usr/bin/algod-loadb-mesh-autoconfig
+    dst: /usr/bin/algod-mesh-autoconfig
     file_info: {mode: 0755}
   - src: deploy/setup.sh
-    dst: /usr/bin/algod-loadb-mesh-setup
+    dst: /usr/bin/algod-mesh-setup
     file_info: {mode: 0755}
-  - src: deploy/algod-loadb-mesh.service
-    dst: /usr/share/algod-loadb-mesh/algod-loadb-mesh.service
+  - src: deploy/algod-mesh.service
+    dst: /usr/share/algod-mesh/algod-mesh.service
     file_info: {mode: 0644}
   - src: deploy/unattended-upgrades.conf
-    dst: /etc/apt/apt.conf.d/51algod-loadb-mesh-upgrades
+    dst: /etc/apt/apt.conf.d/51algod-mesh-upgrades
     type: config # a conffile: local edits and deletions survive upgrades
     file_info: {mode: 0644}
 scripts:

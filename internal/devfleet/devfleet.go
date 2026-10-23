@@ -1,5 +1,5 @@
 // Package devfleet composes N fake algod nodes and N agents in one process
-// with in-memory gossip and an in-memory registry. It backs `algod-loadb-mesh dev`
+// with in-memory gossip and an in-memory registry. It backs `algod-mesh dev`
 // and the simulator tests.
 package devfleet
 
@@ -13,16 +13,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/clock"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/gossipmem"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/metrics"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/proxy"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryfile"
-	"github.com/d13co/algod-loadb-mesh/internal/agent"
-	"github.com/d13co/algod-loadb-mesh/internal/config"
-	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/clock"
+	"github.com/d13co/algod-mesh/internal/adapters/gossipmem"
+	"github.com/d13co/algod-mesh/internal/adapters/metrics"
+	"github.com/d13co/algod-mesh/internal/adapters/proxy"
+	"github.com/d13co/algod-mesh/internal/adapters/registryfile"
+	"github.com/d13co/algod-mesh/internal/agent"
+	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // NodeSpec describes one fake node and its agent.

@@ -1,4 +1,4 @@
-module github.com/d13co/algod-loadb-mesh
+module github.com/d13co/algod-mesh
 
 go 1.27.1
 

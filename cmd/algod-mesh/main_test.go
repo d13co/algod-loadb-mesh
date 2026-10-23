@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/d13co/algod-loadb-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/config"
 )
 
 // setup.sh takes the first client address off the "listen" line of
@@ -38,8 +38,8 @@ func TestCheckSummaryListenLine(t *testing.T) {
 	if !strings.Contains(checkSummary(c), "\npassthrough none\n") {
 		t.Fatalf("no passthrough: %q", checkSummary(c))
 	}
-	c.Registry.Cache = "/var/lib/algod-loadb-mesh/testnet.registry.cache"
-	if !strings.Contains(checkSummary(c), "\nregistry static, cache /var/lib/algod-loadb-mesh/testnet.registry.cache, ") {
+	c.Registry.Cache = "/var/lib/algod-mesh/testnet.registry.cache"
+	if !strings.Contains(checkSummary(c), "\nregistry static, cache /var/lib/algod-mesh/testnet.registry.cache, ") {
 		t.Fatalf("no cache: %q", checkSummary(c))
 	}
 }
