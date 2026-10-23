@@ -153,12 +153,15 @@ func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, er
 		MaxRounds               uint64 `json:"max-rounds"`
 		MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
 		ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
+		MaxExecTraceBytes       uint64 `json:"max-exec-trace-bytes"`
+		TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("%s: decode: %w", path, err)
 	}
 	return &domain.SimulateLimits{MaxTxnGroups: raw.MaxTxnGroups, MaxRounds: raw.MaxRounds,
-		MaxExtraOpcodeBudget: raw.MaxExtraOpcodeBudget, ResourceLimitMultiplier: raw.ResourceLimitMultiplier}, nil
+		MaxExtraOpcodeBudget: raw.MaxExtraOpcodeBudget, ResourceLimitMultiplier: raw.ResourceLimitMultiplier,
+		MaxExecTraceBytes: raw.MaxExecTraceBytes, TimeLimitSeconds: raw.TimeLimitSeconds}, nil
 }
 
 // BoxNames implements ports.AlgodClient.

@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -27,19 +29,234 @@ import (
 
 // Config is the whole file.
 type Config struct {
-	Role            string  `yaml:"role"` // node | balancer
-	Mode            string  `yaml:"mode"`
-	Listen          Addrs   `yaml:"listen"`
-	ClientToken     string  `yaml:"client_token"`
-	ClientTokenFile string  `yaml:"client_token_file"`
-	AdminToken      string  `yaml:"admin_token"`      // required for /loadb/*; also accepted as a client token
-	AdminTokenFile  string  `yaml:"admin_token_file"` // default: algod.admin.token in local.data_dir
-	Log             Log     `yaml:"log"`
-	Local           Local   `yaml:"local"`
-	Registry        Reg     `yaml:"registry"`
-	Mesh            Mesh    `yaml:"mesh"`
-	Tiers           Tiers   `yaml:"tiers"`
-	Routing         Routing `yaml:"routing"`
+	Role            string    `yaml:"role"` // node | balancer
+	Mode            string    `yaml:"mode"`
+	Listen          Addrs     `yaml:"listen"`
+	ClientToken     string    `yaml:"client_token"`
+	ClientTokenFile string    `yaml:"client_token_file"`
+	AdminToken      string    `yaml:"admin_token"`      // required for /loadb/*; also accepted as a client token
+	AdminTokenFile  string    `yaml:"admin_token_file"` // default: algod.admin.token in local.data_dir
+	Log             Log       `yaml:"log"`
+	Local           Local     `yaml:"local"`
+	Registry        Reg       `yaml:"registry"`
+	Mesh            Mesh      `yaml:"mesh"`
+	Tiers           Tiers     `yaml:"tiers"`
+	Routing         Routing   `yaml:"routing"`
+	RateLimit       RateLimit `yaml:"ratelimit"`
+}
+
+// RateLimit limits each client in credits, per minute and per day. A request
+// costs its kind's weight; a simulation its weight per group and round, plus
+// simulate_per_second while it runs, and it is cancelled once the client's
+// allowance runs out. When the node that answers reports the work it did
+// (dtalgorand's EnableEffortHeader), the request costs its weight plus that
+// work at the effort rates instead of its running time. A client without a
+// token is limited by address under the anonymous plan; a listed token by
+// its plan; any other token gets 401.
+type RateLimit struct {
+	Enabled        bool     `yaml:"enabled"`
+	StateFile      string   `yaml:"state_file"`      // the allowances survive restarts here; default: memory only
+	TrustedProxies []string `yaml:"trusted_proxies"` // CIDRs or addresses whose X-Forwarded-For names the client
+	IPv6Prefix     int      `yaml:"ipv6_prefix"`     // default 64
+	MaxKeys        int      `yaml:"max_keys"`        // default 200000
+	// AnonymousPlan is the plan of requests without a token; "" refuses
+	// them. Default: free, when there is such a plan.
+	AnonymousPlan     *string             `yaml:"anonymous_plan"`
+	SimulatePerSecond *float64            `yaml:"simulate_per_second"` // default 20
+	Weights           map[string]float64  `yaml:"weights"`             // by cost key; unset keys keep their defaults
+	Effort            map[string]float64  `yaml:"effort"`              // units of reported work per credit, by EffortKeys; unset keys keep their defaults, 0 makes that work free
+	Plans             map[string]RatePlan `yaml:"plans"`
+	Tokens            []RateToken         `yaml:"tokens"`
+}
+
+// EffortKeys are the keys of ratelimit.effort.
+var EffortKeys = []string{"opcodes_per_credit", "lookups_per_credit", "history_per_credit", "scanned_per_credit", "trace_kb_per_credit"}
+
+// EffortRates is rates as a ratelimit.effort map.
+func EffortRates(r domain.EffortRates) map[string]float64 {
+	return map[string]float64{"opcodes_per_credit": r.OpcodesPerCredit, "lookups_per_credit": r.LookupsPerCredit,
+		"history_per_credit": r.HistoryPerCredit, "scanned_per_credit": r.ScannedPerCredit, "trace_kb_per_credit": r.TraceKBPerCredit}
+}
+
+// EffortRatesOf is the domain rates of a finished ratelimit.effort map.
+func (r RateLimit) EffortRatesOf() domain.EffortRates {
+	e := r.Effort
+	return domain.EffortRates{OpcodesPerCredit: e["opcodes_per_credit"], LookupsPerCredit: e["lookups_per_credit"],
+		HistoryPerCredit: e["history_per_credit"], ScannedPerCredit: e["scanned_per_credit"], TraceKBPerCredit: e["trace_kb_per_credit"]}
+}
+
+// RatePlan is one plan's allowance: credits per minute and per day, 0 for
+// no limit, and what one simulate request may ask for.
+type RatePlan struct {
+	PerMinute float64      `yaml:"per_minute"`
+	PerDay    float64      `yaml:"per_day"`
+	Simulate  SimulateCaps `yaml:"simulate"`
+}
+
+// SimulateCaps bounds one simulate request; 0 is no cap, and the options are
+// allowed unless set false.
+type SimulateCaps struct {
+	MaxGroups            int    `yaml:"max_groups"`
+	MaxRounds            int    `yaml:"max_rounds"`
+	MaxExtraOpcodeBudget uint64 `yaml:"max_extra_opcode_budget"`
+	UnnamedResources     *bool  `yaml:"unnamed_resources"`
+	ExecTrace            *bool  `yaml:"exec_trace"`
+}
+
+// RateToken is one API token clients may send, and its plan.
+type RateToken struct {
+	Name      string `yaml:"name"` // shown in logs, metrics and the state file
+	Token     string `yaml:"token"`
+	TokenFile string `yaml:"token_file"`
+	Plan      string `yaml:"plan"`
+}
+
+// TrustedPrefixes parses trusted_proxies; Finish has validated them.
+func (r RateLimit) TrustedPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range r.TrustedProxies {
+		if p, err := parsePrefix(s); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// parsePrefix reads a CIDR, or one address as a prefix of its own.
+func parsePrefix(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		return p.Masked(), err
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// finish applies the defaults and validates; adminToken is resolved.
+func (r *RateLimit) finish(clientToken, adminToken string) error {
+	if !r.Enabled {
+		return nil
+	}
+	if clientToken != "" {
+		return errors.New("ratelimit: client_token and client_token_file must be unset: list the tokens in ratelimit.tokens, and clients without one get ratelimit.anonymous_plan")
+	}
+	if len(r.Plans) == 0 {
+		return errors.New("ratelimit.plans: at least one plan is required")
+	}
+	for name, p := range r.Plans {
+		switch {
+		case name == "":
+			return errors.New("ratelimit.plans: a plan needs a name")
+		case !nonNegative(p.PerMinute) || !nonNegative(p.PerDay):
+			return fmt.Errorf("ratelimit.plans.%s: per_minute and per_day must not be negative (0 is unlimited)", name)
+		case p.Simulate.MaxGroups < 0 || p.Simulate.MaxRounds < 0:
+			return fmt.Errorf("ratelimit.plans.%s.simulate: caps must not be negative", name)
+		}
+	}
+	weights := map[string]float64{}
+	for k, v := range domain.DefaultCostWeights {
+		weights[k] = v
+	}
+	for k, v := range r.Weights {
+		if _, ok := weights[k]; !ok {
+			return fmt.Errorf("ratelimit.weights.%s: unknown; want one of %s", k, strings.Join(domain.CostKeys, ", "))
+		}
+		if !nonNegative(v) {
+			return fmt.Errorf("ratelimit.weights.%s: want a number, 0 or more", k)
+		}
+		weights[k] = v
+	}
+	r.Weights = weights
+	effort := EffortRates(domain.DefaultEffortRates)
+	for k, v := range r.Effort {
+		if _, ok := effort[k]; !ok {
+			return fmt.Errorf("ratelimit.effort.%s: unknown; want one of %s", k, strings.Join(EffortKeys, ", "))
+		}
+		if !nonNegative(v) {
+			return fmt.Errorf("ratelimit.effort.%s: want a number, 0 or more", k)
+		}
+		effort[k] = v
+	}
+	r.Effort = effort
+	if r.SimulatePerSecond == nil {
+		v := 20.0
+		r.SimulatePerSecond = &v
+	}
+	if !nonNegative(*r.SimulatePerSecond) {
+		return errors.New("ratelimit.simulate_per_second must not be negative")
+	}
+	if r.IPv6Prefix == 0 {
+		r.IPv6Prefix = 64
+	}
+	if r.IPv6Prefix < 1 || r.IPv6Prefix > 128 {
+		return errors.New("ratelimit.ipv6_prefix: want 1 to 128")
+	}
+	if r.MaxKeys < 0 {
+		return errors.New("ratelimit.max_keys must not be negative")
+	}
+	if r.MaxKeys == 0 {
+		r.MaxKeys = 200000
+	}
+	if r.AnonymousPlan == nil {
+		v := ""
+		if _, ok := r.Plans["free"]; ok {
+			v = "free"
+		}
+		r.AnonymousPlan = &v
+	}
+	if a := *r.AnonymousPlan; a != "" {
+		if _, ok := r.Plans[a]; !ok {
+			return fmt.Errorf("ratelimit.anonymous_plan %q: no such plan", a)
+		}
+	}
+	for _, s := range r.TrustedProxies {
+		if _, err := parsePrefix(s); err != nil {
+			return fmt.Errorf("ratelimit.trusted_proxies %q: %w", s, err)
+		}
+	}
+	names, values := map[string]bool{}, map[string]string{}
+	for i := range r.Tokens {
+		t := &r.Tokens[i]
+		switch {
+		case t.Name == "":
+			return fmt.Errorf("ratelimit.tokens[%d]: name is required", i)
+		case names[t.Name]:
+			return fmt.Errorf("ratelimit.tokens[%d]: name %q is used twice", i, t.Name)
+		case t.Token == "" && t.TokenFile == "":
+			return fmt.Errorf("ratelimit.tokens %s: set one of token and token_file", t.Name)
+		}
+		names[t.Name] = true
+		if _, ok := r.Plans[t.Plan]; !ok {
+			return fmt.Errorf("ratelimit.tokens %s: plan %q: no such plan", t.Name, t.Plan)
+		}
+		if t.TokenFile != "" {
+			v, err := readSecret(t.TokenFile)
+			if err != nil {
+				return fmt.Errorf("ratelimit.tokens %s: token_file: %w", t.Name, err)
+			}
+			// Finish runs more than once on one config: a token read
+			// before is the file's, anything else is set twice.
+			if t.Token != "" && t.Token != v {
+				return fmt.Errorf("ratelimit.tokens %s: set one of token and token_file", t.Name)
+			}
+			t.Token = v
+		}
+		switch {
+		case t.Token == "":
+			return fmt.Errorf("ratelimit.tokens %s: the token is empty", t.Name)
+		case t.Token == adminToken:
+			return fmt.Errorf("ratelimit.tokens %s: the token is the admin token", t.Name)
+		case values[t.Token] != "":
+			return fmt.Errorf("ratelimit.tokens %s: the same token as %s", t.Name, values[t.Token])
+		}
+		values[t.Token] = t.Name
+	}
+	return nil
 }
 
 // Addrs is a list of addresses to listen on. YAML accepts one address, a
@@ -563,7 +780,7 @@ func (c *Config) Finish() error {
 	if c.Routing.Breaker.OpenFor == 0 {
 		c.Routing.Breaker.OpenFor = 10 * time.Second
 	}
-	return nil
+	return c.RateLimit.finish(c.ClientToken, c.AdminToken)
 }
 
 // Balancer reports whether the agent runs without a local node.
@@ -654,3 +871,7 @@ func (c *Config) KeyMaterial() ([]byte, error) {
 	sum := sha256.Sum256([]byte("algod-loadb-mesh-shared-secret:" + c.Mesh.SharedSecret))
 	return sum[:], nil
 }
+
+// nonNegative is whether v is a finite number, 0 or more: YAML reads .nan
+// and .inf, and either would make a bucket admit everything or nothing.
+func nonNegative(v float64) bool { return v >= 0 && !math.IsInf(v, 1) }

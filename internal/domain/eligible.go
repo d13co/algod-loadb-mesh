@@ -4,18 +4,18 @@ package domain
 // the best round known across the fleet and the sync tolerance.
 //
 // The rules, in order: not excluded by config; reachable; not draining;
-// breaker closed; not throttled; time-travel history when the request needs
-// it; synced (within
-// tolerance of best) unless the class is local-only or the request is for a
-// specific round the node holds; the round is in the window the class needs
-// (block or account state), and every round a simulation lists has been
-// reached; developer API when needed; the simulate limits and options the
-// request needs; no broadcast to followers.
+// breaker closed; not throttled, nor busy for a heavy request; time-travel
+// history when the request needs it; synced (within tolerance of best)
+// unless the class is local-only or the request is for a specific round the
+// node holds; the round is in the window the class needs (block or account
+// state), and every round a simulation lists has been reached; developer API
+// when needed; the simulate limits and options the request needs; no
+// broadcast to followers.
 func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if u.Excluded || !u.Health.Reachable() || u.Draining {
 		return false
 	}
-	if u.Stats.BreakerOpen || u.Stats.Throttled {
+	if u.Stats.BreakerOpen || u.Stats.Throttled || u.Stats.Busy && c.Heavy() {
 		return false
 	}
 	if c.LocalOnly && u.Kind != KindLocal {
@@ -168,6 +168,8 @@ type FleetSimulateLimitsReply struct {
 	MaxTxnGroups            uint64 `json:"max-txn-groups"`
 	ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
 	TimeTravel              bool   `json:"time-travel"`
+	MaxExecTraceBytes       uint64 `json:"max-exec-trace-bytes"`
+	TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
 }
 
 // FleetSimulateLimits is what a simulate request sent to the mesh may ask
@@ -203,7 +205,8 @@ func FleetSimulateLimits(us []Upstream, bestRound, tolerance uint64) (FleetSimul
 	}
 	l := best.Caps.SimulateLimits()
 	return FleetSimulateLimitsReply{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds, MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget,
-		ResourceLimitMultiplier: multiplier, TimeTravel: best.Caps.TimeTravel, DeveloperAPI: best.Caps.DeveloperAPI}, true
+		ResourceLimitMultiplier: multiplier, TimeTravel: best.Caps.TimeTravel, DeveloperAPI: best.Caps.DeveloperAPI,
+		MaxExecTraceBytes: l.MaxExecTraceBytes, TimeLimitSeconds: l.TimeLimitSeconds}, true
 }
 
 // simulateLimitsAbove orders nodes for FleetSimulateLimits: whether a's

@@ -86,7 +86,7 @@ func (f *simFleet) simulate(t *testing.T, body string) string {
 	return rec.Header().Get("X-Algod-Loadb-Mesh-Upstream")
 }
 
-var testLimits = domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 2}
+var testLimits = domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 2, MaxExecTraceBytes: 1 << 20, TimeLimitSeconds: 30}
 
 // A simulate request that only dtalgorand can run reaches the dtalgorand
 // node; a stock node would reject it. One that fits stock algod still goes
@@ -174,7 +174,7 @@ func TestSimulateLimitsForFleet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := domain.FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1, TimeTravel: true}
+	want := domain.FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1, TimeTravel: true, MaxExecTraceBytes: 1 << 20, TimeLimitSeconds: 30}
 	if got != want {
 		t.Fatalf("limits %+v, want %+v", got, want)
 	}
@@ -260,5 +260,18 @@ func TestExcludedDtalgorandIsAbsent(t *testing.T) {
 	cands, _ := f.h.d.Snapshot()
 	if anyTimeTravel(cands) {
 		t.Fatal("excluded time-travel node counted")
+	}
+}
+
+// A busy excluded node does not make the router tell a heavy request that
+// every node able to serve it is busy: no retry would reach that node.
+func TestExcludedBusyNodeIsNotReported(t *testing.T) {
+	busy := domain.Upstream{ID: "x", Stats: domain.Stats{Busy: true}}
+	if !anyBusy([]domain.Upstream{busy}) {
+		t.Fatal("busy node not counted")
+	}
+	busy.Excluded = true
+	if anyBusy([]domain.Upstream{busy}) {
+		t.Fatal("busy excluded node counted")
 	}
 }

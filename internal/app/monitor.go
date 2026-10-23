@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/d13co/algod-loadb-mesh/internal/domain"
@@ -24,6 +25,10 @@ type MonitorOptions struct {
 	// only reports Network as the genesis id and never goes online.
 	Absent  bool
 	Network string
+	// UpstreamTimeout is the router's bound on one attempt: a node whose
+	// simulate time limit is not below it is warned about, since the
+	// router gives up first and the client never gets the node's 504.
+	UpstreamTimeout time.Duration
 }
 
 func (o *MonitorOptions) defaults() {
@@ -66,12 +71,13 @@ type LocalState struct {
 // Monitor follows the co-located algod with one status-after long-poll and
 // derives its capabilities from the data directory plus an empirical probe.
 type Monitor struct {
-	opts   MonitorOptions
-	algod  ports.AlgodClient
-	cfgr   ports.NodeConfigReader
-	clock  ports.Clock
-	log    ports.Logger
-	metric ports.Metrics
+	opts            MonitorOptions
+	warnedTimeLimit atomic.Uint64 // the time limit last checked against UpstreamTimeout
+	algod           ports.AlgodClient
+	cfgr            ports.NodeConfigReader
+	clock           ports.Clock
+	log             ports.Logger
+	metric          ports.Metrics
 
 	mu      sync.Mutex
 	state   LocalState
@@ -480,7 +486,14 @@ func (m *Monitor) refreshLimits(ctx context.Context) {
 func (m *Monitor) simulateLimits(ctx context.Context) (*domain.SimulateLimits, error) {
 	ctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
 	defer cancel()
-	return m.algod.SimulateLimits(ctx)
+	lim, err := m.algod.SimulateLimits(ctx)
+	if err == nil && lim != nil && m.warnedTimeLimit.Swap(lim.TimeLimitSeconds) != lim.TimeLimitSeconds {
+		if limit := time.Duration(lim.TimeLimitSeconds) * time.Second; limit > 0 && m.opts.UpstreamTimeout > 0 && limit >= m.opts.UpstreamTimeout {
+			m.log.Warn("the node's simulate time limit is not below routing.upstream_timeout: the agent gives up on a long simulation first, and the client gets the agent's 504 instead of the node's",
+				"time_limit", limit, "upstream_timeout", m.opts.UpstreamTimeout)
+		}
+	}
+	return lim, err
 }
 
 // fmtLimits renders the simulate limits for the log.
@@ -491,5 +504,6 @@ func fmtLimits(l *domain.SimulateLimits, err error) string {
 	case l == nil:
 		return "stock"
 	}
-	return fmt.Sprintf("groups=%d rounds=%d budget=%d multiplier=%d", l.MaxTxnGroups, l.MaxRounds, l.MaxExtraOpcodeBudget, l.ResourceLimitMultiplier)
+	return fmt.Sprintf("groups=%d rounds=%d budget=%d multiplier=%d trace_bytes=%d time_limit=%ds", l.MaxTxnGroups, l.MaxRounds,
+		l.MaxExtraOpcodeBudget, l.ResourceLimitMultiplier, l.MaxExecTraceBytes, l.TimeLimitSeconds)
 }

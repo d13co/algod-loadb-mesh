@@ -33,7 +33,7 @@ local:
   #   developer_api: true
   #   follow_mode: false
   #   time_travel: true                 # EnableTimeTravel node: serves ?round= and /versions at any past round
-  #   simulate: { max_txn_groups: 16, max_rounds: 16, max_extra_opcode_budget: 320000, resource_limit_multiplier: 1 }  # dtalgorand simulate limits; read from the node unless set
+  #   simulate: { max_txn_groups: 16, max_rounds: 16, max_extra_opcode_budget: 320000, resource_limit_multiplier: 1, max_exec_trace_bytes: 268435456, time_limit_seconds: 59 }  # dtalgorand simulate limits; read from the node unless set
 
 registry:
   type: algorand                      # algorand | static | file | memory; default: algorand with app_id, file with file, else static
@@ -106,3 +106,52 @@ routing:
   breaker:
     threshold: 5                      # consecutive failures that open an upstream's breaker; default 5
     open_for: 10s                     # how long an open breaker refuses requests; default 10s
+
+# Rate limits per client, in credits (see README, Rate limits); off unless enabled.
+# A client without a token is limited by address under anonymous_plan; a token in
+# tokens by its plan; any other token gets 401. client_token(_file) must be unset,
+# and the admin token is never limited.
+# ratelimit:
+#   enabled: true
+#   state_file: /var/lib/algod-loadb-mesh/ratelimit.json   # allowances survive restarts here; default: memory only
+#   trusted_proxies: [127.0.0.1]      # peers whose X-Forwarded-For names the client (CIDRs or addresses); default none
+#   ipv6_prefix: 64                   # IPv6 clients share one allowance per prefix of this length; default 64
+#   max_keys: 200000                  # clients tracked at most, then new anonymous ones share one allowance; default 200000
+#   anonymous_plan: free              # plan of requests without a token; "" answers them 401; default free when there is such a plan
+#   simulate_per_second: 20           # credits a simulation costs per second while it runs, on top of its weight; default 20
+#   weights:                          # credits per request, by kind; a simulation's weight counts once per group and round
+#     default: 1
+#     round: 1                        # a request for one round (blocks, deltas, ...)
+#     timetravel: 2                   # state at a past round (?round=)
+#     versions: 10                    # an object history page (.../versions)
+#     deltas_history: 50              # a state delta re-evaluated from the history
+#     simulate: 5
+#     broadcast: 1
+#     pending: 1
+#     wait: 1
+#     teal: 1
+#   effort:                           # with dtalgorand's EnableEffortHeader, a request the node reports its work for costs its weight plus that work, in place of simulate_per_second;
+#                                     # units of work per credit, 0 makes that work free. Believed from mesh nodes only, never from externals
+#     opcodes_per_credit: 330000      # app and logicsig budget consumed
+#     lookups_per_credit: 10000       # ledger object reads
+#     history_per_credit: 1000        # the reads that went to the time-travel store, on top of their lookup
+#     scanned_per_credit: 10000       # entries visited by a history page or a ?round= list
+#     trace_kb_per_credit: 1024       # exec trace size
+#   plans:
+#     free:
+#       per_minute: 300               # credits per minute, refilled steadily; 0: no limit
+#       per_day: 50000                # credits per 24 hours, refilled steadily; 0: no limit
+#       simulate:                     # what one simulate request may ask for (403 beyond); 0: no cap
+#         max_groups: 1
+#         max_rounds: 1
+#         max_extra_opcode_budget: 320000
+#         unnamed_resources: true     # allow-unnamed-resources; default true
+#         exec_trace: false           # exec-trace-config; default true
+#     pro:
+#       per_minute: 6000
+#       per_day: 5000000
+#   tokens:
+#     - name: acme                    # shown in logs, metrics and the state file
+#       plan: pro
+#       token_file: /etc/algod-loadb-mesh/tokens/acme
+#       # token: s3cret-acme          # the same, inline; set one of token and token_file

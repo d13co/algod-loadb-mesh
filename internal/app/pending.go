@@ -63,7 +63,7 @@ func (r *Router) handlePending(ctx context.Context, w http.ResponseWriter, req *
 			writeMessage(w, 404, "algod-loadb-mesh: transaction not found on any node")
 			return
 		}
-		r.answerFailure(w, req, *pinned)
+		r.answerFailure(w, req, class, *pinned)
 		return
 	}
 

@@ -51,7 +51,7 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	if lim, err := c.SimulateLimits(ctx); err != nil || lim != nil {
 		t.Fatalf("stock simulate limits: %v %+v", err, lim)
 	}
-	want := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 4, MaxExtraOpcodeBudget: 640000, ResourceLimitMultiplier: 2}
+	want := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 4, MaxExtraOpcodeBudget: 640000, ResourceLimitMultiplier: 2, MaxExecTraceBytes: 1 << 28, TimeLimitSeconds: 64}
 	dt := fakealgod.New(fakealgod.Options{ID: "dt", StartRound: 5, Simulate: &want})
 	defer dt.Close()
 	if lim, err := New(dt.URL(), dt.Token(), nil).SimulateLimits(ctx); err != nil || lim == nil || *lim != want {
