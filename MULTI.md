@@ -21,7 +21,7 @@ once, so no mixed-version wire compatibility is required (cheap read-tolerance
 of old records is kept anyway); the chosen path carries **heartbeats only** —
 proxied algod traffic keeps using `Endpoints[0]`, and the proxy path, the
 selector and `domain.Upstream` are not touched (the router only gains a `links`
-key in `/loadb/status`, §7) — superseded by MULTI_ALGOD.md: proxied traffic
+key in `/mesh/status`, §7) — superseded by MULTI_ALGOD.md: proxied traffic
 follows the path too; it lands as **one change**.
 
 Two invariants to protect, both verified as real constraints: `recordVersion`
@@ -292,7 +292,7 @@ balancer is deaf.
   first direct probe. An unanswered ping past `PathTimeout` counts a loss;
   `domain.PathFailures` losses is dead. `noRoute` paths are pinged on the same
   cadence: a successful `Send` clears the flag, a pong makes the path alive.
-  Then `PathPolicy.Choose`; on a change count `loadb_path_switches{reason}` and
+  Then `PathPolicy.Choose`; on a change count `mesh_path_switches{reason}` and
   log `"mesh path"` with peer, addr, was, rtt_ms, reason.
 - **The existing ladder is untouched underneath**: `SuspectAfter` still starts
   direct `/v2/status` probes, `DownAfter` still decides offline, `Snapshot`
@@ -327,9 +327,9 @@ balancer is deaf.
   last-pong age, and last-seen age — the newest authenticated datagram from
   that address, which is the inbound direction: the address the peer's
   heartbeats arrive on stays fresh), exposed as a `links` key in
-  `/loadb/status`. Metrics
-  `loadb_path_rtt_ms{peer,addr}`, `loadb_path_losses{peer}`,
-  `loadb_path_switches{reason}`.
+  `/mesh/status`. Metrics
+  `mesh_path_rtt_ms{peer,addr}`, `mesh_path_losses{peer}`,
+  `mesh_path_switches{reason}`.
 
 ## Order of work
 
@@ -342,7 +342,7 @@ balancer is deaf.
    the repo today: `Send` appends `{addr, payload}`, `Receive` is an injectable
    channel, an `unroutable` set returns `ErrNoRoute`.
 6. `internal/app/directory.go` (the bulk), `internal/app/router.go` (`links`).
-7. `internal/agent/{agent,wire}.go`, `cmd/algod-loadb-mesh/main.go`
+7. `internal/agent/{agent,wire}.go`, `cmd/algod-mesh/main.go`
    (`-agent` takes a comma-separated list, `config check` prints both lists,
    `listen` line shape preserved for `setup.sh`).
 8. `internal/devfleet`: `Options.Nets`, `NodeSpec.Nets`, and
@@ -389,7 +389,7 @@ every timestamp comes from `d.clock` so the fake clock drives the machine;
   successful `Send` readmits it; an IPv4-mapped `From` still matches its
   candidate; a balancer answers pings and sends nothing.
 - **`test/sim`** — `TestMeshPathFailover`: three nodes on two nets, partition
-  one node's net 0, wait for `loadb_path_switches{reason="deaf"}` to move and
+  one node's net 0, wait for `mesh_path_switches{reason="deaf"}` to move and
   every peer to be back at `Source == "heartbeat"` and `HealthSynced`, then
   assert that `/v2/status` hits **stop growing** over a window of several
   `ProbeInterval`s and that nobody reached `offline` — the mirror of
@@ -406,9 +406,9 @@ every timestamp comes from `d.clock` so the fake clock drives the machine;
   two WireGuard addresses with the public one excluded.
 - **Manual**: two agents on loopback aliases with
   `mesh.listen: [127.0.0.1:4001, 127.0.0.2:4001]` advertising both against a
-  static registry; `/loadb/status` shows the chosen path and an RTT; drop one
+  static registry; `/mesh/status` shows the chosen path and an RTT; drop one
   path with `iptables -A INPUT -p udp -d 127.0.0.2 --dport 4001 -j DROP` and
-  confirm `loadb_path_switches` moves while the peer never leaves `synced`.
+  confirm `mesh_path_switches` moves while the peer never leaves `synced`.
   `config check` on a public mesh address prints the warning.
 
 ## Risks and rejected alternatives

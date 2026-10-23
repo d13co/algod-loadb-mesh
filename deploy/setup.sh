@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Sets up algod-loadb-mesh on this host as root: the systemd unit, the
+# Sets up algod-mesh on this host as root: the systemd unit, the
 # directories it needs, a config (from autoconfig.sh or one you provide) and
 # the service itself. install.sh puts it in the PATH as
-# algod-loadb-mesh-setup; it re-runs itself under sudo when needed.
+# algod-mesh-setup; it re-runs itself under sudo when needed.
 #
-#   sudo algod-loadb-mesh-setup [options] [autoconfig options] [BUNDLE]
+#   sudo algod-mesh-setup [options] [autoconfig options] [BUNDLE]
 #
 #   --config FILE    install FILE as the config instead of running autoconfig
 #                    ("-" reads it from stdin)
 #   --instance NAME  set up a further agent on this host, for another algod:
-#                    config NAME.yaml, service algod-loadb-mesh@NAME, id
+#                    config NAME.yaml, service algod-mesh@NAME, id
 #                    HOSTNAME-NAME, and the first free client and mesh ports
 #                    (4000/4001, else 4002/4003, ...)
 #   --force          replace an existing config
@@ -19,25 +19,25 @@
 #
 # Anything else is passed to autoconfig, which detects what it can and takes
 # the registry app id and sync key from the bundle printed by
-# `algod-loadb-mesh registry bundle` on a host that already runs:
+# `algod-mesh registry bundle` on a host that already runs:
 #
-#   sudo algod-loadb-mesh-setup -          # paste the bundle, then Ctrl-D
-#   sudo algod-loadb-mesh-setup --data-dir /var/lib/algorand --tier 2 BUNDLE
+#   sudo algod-mesh-setup -          # paste the bundle, then Ctrl-D
+#   sudo algod-mesh-setup --data-dir /var/lib/algorand --tier 2 BUNDLE
 #
 # One agent serves one algod. For a second algod on the host (another
 # network, or another role), add a named instance with that network's bundle:
 #
-#   sudo algod-loadb-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -
+#   sudo algod-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -
 set -euo pipefail
 
 main() {
 	PREFIX=${PREFIX:-/usr/local/bin}
-	SHARE=${SHARE:-/usr/local/share/algod-loadb-mesh}
-	CONFIG_DIR=${CONFIG_DIR:-/etc/algod-loadb-mesh}
-	REPO=${REPO:-d13co/algod-loadb-mesh}
+	SHARE=${SHARE:-/usr/local/share/algod-mesh}
+	CONFIG_DIR=${CONFIG_DIR:-/etc/algod-mesh}
+	REPO=${REPO:-d13co/algod-mesh}
 	REF=${REF:-stable}
-	local state_dir=${STATE_DIR:-/var/lib/algod-loadb-mesh}
-	local unit=${UNIT:-/etc/systemd/system/algod-loadb-mesh.service}
+	local state_dir=${STATE_DIR:-/var/lib/algod-mesh}
+	local unit=${UNIT:-/etc/systemd/system/algod-mesh.service}
 	local config="" force="" start=1 user="" instance="" autoconfig=()
 
 	local arg
@@ -71,15 +71,15 @@ main() {
 		[ "$instance" != config ] || die "--instance config: that name is the default agent's config.yaml; pick another"
 	fi
 
-	local mesh=$PREFIX/algod-loadb-mesh
-	[ -x "$mesh" ] || mesh=$(command -v algod-loadb-mesh) || die "algod-loadb-mesh is not installed (see install.sh)"
+	local mesh=$PREFIX/algod-mesh
+	[ -x "$mesh" ] || mesh=$(command -v algod-mesh) || die "algod-mesh is not installed (see install.sh)"
 
-	# The default agent is config.yaml and algod-loadb-mesh.service; a named
-	# one is NAME.yaml and algod-loadb-mesh@NAME.service.
-	local target=$CONFIG_DIR/config.yaml svc=algod-loadb-mesh
+	# The default agent is config.yaml and algod-mesh.service; a named
+	# one is NAME.yaml and algod-mesh@NAME.service.
+	local target=$CONFIG_DIR/config.yaml svc=algod-mesh
 	if [ -n "$instance" ]; then
 		target=$CONFIG_DIR/$instance.yaml
-		svc=algod-loadb-mesh@$instance
+		svc=algod-mesh@$instance
 	fi
 	local others=0 f
 	for f in "$CONFIG_DIR"/*.yaml; do
@@ -91,7 +91,7 @@ main() {
 	# hands to that user. With other agents here, another user could no
 	# longer read their configs. Without --user, the one already set stays.
 	local template u
-	template=$(dirname "$unit")/algod-loadb-mesh@.service
+	template=$(dirname "$unit")/algod-mesh@.service
 	for f in "$unit" "$template"; do
 		[ -f "$f" ] || continue
 		u=$(sed -n 's/^User=//p' "$f" | head -n1)
@@ -123,7 +123,7 @@ main() {
 	for f in "$CONFIG_DIR"/*.yaml; do
 		[ -f "$f" ] && [ "$f" != "$target" ] || continue
 		read_instance "$mesh" "$f" ||
-			die "$f does not load (algod-loadb-mesh config check -config $f); every *.yaml in $CONFIG_DIR is an agent's config: fix it or move it away"
+			die "$f does not load (algod-mesh config check -config $f); every *.yaml in $CONFIG_DIR is an agent's config: fix it or move it away"
 		[ -z "$I_DIR" ] || other_dirs+=("$I_DIR")
 		other_ports+="$I_PORTS "
 		other_ids+="$I_ID "
@@ -164,9 +164,9 @@ main() {
 			fi
 			[ -s "$tmp" ] || die "the config is empty"
 		else
-			local auto=$PREFIX/algod-loadb-mesh-autoconfig
-			[ -x "$auto" ] || auto=$(command -v algod-loadb-mesh-autoconfig) ||
-				die "algod-loadb-mesh-autoconfig is not installed (see install.sh), or pass --config FILE"
+			local auto=$PREFIX/algod-mesh-autoconfig
+			[ -x "$auto" ] || auto=$(command -v algod-mesh-autoconfig) ||
+				die "algod-mesh-autoconfig is not installed (see install.sh), or pass --config FILE"
 			local extra=()
 			[ -z "$instance" ] || extra+=(--instance "$instance")
 			for f in ${other_dirs[@]+"${other_dirs[@]}"}; do
@@ -201,14 +201,14 @@ main() {
 		say "no systemd here; start the agent yourself: $mesh run -config $target"
 		return 0
 	fi
-	# A named instance runs from the template unit algod-loadb-mesh@.service.
+	# A named instance runs from the template unit algod-mesh@.service.
 	[ -z "$instance" ] || unit=$template
-	local src=$SHARE/algod-loadb-mesh.service
+	local src=$SHARE/algod-mesh.service
 	# The apt package keeps the unit template under /usr/share.
-	[ -f "$src" ] || src=/usr/share/algod-loadb-mesh/algod-loadb-mesh.service
+	[ -f "$src" ] || src=/usr/share/algod-mesh/algod-mesh.service
 	if [ ! -f "$src" ]; then
 		src=$(mktemp)
-		fetch "${RAW_URL:-https://raw.githubusercontent.com/$REPO/$REF}/deploy/algod-loadb-mesh.service" "$src" ||
+		fetch "${RAW_URL:-https://raw.githubusercontent.com/$REPO/$REF}/deploy/algod-mesh.service" "$src" ||
 			die "no unit file at $SHARE and none to fetch"
 	fi
 	# The unit ships with User=algorand and the release path.
@@ -239,7 +239,7 @@ main() {
 		\[::\]:*) listen=[::1]:${listen##*:} ;;
 		esac
 		say "$svc is running"
-		say "peers: curl -H \"X-Algo-API-Token: \$(sudo cat $data_dir/algod.admin.token)\" http://$listen/loadb/peers"
+		say "peers: curl -H \"X-Algo-API-Token: \$(sudo cat $data_dir/algod.admin.token)\" http://$listen/mesh/peers"
 	else
 		systemctl --no-pager --lines=20 status "$svc" || true
 		die "the service did not start"
@@ -324,7 +324,7 @@ instance_name() {
 	printf '%s' "$name"
 }
 
-say() { echo "algod-loadb-mesh: $*" >&2; }
+say() { echo "algod-mesh: $*" >&2; }
 die() { say "$*"; exit 1; }
 
 fetch() {

@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // BreakerOptions tunes the per-upstream circuit breaker.

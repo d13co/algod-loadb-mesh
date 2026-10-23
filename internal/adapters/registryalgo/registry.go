@@ -20,8 +20,8 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/transaction"
 	"github.com/algorand/go-algorand-sdk/v2/types"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // Registry is the on-chain registry.
@@ -212,7 +212,7 @@ func (r *Registry) ensureFunded(ctx context.Context, nameLen, valueLen int) erro
 	if err != nil {
 		return err
 	}
-	tx, err := transaction.MakePaymentTxn(r.sender.String(), appAddr.String(), need-info.Amount, []byte("algod-loadb-mesh box mbr"), "", sp)
+	tx, err := transaction.MakePaymentTxn(r.sender.String(), appAddr.String(), need-info.Amount, []byte("algod-mesh box mbr"), "", sp)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (r *Registry) Create(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	tx, err := transaction.MakeApplicationCreateTxWithBoxes(false, approval, clear, types.StateSchema{}, types.StateSchema{}, 0,
-		nil, nil, nil, nil, nil, sp, r.sender, []byte("algod-loadb-mesh registry"), types.Digest{}, [32]byte{}, types.Address{})
+		nil, nil, nil, nil, nil, sp, r.sender, []byte("algod-mesh registry"), types.Digest{}, [32]byte{}, types.Address{})
 	if err != nil {
 		return 0, err
 	}

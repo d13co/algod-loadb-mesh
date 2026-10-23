@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 const dialTimeout = 5 * time.Second
@@ -139,10 +139,10 @@ func (s *Server) accept(ctx context.Context, ln net.Listener) error {
 // half-closing each side when the other finishes writing.
 func (s *Server) splice(ctx context.Context, addr string, c net.Conn) {
 	defer c.Close()
-	s.metric.Inc("loadb_passthrough_accepted", "addr", addr)
+	s.metric.Inc("mesh_passthrough_accepted", "addr", addr)
 	t := s.target()
 	if t == "" {
-		s.metric.Inc("loadb_passthrough_dial_failures", "reason", "no_target")
+		s.metric.Inc("mesh_passthrough_dial_failures", "reason", "no_target")
 		return
 	}
 	// Under dialCtx, not ctx: a dial in flight when the drain window ends
@@ -151,7 +151,7 @@ func (s *Server) splice(ctx context.Context, addr string, c net.Conn) {
 	up, err := (&net.Dialer{}).DialContext(dctx, "tcp", t)
 	cancel()
 	if err != nil {
-		s.metric.Inc("loadb_passthrough_dial_failures", "reason", "dial")
+		s.metric.Inc("mesh_passthrough_dial_failures", "reason", "dial")
 		s.log.Debug("passthrough dial failed", "target", t, "err", err)
 		return
 	}
@@ -186,7 +186,7 @@ func (s *Server) track(c, up net.Conn, add bool) {
 		delta = 1
 	}
 	n := s.active.Add(delta)
-	s.metric.Gauge("loadb_passthrough_active", float64(n))
+	s.metric.Gauge("mesh_passthrough_active", float64(n))
 }
 
 // copyThenClose copies src to dst, then tells dst there is nothing more to

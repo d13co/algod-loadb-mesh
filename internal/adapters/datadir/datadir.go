@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // Reader implements ports.NodeConfigReader for a data directory.

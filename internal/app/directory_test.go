@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/clock"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/metrics"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/adapters/clock"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/metrics"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // fakeGossip records every Send and lets the test inject datagrams.
@@ -307,7 +307,7 @@ func TestDeadPathIsLeftAfterLosses(t *testing.T) {
 	if l.Path != addrB || l.Paths[0].Alive || l.Paths[0].Losses < domain.PathFailures || !l.Paths[1].Alive || l.Paths[1].RTTMS == 0 {
 		t.Fatalf("after losses: %+v", l)
 	}
-	if !strings.Contains(h.metricsText(), `loadb_path_switches_total{reason="dead"} 1`) {
+	if !strings.Contains(h.metricsText(), `mesh_path_switches_total{reason="dead"} 1`) {
 		t.Fatalf("metrics:\n%s", h.metricsText())
 	}
 	// The switch nudged a heartbeat onto the new path without waiting for
@@ -354,7 +354,7 @@ func TestFasterPathWinsOnlyByMarginAndAfterCooldown(t *testing.T) {
 	if l := h2.link("b"); l.Path != addrB {
 		t.Fatalf("two faster probes must switch: %+v", l)
 	}
-	if !strings.Contains(h2.metricsText(), `loadb_path_switches_total{reason="faster"} 1`) {
+	if !strings.Contains(h2.metricsText(), `mesh_path_switches_total{reason="faster"} 1`) {
 		t.Fatalf("metrics:\n%s", h2.metricsText())
 	}
 }
@@ -388,7 +388,7 @@ func TestStaleHeardMSMarksPathDeaf(t *testing.T) {
 	if !l.Paths[0].Deaf || l.Paths[0].Alive {
 		t.Fatalf("path A must be deaf: %+v", l)
 	}
-	if !strings.Contains(h.metricsText(), `loadb_path_switches_total{reason="deaf"} 1`) {
+	if !strings.Contains(h.metricsText(), `mesh_path_switches_total{reason="deaf"} 1`) {
 		t.Fatalf("metrics:\n%s", h.metricsText())
 	}
 	// Switching sent a heartbeat at once, with no clock movement.
@@ -421,7 +421,7 @@ func TestNoRouteExcludesAndReadmits(t *testing.T) {
 		h.tick()
 		h.answer(nil)
 	}
-	if l := h.link("b"); l.Paths[0].Losses != 0 || strings.Contains(h.metricsText(), "loadb_path_losses") {
+	if l := h.link("b"); l.Paths[0].Losses != 0 || strings.Contains(h.metricsText(), "mesh_path_losses") {
 		t.Fatalf("no-route pings must not count as losses: %+v\n%s", l, h.metricsText())
 	}
 	h.g.route(addrA, true)
@@ -484,7 +484,7 @@ func TestVanishedPathIsLeftAtOnce(t *testing.T) {
 	if l := h.link("b"); l.Path != addrB || len(l.Paths) != 1 {
 		t.Fatalf("after the registry dropped A: %+v", l)
 	}
-	if !strings.Contains(h.metricsText(), `loadb_path_switches_total{reason="initial"} 2`) {
+	if !strings.Contains(h.metricsText(), `mesh_path_switches_total{reason="initial"} 2`) {
 		t.Fatalf("metrics:\n%s", h.metricsText())
 	}
 }
@@ -726,7 +726,7 @@ func TestExternalsAreCheckedOnDemandOnly(t *testing.T) {
 	if u := upstream(t, ups, "ext"); u.Health != domain.HealthOffline || u.Source != "none" {
 		t.Fatalf("failed check: %+v", u)
 	}
-	if !strings.Contains(h.metricsText(), `loadb_external_checks_total{name="ext",ok="false"} 1`) {
+	if !strings.Contains(h.metricsText(), `mesh_external_checks_total{name="ext",ok="false"} 1`) {
 		t.Fatalf("metrics:\n%s", h.metricsText())
 	}
 }

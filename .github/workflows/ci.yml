@@ -17,7 +17,7 @@ concurrency:
 jobs:
   test:
     # Only this repository: forks do not run the fleet's CI.
-    if: github.repository == 'd13co/algod-loadb-mesh'
+    if: github.repository == 'd13co/algod-mesh' || github.repository == 'd13co/algod-loadb-mesh' # the old name, until the repo is renamed
     runs-on: ubuntu-latest
     # Untrusted PR code runs below (make targets are attacker-controlled);
     # cap it well under the 6-hour default.

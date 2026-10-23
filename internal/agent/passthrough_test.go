@@ -13,17 +13,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/clock"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/gossipmem"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/metrics"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/proxy"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryfile"
-	"github.com/d13co/algod-loadb-mesh/internal/app"
-	"github.com/d13co/algod-loadb-mesh/internal/config"
-	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/clock"
+	"github.com/d13co/algod-mesh/internal/adapters/gossipmem"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/metrics"
+	"github.com/d13co/algod-mesh/internal/adapters/proxy"
+	"github.com/d13co/algod-mesh/internal/adapters/registryfile"
+	"github.com/d13co/algod-mesh/internal/app"
+	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 type countingLog struct {
@@ -102,14 +102,14 @@ func serve(t *testing.T, a *Agent) (context.CancelFunc, <-chan error) {
 	return cancel, done
 }
 
-// status waits for Serve to publish the pass-through in /loadb/status, which
+// status waits for Serve to publish the pass-through in /mesh/status, which
 // it does once the listeners are bound.
 func status(t *testing.T, a *Agent) app.PassthroughStatus {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		rec := httptest.NewRecorder()
-		a.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/loadb/status", nil))
+		a.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/mesh/status", nil))
 		var body struct {
 			Passthrough *app.PassthroughStatus `json:"passthrough"`
 		}
@@ -120,7 +120,7 @@ func status(t *testing.T, a *Agent) app.PassthroughStatus {
 			return *body.Passthrough
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("no passthrough key in /loadb/status")
+			t.Fatal("no passthrough key in /mesh/status")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

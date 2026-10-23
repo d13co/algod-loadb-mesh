@@ -1,4 +1,4 @@
-# algod-loadb-mesh
+# algod-mesh
 
 A load balancer and failover proxy for [algod](https://github.com/algorand/go-algorand) REST APIs, built as a mesh: a small agent runs next to each of your Algorand nodes, the agents tell each other what their nodes can do, and every agent can route a client's request to whichever node in the fleet is best placed to answer it.
 
@@ -52,15 +52,15 @@ Point your apps, indexers and bots at the agent instead of at algod. They keep u
 You can try the whole thing without an Algorand node. `dev` mode starts fake algods and real agents in one process: `dev1` is archival, the last node has the developer API and time travel, and blocks advance every 2.8 s.
 
 ```sh
-git clone https://github.com/d13co/algod-loadb-mesh && cd algod-loadb-mesh
-make dev                                  # or: ./bin/algod-loadb-mesh dev -nodes 3 -balancers 1 -mode loadbalancer
+git clone https://github.com/d13co/algod-mesh && cd algod-mesh
+make dev                                  # or: ./bin/algod-mesh dev -nodes 3 -balancers 1 -mode loadbalancer
 ```
 
 It prints each agent's URL. Then:
 
 ```sh
-curl -s  http://127.0.0.1:PORT/loadb/status | jq      # what the agent sees
-curl -si http://127.0.0.1:PORT/v2/status               # see X-Algod-Loadb-Mesh-Upstream
+curl -s  http://127.0.0.1:PORT/mesh/status | jq      # what the agent sees
+curl -si http://127.0.0.1:PORT/v2/status               # see X-Algod-Mesh-Upstream
 ```
 
 Building needs Go 1.27 or newer.
@@ -70,12 +70,12 @@ Building needs Go 1.27 or newer.
 Linux, amd64 or arm64. Run the installer as your normal user: it downloads and verifies as you, and uses sudo only to install.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/d13co/algod-mesh/stable/install.sh | bash
 ```
 
-On **Debian and Ubuntu** the installer adds the apt repository at `https://apt.d13.co` and installs the `algod-loadb-mesh` package, so later upgrades come with `apt upgrade` (and restart the agent if it is running).
+On **Debian and Ubuntu** the installer adds the apt repository at `https://apt.d13.co` and installs the `algod-mesh` package, so later upgrades come with `apt upgrade` (and restart the agent if it is running).
 
-The package also installs `/etc/apt/apt.conf.d/51algod-loadb-mesh-upgrades`, which lets unattended-upgrades install new releases from apt.d13.co on its daily run (this package, and `dtalgorand` if installed). To upgrade by hand only, delete that file; upgrades keep it deleted. On hosts that also run `dtalgorand`, its own `51dtalgorand-upgrades` allows the same repository, so remove both.
+The package also installs `/etc/apt/apt.conf.d/51algod-mesh-upgrades`, which lets unattended-upgrades install new releases from apt.d13.co on its daily run (this package, and `dtalgorand` if installed). To upgrade by hand only, delete that file; upgrades keep it deleted. On hosts that also run `dtalgorand`, its own `51dtalgorand-upgrades` allows the same repository, so remove both.
 
 Before trusting the repository key, the installer checks that it is exactly this one (when gpg is installed):
 
@@ -88,7 +88,7 @@ sudo install -d -m 0755 /etc/apt/keyrings
 sudo curl -fsSL https://apt.d13.co/key.asc -o /etc/apt/keyrings/d13co.asc
 echo "deb [signed-by=/etc/apt/keyrings/d13co.asc] https://apt.d13.co stable main" |
   sudo tee /etc/apt/sources.list.d/d13co.list
-sudo apt update && sudo apt install algod-loadb-mesh
+sudo apt update && sudo apt install algod-mesh
 ```
 
 On **other distributions**, or with `--no-apt`, the installer puts the release binary and scripts in `/usr/local/bin`. That install doesn't upgrade itself; run the installer again to upgrade.
@@ -97,26 +97,66 @@ Either way you get three commands, and no agent is configured yet:
 
 | command | what it does |
 |---|---|
-| `algod-loadb-mesh` | the agent and its CLI (`run`, `config`, `registry`, `check-node`, `dev`) |
-| `algod-loadb-mesh-autoconfig` | detects the host (algod data dir, mesh addresses, ports) and prints a config |
-| `algod-loadb-mesh-setup` | runs autoconfig, writes `/etc/algod-loadb-mesh/config.yaml`, installs the systemd unit and starts the service |
+| `algod-mesh` | the agent and its CLI (`run`, `config`, `registry`, `check-node`, `dev`) |
+| `algod-mesh-autoconfig` | detects the host (algod data dir, mesh addresses, ports) and prints a config |
+| `algod-mesh-setup` | runs autoconfig, writes `/etc/algod-mesh/config.yaml`, installs the systemd unit and starts the service |
 
 Installer options: `--version v1.2.3` installs a specific release, `--no-apt` skips the apt repository, and `--setup ARGS...` runs setup straight after installing.
 
 <details>
 <summary>Moving to the apt package (from a <code>/usr/local</code> install)</summary>
 
-A host set up with `--no-apt` (or by an older installer) runs `/usr/local/bin/algod-loadb-mesh`, which the package doesn't update. The package install and the installer both warn about this. After installing the package, remove the old files, write the unit again (the config is kept) and restart:
+A host set up with `--no-apt` (or by an older installer) runs `/usr/local/bin/algod-mesh`, which the package doesn't update. The package install and the installer both warn about this. After installing the package, remove the old files, write the unit again (the config is kept) and restart:
 
 ```sh
-sudo rm /usr/local/bin/algod-loadb-mesh /usr/local/bin/algod-loadb-mesh-autoconfig \
-  /usr/local/bin/algod-loadb-mesh-setup
-sudo rm -r /usr/local/share/algod-loadb-mesh
-sudo algod-loadb-mesh-setup --no-start    # add --user USER if you set one before
-sudo systemctl restart algod-loadb-mesh
+sudo rm /usr/local/bin/algod-mesh /usr/local/bin/algod-mesh-autoconfig \
+  /usr/local/bin/algod-mesh-setup
+sudo rm -r /usr/local/share/algod-mesh
+sudo algod-mesh-setup --no-start    # add --user USER if you set one before
+sudo systemctl restart algod-mesh
 ```
 
-A host with [several agents](#several-algods-on-one-host) also needs `sudo algod-loadb-mesh-setup --instance NAME --no-start` (any one of its names: they share the template unit) and `sudo systemctl restart 'algod-loadb-mesh@*'`.
+A host with [several agents](#several-algods-on-one-host) also needs `sudo algod-mesh-setup --instance NAME --no-start` (any one of its names: they share the template unit) and `sudo systemctl restart 'algod-mesh@*'`.
+
+</details>
+
+<details>
+<summary>Moving from algod-loadb-mesh (the old name)</summary>
+
+The project used to be called algod-loadb-mesh. The `algod-mesh` package replaces the `algod-loadb-mesh` package, but the old units, config and state stay behind under the old name, and the old units point at a binary the new package removes. The registry, the sync key and the mesh protocol are unchanged, so hosts can be moved one at a time: moved and unmoved hosts see each other as peers.
+
+What changes for clients: the agent endpoints are `/mesh/*` instead of `/loadb/*` (a moved agent passes `/loadb/*` on like any algod request, so it fails), the response headers are `X-Algod-Mesh-*` instead of `X-Algod-Loadb-Mesh-*`, and the metrics are `mesh_*` instead of `loadb_*`. Update health checks, scrapes, dashboards and alerts as each host moves.
+
+On each host, in bash or sh (not fish), as a user with sudo:
+
+```sh
+# 1. Note what runs now: the user (pass it to setup if it isn't algorand) and the agents.
+grep -h '^User=' /etc/systemd/system/algod-loadb-mesh*.service
+units=$(find /etc/systemd/system -name 'algod-loadb-mesh*.service' ! -name 'algod-loadb-mesh@.service' -printf '%f\n' | sort -u)
+echo $units    # algod-loadb-mesh.service and/or algod-loadb-mesh@NAME.service
+
+# 2. Install the new package. It removes algod-loadb-mesh; the old agents keep running until step 3.
+sudo apt-get update && sudo apt-get install algod-mesh
+sudo dpkg --purge algod-loadb-mesh    # drops its file in /etc/apt/apt.conf.d
+
+# 3. Stop the old agents and move their files to the new name.
+sudo systemctl disable --now $units
+sudo mv -T /etc/algod-loadb-mesh /etc/algod-mesh
+sudo mv -T /var/lib/algod-loadb-mesh /var/lib/algod-mesh
+sudo sh -c "sed -i 's#/algod-loadb-mesh/#/algod-mesh/#g' /etc/algod-mesh/*.yaml"
+sudo rm -f /etc/systemd/system/algod-loadb-mesh.service /etc/systemd/system/algod-loadb-mesh@.service
+sudo systemctl daemon-reload
+
+# 4. Write the new units and start the agents (setup keeps each config).
+sudo algod-mesh-setup                    # only if /etc/algod-mesh/config.yaml exists; add --user USER from step 1
+sudo algod-mesh-setup --instance NAME    # for each algod-loadb-mesh@NAME from step 1
+```
+
+The agents are down from step 3 until step 4 starts them, a few seconds; algod keeps running. Then check `/mesh/status` (see [Operating it](#operating-it)): it should list the other hosts, moved or not.
+
+- `mv -T` stops with "Directory not empty" if the new directory already has files, for example after running `algod-mesh-setup` too early. Merge the two by hand instead of moving.
+- On a host installed with `--no-apt`, replace step 2 with the installer (`--no-apt`) and also remove `/usr/local/bin/algod-loadb-mesh*` and `/usr/local/share/algod-loadb-mesh`.
+- If you had deleted `51algod-loadb-mesh-upgrades` to upgrade by hand only, also delete the new `/etc/apt/apt.conf.d/51algod-mesh-upgrades`.
 
 </details>
 
@@ -135,17 +175,17 @@ The registry is a small Algorand application that holds the fleet's node records
 ```sh
 # 1. Create the sync account, fund the printed address with a few ALGO,
 #    and store the mnemonic where the agent's user can read it.
-algod-loadb-mesh registry gen-key
-sudo install -d -m 0750 -o algorand -g algorand /etc/algod-loadb-mesh
-sudo -u algorand sh -c 'umask 077 && cat > /etc/algod-loadb-mesh/sync.key'   # paste the mnemonic, then Ctrl-D
+algod-mesh registry gen-key
+sudo install -d -m 0750 -o algorand -g algorand /etc/algod-mesh
+sudo -u algorand sh -c 'umask 077 && cat > /etc/algod-mesh/sync.key'   # paste the mnemonic, then Ctrl-D
 
 # 2. Deploy the registry app. Your local node submits the transaction; the
 #    throwaway config only says where the node and the key are.
-printf 'local: {data_dir: /var/lib/algorand}\nregistry: {sync_key_file: /etc/algod-loadb-mesh/sync.key}\n' > init.yaml
-sudo algod-loadb-mesh registry init -config init.yaml && rm init.yaml
+printf 'local: {data_dir: /var/lib/algorand}\nregistry: {sync_key_file: /etc/algod-mesh/sync.key}\n' > init.yaml
+sudo algod-mesh registry init -config init.yaml && rm init.yaml
 
 # 3. Configure and start the agent with the printed app id.
-sudo algod-loadb-mesh-setup --app-id <id>
+sudo algod-mesh-setup --app-id <id>
 ```
 
 ### Every other host: join with a bundle
@@ -153,14 +193,14 @@ sudo algod-loadb-mesh-setup --app-id <id>
 On any host that already runs the mesh, print the *bundle*: the app id and sync key (and the sync address, if it is rekeyed) as one string.
 
 ```sh
-sudo algod-loadb-mesh registry bundle -config /etc/algod-loadb-mesh/config.yaml
+sudo algod-mesh registry bundle -config /etc/algod-mesh/config.yaml
 ```
 
 On the new host, install and paste the bundle into setup:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/d13co/algod-loadb-mesh/stable/install.sh | bash
-sudo algod-loadb-mesh-setup -        # paste the bundle, then Ctrl-D
+curl -fsSL https://raw.githubusercontent.com/d13co/algod-mesh/stable/install.sh | bash
+sudo algod-mesh-setup -        # paste the bundle, then Ctrl-D
 ```
 
 The new agent registers itself on first start. The others pick it up within one `registry.refresh` (5 min), or sooner if they hear a heartbeat from an unknown node first.
@@ -169,7 +209,7 @@ The bundle contains the sync key. Anyone who has it can read every node's algod 
 
 ### What setup detects
 
-`algod-loadb-mesh-setup -h` and `algod-loadb-mesh-autoconfig -h` list every option. By default:
+`algod-mesh-setup -h` and `algod-mesh-autoconfig -h` list every option. By default:
 
 - **node id**: the hostname, minus `.local` (`--id`)
 - **algod data dir**: detected; it asks when there are several (`--data-dir`)
@@ -180,32 +220,32 @@ The bundle contains the sync key. Anyone who has it can read every node's algod 
 - **external fallback**: it asks whether to add Nodely for the node's network (`--nodely`/`--no-nodely`)
 - **routing tier**: 1 (`--tier`)
 
-To install a config you wrote yourself, use `--config FILE`. To start from the fully commented example, run `algod-loadb-mesh config example -o FILE`.
+To install a config you wrote yourself, use `--config FILE`. To start from the fully commented example, run `algod-mesh config example -o FILE`.
 
 ### Several algods on one host
 
 One agent serves one algod, so a host with several algods (mainnet and testnet, or an archival and a time-travel node of one network) runs one agent for each. The first is set up as usual; each further one is a named instance:
 
 ```sh
-sudo algod-loadb-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -   # paste testnet's bundle
+sudo algod-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet -   # paste testnet's bundle
 ```
 
 | | first agent | instance `NAME` |
 |---|---|---|
-| config | `/etc/algod-loadb-mesh/config.yaml` | `/etc/algod-loadb-mesh/NAME.yaml` |
-| service | `algod-loadb-mesh` | `algod-loadb-mesh@NAME` |
+| config | `/etc/algod-mesh/config.yaml` | `/etc/algod-mesh/NAME.yaml` |
+| service | `algod-mesh` | `algod-mesh@NAME` |
 | `local.id` | hostname | `HOSTNAME-NAME` |
-| registry cache | `/var/lib/algod-loadb-mesh/registry.cache` | `/var/lib/algod-loadb-mesh/NAME.registry.cache` |
+| registry cache | `/var/lib/algod-mesh/registry.cache` | `/var/lib/algod-mesh/NAME.registry.cache` |
 
-Setup gives each agent the first client and gossip ports no other agent in `/etc/algod-loadb-mesh` binds: 4000/4001, then 4002/4003, and so on (`--client-port` and `--mesh-port` choose them). It leaves out of detection the data dirs other agents already serve, and refuses a config that shares a data dir, a port, a node id or a registry cache with one of them. A `--force` re-run keeps the agent's ports while they are free. Run without `--instance` and with a `--data-dir` other than the one `config.yaml` serves, it stops and suggests a name instead of replacing that config (without `--data-dir`, it keeps `config.yaml` as always). All agents on a host run as one user, so a different `--user` is refused while other agents exist. Every `*.yaml` in `/etc/algod-loadb-mesh` counts as an agent's config: setup stops on one that does not load.
+Setup gives each agent the first client and gossip ports no other agent in `/etc/algod-mesh` binds: 4000/4001, then 4002/4003, and so on (`--client-port` and `--mesh-port` choose them). It leaves out of detection the data dirs other agents already serve, and refuses a config that shares a data dir, a port, a node id or a registry cache with one of them. A `--force` re-run keeps the agent's ports while they are free. Run without `--instance` and with a `--data-dir` other than the one `config.yaml` serves, it stops and suggests a name instead of replacing that config (without `--data-dir`, it keeps `config.yaml` as always). All agents on a host run as one user, so a different `--user` is refused while other agents exist. Every `*.yaml` in `/etc/algod-mesh` counts as an agent's config: setup stops on one that does not load.
 
-Each agent belongs to the fleet of its own network, so it takes that fleet's bundle; two agents of one network join the same fleet with the same bundle. The other commands take the instance's config, for example `algod-loadb-mesh registry bundle -config /etc/algod-loadb-mesh/testnet.yaml` and `systemctl status algod-loadb-mesh@testnet`. Package upgrades restart every running agent.
+Each agent belongs to the fleet of its own network, so it takes that fleet's bundle; two agents of one network join the same fleet with the same bundle. The other commands take the instance's config, for example `algod-mesh registry bundle -config /etc/algod-mesh/testnet.yaml` and `systemctl status algod-mesh@testnet`. Package upgrades restart every running agent.
 
 Configs written by hand need the same care: a distinct `local.id` (the hostname default collides), `listen` and `mesh.listen` ports, and `registry.cache` path for each.
 
 ### Without the on-chain registry
 
-If you'd rather not keep the fleet on chain, list the peers in every host's config with `registry.type: static`, and give every host the same `mesh.shared_secret` in place of the sync key. Start from `algod-loadb-mesh config example -static` ([deploy/config.static.example.yaml](deploy/config.static.example.yaml)). Adding a node then means editing every host's config.
+If you'd rather not keep the fleet on chain, list the peers in every host's config with `registry.type: static`, and give every host the same `mesh.shared_secret` in place of the sync key. Start from `algod-mesh config example -static` ([deploy/config.static.example.yaml](deploy/config.static.example.yaml)). Adding a node then means editing every host's config.
 
 ## Connection model
 
@@ -228,7 +268,7 @@ An agent talks over four kinds of connection. None of them pass through another 
 
 | connection | protocol, default port | what it carries |
 |---|---|---|
-| **client → agent** | HTTP, `listen` (default `127.0.0.1:4000`) | The algod REST API, authenticated with `X-Algo-API-Token`. The agent's own `/loadb/*` endpoints are here too. |
+| **client → agent** | HTTP, `listen` (default `127.0.0.1:4000`) | The algod REST API, authenticated with `X-Algo-API-Token`. The agent's own `/mesh/*` endpoints are here too. |
 | **agent → algod** (local or peer) | HTTP, the node's `advertise_endpoints` (e.g. `:8080`) | Proxied client requests, using that node's algod token. The agent also keeps one long-poll open on its local node to follow new rounds. |
 | **agent ↔ agent** | UDP, `mesh.listen` (default `:4001`) | Small signed heartbeats (round, online, capabilities, draining) on every new round and every `keepalive` (5 s), plus path-latency pings. When a peer goes quiet, the agent checks the peer's algod `/v2/status` directly before marking it down. |
 | **agent → registry** | algod REST, through the router | Reads the fleet's records every `registry.refresh` and writes its own record on start. |
@@ -250,7 +290,7 @@ What this means in practice:
 4. **Pick within the tier.** `fallback` takes the best score, which keeps the choice stable. `loadbalancer` uses power-of-two-choices on the score. The score adds up measured latency for this kind of request, error rate, rounds behind, and in-flight requests, with a small bonus for the local node.
 5. **Retry.** If the chosen node fails without answering, the request goes to each remaining eligible node in turn, then to the externals, all within `request_timeout`. Writes are retried too: resubmitting a transaction is safe because algod deduplicates by transaction id.
 
-Every response says who answered it, in the `X-Algod-Loadb-Mesh-Upstream`, `X-Algod-Loadb-Mesh-Tier` and `X-Algod-Loadb-Mesh-Mode` headers.
+Every response says who answered it, in the `X-Algod-Mesh-Upstream`, `X-Algod-Mesh-Tier` and `X-Algod-Mesh-Mode` headers.
 
 ### Time-travel nodes
 
@@ -297,8 +337,8 @@ With `ratelimit.enabled`, the agent limits each client by its own allowance. Thi
 - A request without a token is limited by its address under `ratelimit.anonymous_plan` (by default the plan named `free`). An IPv6 client is limited by its /64 prefix (`ipv6_prefix`).
 - A token listed in `ratelimit.tokens` is limited by its plan, from any address.
 - Any other token gets 401, so a mistyped paid token fails loudly instead of falling back to the free plan.
-- The admin token, `/loadb/health` and the agent's own registry reads are never limited.
-- `client_token` must be unset; the listed tokens take its place. `/loadb/*` (health excepted) then always needs the admin token: without one it answers 403, as the endpoint is public.
+- The admin token, `/mesh/health` and the agent's own registry reads are never limited.
+- `client_token` must be unset; the listed tokens take its place. `/mesh/*` (health excepted) then always needs the admin token: without one it answers 403, as the endpoint is public.
 - The access log names the client each request was billed to (`client`) and what it cost (`cost`).
 - Behind a reverse proxy, list the proxy in `trusted_proxies`. The client is then the last `X-Forwarded-For` address the trusted proxies did not add.
 
@@ -307,7 +347,7 @@ With `ratelimit.enabled`, the agent limits each client by its own allowance. Thi
 - A request costs the `weights` of its kind: `default`, `round`, `timetravel` (state at a past round), `versions` (an object history page), `deltas_history` (a state delta re-evaluated from the history), `simulate`, `broadcast`, `pending`, `wait` and `teal`.
 - A simulation costs its weight once per transaction group and per round it asks for. It is charged up front, before anything is forwarded.
 - When either allowance cannot cover a request, the client gets 429 with `Retry-After`.
-- Every answer carries `RateLimit-Policy` and `RateLimit` (the IETF httpapi draft headers) for the plan's windows, and `X-Algod-Loadb-Mesh-Cost` with what the request cost.
+- Every answer carries `RateLimit-Policy` and `RateLimit` (the IETF httpapi draft headers) for the plan's windows, and `X-Algod-Mesh-Cost` with what the request cost.
 
 **Simulations.**
 - A plan's `simulate` caps bound what one request may ask for: `max_groups`, `max_rounds`, `max_extra_opcode_budget`, and whether `allow-unnamed-resources` and `exec-trace-config` are allowed. A request beyond them gets 403, as does one that costs more than a whole allowance, because waiting would not help.
@@ -319,19 +359,19 @@ With `ratelimit.enabled`, the agent limits each client by its own allowance. Thi
 - The rates are units of work per credit: `opcodes_per_credit`, `lookups_per_credit`, `history_per_credit` (reads that went to the time-travel store, on top of their lookup), `scanned_per_credit` (entries a history page or `?round=` list visited) and `trace_kb_per_credit`. 0 makes that work free.
 - The wall-time meter still runs while the node works, so a client that runs out is still cut off. Once the node answers, its figures replace the time.
 - Only mesh nodes are believed, other operators' included, so join a mesh only with operators you trust to report honestly; an external's header is dropped. A billed client gets the cost in credits, not the node's figures. The admin token sees them as the node sent them, which helps when setting the rates, and so does every client while `ratelimit` is off.
-- A node that does not send the header, or sends one missing any of `opcodes`, `lookups`, `history`, `scanned` and `trace-bytes`, is billed by time, as before; `loadb_effort_unreadable` counts the latter.
+- A node that does not send the header, or sends one missing any of `opcodes`, `lookups`, `history`, `scanned` and `trace-bytes`, is billed by time, as before; `mesh_effort_unreadable` counts the latter.
 - A busy answer (503 with `Retry-After`) for which no node reported any work costs no more than the `default` weight.
 
 **Restarts.** With `state_file`, allowances that are not full are saved every minute and on shutdown, and loaded at start, so a restart or an unattended upgrade resets nobody's quota. Time spent down counts as refill. Without it, allowances are kept in memory only.
 
 **Metrics:**
-- `loadb_ratelimited{plan,class,reason}`, where `reason` is `minute`, `day` or `cap`;
-- `loadb_ratelimit_cancelled{plan}`;
-- `loadb_credits{plan,class,by}` (sum and count), where `by` is `effort`, `time` or `base`;
-- `loadb_ratelimit_refunded{plan,class}`, busy answers that cost only the `default` weight;
-- `loadb_effort_unreadable{upstream}`;
-- `loadb_ratelimit_keys`;
-- `loadb_upstream_busy{upstream,class}`.
+- `mesh_ratelimited{plan,class,reason}`, where `reason` is `minute`, `day` or `cap`;
+- `mesh_ratelimit_cancelled{plan}`;
+- `mesh_credits{plan,class,by}` (sum and count), where `by` is `effort`, `time` or `base`;
+- `mesh_ratelimit_refunded{plan,class}`, busy answers that cost only the `default` weight;
+- `mesh_effort_unreadable{upstream}`;
+- `mesh_ratelimit_keys`;
+- `mesh_upstream_busy{upstream,class}`.
 
 ## Example layouts
 
@@ -368,7 +408,7 @@ Each app talks to the agent on `127.0.0.1:4000` of its own host. Requests are se
        algod A         algod B         algod C        each with its own agent, in the registry
 ```
 
-Balancers register with `role: balancer`, and every node sends them heartbeats, so they see each new round as quickly as a node does. Spread the load over the whole fleet, and put several balancers behind DNS or an L4 load balancer so that losing one doesn't matter. Requests that only a local node can answer, such as the transaction pool, get a 503 from a balancer. Generate a balancer config with `algod-loadb-mesh config example -balancer` ([deploy/config.balancer.example.yaml](deploy/config.balancer.example.yaml)). A balancer needs `local.network` (the genesis id), `mesh.advertise`, `admin_token_file`, and, with the on-chain registry, `registry.algod_url`/`algod_token` of any synced node.
+Balancers register with `role: balancer`, and every node sends them heartbeats, so they see each new round as quickly as a node does. Spread the load over the whole fleet, and put several balancers behind DNS or an L4 load balancer so that losing one doesn't matter. Requests that only a local node can answer, such as the transaction pool, get a 503 from a balancer. Generate a balancer config with `algod-mesh config example -balancer` ([deploy/config.balancer.example.yaml](deploy/config.balancer.example.yaml)). A balancer needs `local.network` (the genesis id), `mesh.advertise`, `admin_token_file`, and, with the on-chain registry, `registry.algod_url`/`algod_token` of any synced node.
 
 ### 4. Mixed capabilities
 
@@ -417,25 +457,25 @@ Hosts on two private networks list both addresses in `mesh.listen` and `mesh.adv
 ## Operating it
 
 ```sh
-algod-loadb-mesh config check -config /etc/algod-loadb-mesh/config.yaml        # what a config resolves to, with warnings
-algod-loadb-mesh check-node -data-dir /var/lib/algorand -probe                # what the agent will advertise for this node
-algod-loadb-mesh registry list -config /etc/algod-loadb-mesh/config.yaml      # decrypted fleet view
-algod-loadb-mesh registry rm -config /etc/algod-loadb-mesh/config.yaml -id old-node   # retire a node
-algod-loadb-mesh registry status -config /etc/algod-loadb-mesh/config.yaml    # registry app build, boxes, balance
-systemctl status algod-loadb-mesh; journalctl -u algod-loadb-mesh -f
+algod-mesh config check -config /etc/algod-mesh/config.yaml        # what a config resolves to, with warnings
+algod-mesh check-node -data-dir /var/lib/algorand -probe                # what the agent will advertise for this node
+algod-mesh registry list -config /etc/algod-mesh/config.yaml      # decrypted fleet view
+algod-mesh registry rm -config /etc/algod-mesh/config.yaml -id old-node   # retire a node
+algod-mesh registry status -config /etc/algod-mesh/config.yaml    # registry app build, boxes, balance
+systemctl status algod-mesh; journalctl -u algod-mesh -f
 ```
 
 Agent endpoints:
 
 | endpoint | auth | what |
 |---|---|---|
-| `/loadb/health` | none | liveness |
-| `/loadb/status` | admin token | this agent's view: local node, peers, links and paths, externals, pass-through |
-| `/loadb/peers` | admin token | the peer table |
-| `/loadb/metrics` | admin token | Prometheus text format |
+| `/mesh/health` | none | liveness |
+| `/mesh/status` | admin token | this agent's view: local node, peers, links and paths, externals, pass-through |
+| `/mesh/peers` | admin token | the peer table |
+| `/mesh/metrics` | admin token | Prometheus text format |
 
 ```sh
-curl -H "X-Algo-API-Token: $(sudo cat /var/lib/algorand/algod.admin.token)" http://127.0.0.1:4000/loadb/status
+curl -H "X-Algo-API-Token: $(sudo cat /var/lib/algorand/algod.admin.token)" http://127.0.0.1:4000/mesh/status
 ```
 
 The admin token defaults to the node's `algod.admin.token` (set `admin_token` or `admin_token_file` to change it), and it is accepted as a client token too.
@@ -450,13 +490,13 @@ When two hosts share several mesh networks, the pair agrees on **one** path for 
 - the host has no route to it, or
 - the peer reports that our heartbeats stopped arriving. In that one-way failure, only the receiving side can see the break.
 
-Proxied algod traffic follows the same path. `/loadb/status` shows every link under `links`, and the metrics `loadb_path_rtt_ms`, `loadb_path_losses` and `loadb_path_switches{reason}` track them.
+Proxied algod traffic follows the same path. `/mesh/status` shows every link under `links`, and the metrics `mesh_path_rtt_ms`, `mesh_path_losses` and `mesh_path_switches{reason}` track them.
 
-algod binds only one address, so a node listening on `10.112.0.5:8080` can't be reached by a peer that is only on `10.114`. To fix that, list the other addresses in `local.passthrough`: the agent binds each one and passes every TCP connection straight through to algod, untouched. It skips, with a warning, any address that algod already covers, so it never takes algod's port. Peers use a pass-through address only when it is also listed in `local.advertise_endpoints`. Traffic on it goes directly to algod: it needs the node's algod token, not a client token, and doesn't show up in `/loadb`. Ports are released only on restart, so to move algod onto a wildcard bind, remove the entry and restart the agent first.
+algod binds only one address, so a node listening on `10.112.0.5:8080` can't be reached by a peer that is only on `10.114`. To fix that, list the other addresses in `local.passthrough`: the agent binds each one and passes every TCP connection straight through to algod, untouched. It skips, with a warning, any address that algod already covers, so it never takes algod's port. Peers use a pass-through address only when it is also listed in `local.advertise_endpoints`. Traffic on it goes directly to algod: it needs the node's algod token, not a client token, and doesn't show up in `/mesh`. Ports are released only on restart, so to move algod onto a wildcard bind, remove the entry and restart the agent first.
 
 ## Configuration reference
 
-`algod-loadb-mesh config example` prints every option with its default and a comment ([deploy/config.example.yaml](deploy/config.example.yaml)). The sections:
+`algod-mesh config example` prints every option with its default and a comment ([deploy/config.example.yaml](deploy/config.example.yaml)). The sections:
 
 | section | what it controls |
 |---|---|
@@ -470,7 +510,7 @@ algod binds only one address, so a node listening on `10.112.0.5:8080` can't be 
 ## Development
 
 ```sh
-make build          # bin/algod-loadb-mesh (static binary, no cgo)
+make build          # bin/algod-mesh (static binary, no cgo)
 make test           # unit, adapter and multi-agent simulator tests
 make race
 make lint
@@ -480,7 +520,7 @@ make contract-test  # contract tests against `algokit localnet`
 ```
 
 ```
-cmd/algod-loadb-mesh   CLI: run, config, check-node, registry, dev
+cmd/algod-mesh   CLI: run, config, check-node, registry, dev
 internal/domain        pure core: types, classify, eligible, select, health, codecs
 internal/ports         interfaces the services depend on
 internal/app           services: monitor, directory, router, registry sync, stats

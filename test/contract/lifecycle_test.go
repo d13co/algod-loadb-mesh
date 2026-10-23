@@ -16,7 +16,7 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/transaction"
 	"github.com/algorand/go-algorand-sdk/v2/types"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryalgo"
+	"github.com/d13co/algod-mesh/internal/adapters/registryalgo"
 )
 
 // The approval program of the previous registry build (commit d14b5e9),

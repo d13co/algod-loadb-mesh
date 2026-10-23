@@ -14,11 +14,11 @@ import (
 
 	"github.com/algorand/go-codec/codec"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/proxy"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/proxy"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/fakealgod"
 )
 
 // simFleet is a router in front of two peers: b, a stock algod, and c, a
@@ -83,7 +83,7 @@ func (f *simFleet) simulate(t *testing.T, body string) string {
 	if rec.Code != 200 {
 		t.Fatalf("simulate %s: %d %s", body, rec.Code, rec.Body.String())
 	}
-	return rec.Header().Get("X-Algod-Loadb-Mesh-Upstream")
+	return rec.Header().Get("X-Algod-Mesh-Upstream")
 }
 
 var testLimits = domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 2, MaxExecTraceBytes: 1 << 20, TimeLimitSeconds: 30}
@@ -120,7 +120,7 @@ func TestSimulateRoutesForkRequestsToDtalgorand(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := f.do(http.MethodPost, "/v2/transactions/simulate", &buf)
-	if up := rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"); rec.Code != 200 || up != "c" {
+	if up := rec.Header().Get("X-Algod-Mesh-Upstream"); rec.Code != 200 || up != "c" {
 		t.Fatalf("msgpack three groups: %d upstream %q", rec.Code, up)
 	}
 	if n := f.b.Hits("/v2/transactions/simulate"); n != 1 {

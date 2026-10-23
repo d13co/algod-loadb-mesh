@@ -6,7 +6,7 @@ import { RegistryClient, RegistryFactory } from '../artifacts/registry/RegistryC
 // generated typed client. The Go agent is the production client; these exist
 // for tests and `algokit project deploy`.
 
-export const CREATE_NOTE = 'algod-loadb-mesh registry'
+export const CREATE_NOTE = 'algod-mesh registry'
 export const BOX_PREFIX = 'n'
 
 // Protocol limits as of consensus v42 (AVM 13).

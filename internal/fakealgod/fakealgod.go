@@ -1,6 +1,6 @@
 // Package fakealgod is an in-process HTTP simulator of the algod REST subset
 // the agent uses. It is the keystone of the test suite and doubles as a local
-// development fleet (algod-loadb-mesh dev).
+// development fleet (algod-mesh dev).
 package fakealgod
 
 import (
@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // Options configures a fake node.

@@ -34,7 +34,7 @@ type RequestClass struct {
 	PendingID  string  // /v2/transactions/pending/{txid}
 	WaitAfter  *uint64 // /v2/status/wait-for-block-after/{r}
 	LocalOnly  bool    // must be answered by the local node (or the agent)
-	Agent      bool    // /loadb/* served by the agent itself
+	Agent      bool    // /mesh/* served by the agent itself
 	Idempotent bool    // safe to retry on another upstream before bytes were sent
 	// TimeTravel marks a request only a time-travel node can answer: state at
 	// a past round (?round=) or an object history (/versions). A stock node
@@ -315,7 +315,7 @@ func Classify(method, path, rawQuery string) RequestClass {
 		return ""
 	}
 
-	if seg(0) == "loadb" {
+	if seg(0) == "mesh" {
 		c.Agent = true
 		c.LocalOnly = true
 		return c

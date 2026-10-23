@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/d13co/algod-loadb-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/config"
 )
 
 func TestListenAll(t *testing.T) {

@@ -1,4 +1,4 @@
-// Command algod-loadb-mesh is the mesh load balancer agent for algod.
+// Command algod-mesh is the mesh load balancer agent for algod.
 package main
 
 import (
@@ -17,36 +17,36 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/crypto"
 	"github.com/algorand/go-algorand-sdk/v2/mnemonic"
 
-	"github.com/d13co/algod-loadb-mesh/deploy"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/datadir"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryalgo"
-	"github.com/d13co/algod-loadb-mesh/internal/agent"
-	"github.com/d13co/algod-loadb-mesh/internal/app"
-	"github.com/d13co/algod-loadb-mesh/internal/config"
-	"github.com/d13co/algod-loadb-mesh/internal/devfleet"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/deploy"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/datadir"
+	"github.com/d13co/algod-mesh/internal/adapters/registryalgo"
+	"github.com/d13co/algod-mesh/internal/agent"
+	"github.com/d13co/algod-mesh/internal/app"
+	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/devfleet"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
-const usage = `algod-loadb-mesh - mesh load balancer for algod
+const usage = `algod-mesh - mesh load balancer for algod
 
 usage:
-  algod-loadb-mesh run        -config FILE          run the agent
-  algod-loadb-mesh config     example [-static|-balancer] [-o FILE] [-force]  print an example config
-  algod-loadb-mesh config     check -config FILE     load a config and report what it resolves to
-  algod-loadb-mesh check-node -data-dir DIR [-probe] report the local node's capabilities
-  algod-loadb-mesh registry   gen-key               create a sync account (mnemonic + address)
-  algod-loadb-mesh registry   init  -config FILE    deploy the registry app with the sync account
-  algod-loadb-mesh registry   list  -config FILE [-show-tokens]
-  algod-loadb-mesh registry   bundle -config FILE   print app id + sync key as one base64 string for deploy/autoconfig.sh
-  algod-loadb-mesh registry   add   -config FILE -id ID -network NET -endpoint URL -token T -agent ADDR [-tier N]
-  algod-loadb-mesh registry   add   -config FILE -role balancer -id ID -network NET -agent ADDR
-  algod-loadb-mesh registry   rm    -config FILE -id ID
-  algod-loadb-mesh registry   status -config FILE [-app-id N]   show an app's build, boxes and balance (default registry.app_id)
-  algod-loadb-mesh registry   update -config FILE [-app-id N]   replace an app's programs with this build (default registry.app_id)
-  algod-loadb-mesh registry   delete-app -config FILE -app-id N delete a registry app that holds no records
-  algod-loadb-mesh dev        [-nodes N] [-balancers N] [-mode M]  run a fake fleet in-process
-  algod-loadb-mesh version
+  algod-mesh run        -config FILE          run the agent
+  algod-mesh config     example [-static|-balancer] [-o FILE] [-force]  print an example config
+  algod-mesh config     check -config FILE     load a config and report what it resolves to
+  algod-mesh check-node -data-dir DIR [-probe] report the local node's capabilities
+  algod-mesh registry   gen-key               create a sync account (mnemonic + address)
+  algod-mesh registry   init  -config FILE    deploy the registry app with the sync account
+  algod-mesh registry   list  -config FILE [-show-tokens]
+  algod-mesh registry   bundle -config FILE   print app id + sync key as one base64 string for deploy/autoconfig.sh
+  algod-mesh registry   add   -config FILE -id ID -network NET -endpoint URL -token T -agent ADDR [-tier N]
+  algod-mesh registry   add   -config FILE -role balancer -id ID -network NET -agent ADDR
+  algod-mesh registry   rm    -config FILE -id ID
+  algod-mesh registry   status -config FILE [-app-id N]   show an app's build, boxes and balance (default registry.app_id)
+  algod-mesh registry   update -config FILE [-app-id N]   replace an app's programs with this build (default registry.app_id)
+  algod-mesh registry   delete-app -config FILE -app-id N delete a registry app that holds no records
+  algod-mesh dev        [-nodes N] [-balancers N] [-mode M]  run a fake fleet in-process
+  algod-mesh version
 `
 
 func main() {
@@ -67,7 +67,7 @@ func main() {
 	case "dev":
 		err = devCmd(os.Args[2:])
 	case "version":
-		fmt.Println("algod-loadb-mesh", agent.Version)
+		fmt.Println("algod-mesh", agent.Version)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -86,7 +86,7 @@ func signalContext() (context.Context, context.CancelFunc) {
 
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	path := fs.String("config", "/etc/algod-loadb-mesh/config.yaml", "config file")
+	path := fs.String("config", "/etc/algod-mesh/config.yaml", "config file")
 	_ = fs.Parse(args)
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -158,7 +158,7 @@ func configCmd(args []string) error {
 // caught at install time instead of in the service log.
 func configCheckCmd(args []string) error {
 	fs := flag.NewFlagSet("config check", flag.ExitOnError)
-	path := fs.String("config", "/etc/algod-loadb-mesh/config.yaml", "config file")
+	path := fs.String("config", "/etc/algod-mesh/config.yaml", "config file")
 	_ = fs.Parse(args)
 	c, err := config.Load(*path)
 	if err != nil {
@@ -276,7 +276,7 @@ func registryCmd(args []string) error {
 		return nil
 	}
 	fs := flag.NewFlagSet("registry "+sub, flag.ExitOnError)
-	path := fs.String("config", "/etc/algod-loadb-mesh/config.yaml", "config file")
+	path := fs.String("config", "/etc/algod-mesh/config.yaml", "config file")
 	id := fs.String("id", "", "node id")
 	network := fs.String("network", "", "genesis id, e.g. mainnet-v1.0")
 	endpoint := fs.String("endpoint", "", "algod REST base URL (repeatable with commas)")
@@ -475,7 +475,7 @@ func devCmd(args []string) error {
 		}
 		fmt.Printf("agent %-6s %s   (fake algod %s, token %s)\n", f.Nodes[i].ID(), s.URL, f.Nodes[i].URL(), f.Nodes[i].Token())
 	}
-	fmt.Println("rounds advance every", *roundTime, "- try: curl", f.Servers[0].URL+"/loadb/status")
+	fmt.Println("rounds advance every", *roundTime, "- try: curl", f.Servers[0].URL+"/mesh/status")
 	t := time.NewTicker(*roundTime)
 	defer t.Stop()
 	for {
