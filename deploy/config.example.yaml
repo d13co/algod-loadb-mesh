@@ -1,4 +1,4 @@
-# algod-loadb-mesh v2 agent configuration. One file per algod on the host.
+# algod-mesh v2 agent configuration. One file per algod on the host.
 #
 # Every option is listed. Commented `key: value` lines are optional settings,
 # shown with their default or an example value. Durations use Go syntax
@@ -9,8 +9,8 @@ mode: fallback                        # fallback (local node first) | loadbalanc
 listen: 0.0.0.0:4000                  # clients connect here; default 127.0.0.1:4000. Several interfaces: a YAML list of addresses, or one comma-separated string
 client_token_file: /var/lib/algorand/algod.token   # X-Algo-API-Token clients must send; here the node's own algod token (absent when algod runs with DisableAPIAuth: drop this line)
 # client_token: s3cret                  # the same, inline; wins over client_token_file. No token at all: no auth
-# admin_token_file: /var/lib/algorand/algod.admin.token   # token for /loadb/* (health excepted), also valid as a client token; default: algod.admin.token in local.data_dir
-# admin_token: s3cret-admin             # the same, inline; wins over admin_token_file. No admin token: /loadb/* is closed (open only with no tokens at all)
+# admin_token_file: /var/lib/algorand/algod.admin.token   # token for /mesh/* (health excepted), also valid as a client token; default: algod.admin.token in local.data_dir
+# admin_token: s3cret-admin             # the same, inline; wins over admin_token_file. No admin token: /mesh/* is closed (open only with no tokens at all)
 
 log:
   level: info                         # debug | info | warn | error; default info
@@ -37,16 +37,16 @@ local:
 
 registry:
   type: algorand                      # algorand | static | file | memory; default: algorand with app_id, file with file, else static
-  app_id: 0                           # algorand: from `algod-loadb-mesh registry init`
-  sync_key_file: /etc/algod-loadb-mesh/sync.key   # algorand: file holding the sync key
+  app_id: 0                           # algorand: from `algod-mesh registry init`
+  sync_key_file: /etc/algod-mesh/sync.key   # algorand: file holding the sync key
   # sync_key: "word1 word2 ... word25"  # the same, inline; wins over sync_key_file. 25-word mnemonic, or hex/base64 of a 32-byte seed or 64-byte key
   # sync_address: ABC...                # only if the sync account is rekeyed: the account; sync_key is its auth key
   # algod_url: http://127.0.0.1:8080    # algod for registry reads and transactions; default: routed like client requests, so the local node while synced, else a synced peer or an external (required for a balancer)
   # algod_token: ""                     # its API token
   refresh: 5m                         # how often the registry is re-read; default 5m
   auto_register: true                 # write this node's record on start; default true (false for static)
-  cache: /var/lib/algod-loadb-mesh/registry.cache   # copy of the last read, used at start until the registry answers; one file per agent on the host; default: none
-  # file: /var/lib/algod-loadb-mesh/registry.json   # type file: shared JSON file holding the records
+  cache: /var/lib/algod-mesh/registry.cache   # copy of the last read, used at start until the registry answers; one file per agent on the host; default: none
+  # file: /var/lib/algod-mesh/registry.json   # type file: shared JSON file holding the records
   # static:                             # type static: the fleet, listed on every host (see `config example -static`)
   #   - id: k45
   #     role: node                      # node | balancer; a balancer lists only id, role, network and agent
@@ -99,7 +99,7 @@ routing:
   pending_ttl: 10s                    # pending-txn lookups stick to the node that accepted the txn for ttl..2*ttl; default 10s
   drain_timeout: 10s                  # grace for in-flight requests on shutdown; default 10s
   # exclude: [bambi, nodely]          # peer node ids and tiers.external names never routed to; default: none
-  #                                   # excluded peers still gossip and show in /loadb/status as excluded, but their rounds
+  #                                   # excluded peers still gossip and show in /mesh/status as excluded, but their rounds
   #                                   # do not count toward the fleet's best round (no node is judged lagging behind them),
   #                                   # and they are not probed directly while their agent is silent; an excluded external
   #                                   # is never health-checked. The local node cannot be excluded
@@ -113,7 +113,7 @@ routing:
 # and the admin token is never limited.
 # ratelimit:
 #   enabled: true
-#   state_file: /var/lib/algod-loadb-mesh/ratelimit.json   # allowances survive restarts here; default: memory only
+#   state_file: /var/lib/algod-mesh/ratelimit.json   # allowances survive restarts here; default: memory only
 #   trusted_proxies: [127.0.0.1]      # peers whose X-Forwarded-For names the client (CIDRs or addresses); default none
 #   ipv6_prefix: 64                   # IPv6 clients share one allowance per prefix of this length; default 64
 #   max_keys: 200000                  # clients tracked at most, then new anonymous ones share one allowance; default 200000
@@ -153,5 +153,5 @@ routing:
 #   tokens:
 #     - name: acme                    # shown in logs, metrics and the state file
 #       plan: pro
-#       token_file: /etc/algod-loadb-mesh/tokens/acme
+#       token_file: /etc/algod-mesh/tokens/acme
 #       # token: s3cret-acme          # the same, inline; set one of token and token_file

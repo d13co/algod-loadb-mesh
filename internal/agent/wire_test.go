@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/algodhttp"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/clock"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/gossipmem"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/metrics"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/proxy"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/registryfile"
-	"github.com/d13co/algod-loadb-mesh/internal/config"
-	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/adapters/algodhttp"
+	"github.com/d13co/algod-mesh/internal/adapters/clock"
+	"github.com/d13co/algod-mesh/internal/adapters/gossipmem"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/metrics"
+	"github.com/d13co/algod-mesh/internal/adapters/proxy"
+	"github.com/d13co/algod-mesh/internal/adapters/registryfile"
+	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/fakealgod"
 )
 
 // While the local node cannot answer (in catchup algod answers 503),

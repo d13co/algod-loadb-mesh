@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
 )
 
 type fakeMetrics struct {
@@ -94,7 +94,7 @@ func TestSplice(t *testing.T) {
 	if string(body) != "hello" {
 		t.Fatalf("body %q", body)
 	}
-	if m.count("loadb_passthrough_accepted") != 1 {
+	if m.count("mesh_passthrough_accepted") != 1 {
 		t.Fatalf("accepted: %v", m.counts)
 	}
 }
@@ -167,7 +167,7 @@ func TestDialFailure(t *testing.T) {
 	c, _ = net.Dial("tcp", s.Addrs()[0])
 	_, _ = io.ReadAll(c)
 	_ = c.Close()
-	if m.count("loadb_passthrough_dial_failures{reason,dial}") != 1 || m.count("loadb_passthrough_dial_failures{reason,no_target}") != 1 {
+	if m.count("mesh_passthrough_dial_failures{reason,dial}") != 1 || m.count("mesh_passthrough_dial_failures{reason,no_target}") != 1 {
 		t.Fatalf("dial failures: %v", m.counts)
 	}
 }
@@ -250,8 +250,8 @@ func TestShutdownCutsOpenConnections(t *testing.T) {
 	if _, err := c.Read(buf); err == nil {
 		t.Fatal("client connection survived Shutdown")
 	}
-	if s.Active() != 0 || m.gauges["loadb_passthrough_active"] != 0 {
-		t.Fatalf("active %d gauge %v", s.Active(), m.gauges["loadb_passthrough_active"])
+	if s.Active() != 0 || m.gauges["mesh_passthrough_active"] != 0 {
+		t.Fatalf("active %d gauge %v", s.Active(), m.gauges["mesh_passthrough_active"])
 	}
 }
 

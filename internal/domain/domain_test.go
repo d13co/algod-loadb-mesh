@@ -42,7 +42,7 @@ func TestClassify(t *testing.T) {
 		{method: "GET", path: "/v2/transactions/pending/TXID", want: RequestClass{PendingID: "TXID", Idempotent: true}},
 		{method: "GET", path: "/v2/transactions/pending", want: RequestClass{LocalOnly: true, Idempotent: true}},
 		{method: "GET", path: "/health", want: RequestClass{LocalOnly: true, Idempotent: true}},
-		{method: "GET", path: "/loadb/status", want: RequestClass{Agent: true, LocalOnly: true, Idempotent: true}},
+		{method: "GET", path: "/mesh/status", want: RequestClass{Agent: true, LocalOnly: true, Idempotent: true}},
 		{method: "POST", path: "/v2/participation", want: RequestClass{LocalOnly: true}},
 		// Time travel: ?round= on state endpoints is only answerable from
 		// the history; a plain node would ignore it and answer "latest".

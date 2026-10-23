@@ -19,8 +19,8 @@ import (
 
 	"github.com/algorand/go-codec/codec"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // RouterOptions configures request routing.
@@ -28,7 +28,7 @@ type RouterOptions struct {
 	Mode            domain.Mode
 	Balancer        bool // no local node
 	ClientToken     string
-	AdminToken      string // required for /loadb/* except health; also a valid client token
+	AdminToken      string // required for /mesh/* except health; also a valid client token
 	SyncTolerance   uint64
 	UpstreamTimeout time.Duration // bound on one attempt at one upstream
 	RequestTimeout  time.Duration // bound on one request across every upstream tried; default 2*UpstreamTimeout
@@ -124,7 +124,7 @@ func NewRouter(o RouterOptions, dir *Directory, monitor *Monitor, fwd ports.Forw
 // runs it.
 func (r *Router) Limiter() *Limiter { return r.limiter }
 
-// PassthroughStatus is the algod pass-through as /loadb/status shows it:
+// PassthroughStatus is the algod pass-through as /mesh/status shows it:
 // the addresses bound for algod, the configured ones algod already covered,
 // the address the splice dials and the connections open right now.
 type PassthroughStatus struct {
@@ -134,7 +134,7 @@ type PassthroughStatus struct {
 	Active  int64    `json:"active"`
 }
 
-// SetPassthrough adds a "passthrough" key to /loadb/status, read from f on
+// SetPassthrough adds a "passthrough" key to /mesh/status, read from f on
 // every request. The composition root sets it once the listeners are bound.
 func (r *Router) SetPassthrough(f func() PassthroughStatus) { r.passthrough.Store(&f) }
 
@@ -168,7 +168,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// A closure, so the log sees the class as refineSimulate leaves it.
 	defer func() { r.logRequest(sw, req, class, start) }()
 	if class.Simulate && !r.refineSimulate(req, &class) {
-		writeMessage(sw, http.StatusBadRequest, "algod-loadb-mesh: cannot read request body")
+		writeMessage(sw, http.StatusBadRequest, "algod-mesh: cannot read request body")
 		return
 	}
 	r.serve(sw, req, class)
@@ -214,7 +214,7 @@ func (r *Router) refineSimulate(req *http.Request, class *domain.RequestClass) b
 func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.RequestClass, start time.Time) {
 	kv := []any{"method", req.Method, "path", req.URL.RequestURI(), "status", w.status, "bytes", w.bytes,
 		"duration", r.clock.Now().Sub(start), "ip", clientIP(req)}
-	if up := w.Header().Get("X-Algod-Loadb-Mesh-Upstream"); up != "" {
+	if up := w.Header().Get("X-Algod-Mesh-Upstream"); up != "" {
 		kv = append(kv, "upstream", up)
 	}
 	if w.client != "" {
@@ -237,7 +237,7 @@ func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.Req
 }
 
 // authorize checks X-Algo-API-Token and answers 401/403 itself when the
-// request may not proceed. /loadb/health is open; the rest of /loadb/* needs
+// request may not proceed. /mesh/health is open; the rest of /mesh/* needs
 // the admin token. Everything else needs the admin token, or, with rate
 // limits, a configured token or none (the anonymous plan), or else the client
 // token. With no token configured at all, auth is off. It returns who the
@@ -250,10 +250,10 @@ func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domai
 	case admin, isHealth(req, class):
 		return exempt, true
 	case class.Agent && r.opts.AdminToken == "" && r.opts.ClientToken == "" && r.limiter == nil:
-		return exempt, true // auth is off; a rate-limited endpoint is public, so /loadb never is
+		return exempt, true // auth is off; a rate-limited endpoint is public, so /mesh never is
 	case class.Agent && r.opts.AdminToken == "":
-		r.metric.Inc("loadb_requests_unauthorized")
-		writeMessage(w, 403, "algod-loadb-mesh: /loadb endpoints need an admin token, and none is configured")
+		r.metric.Inc("mesh_requests_unauthorized")
+		writeMessage(w, 403, "algod-mesh: /mesh endpoints need an admin token, and none is configured")
 		return Identity{}, false
 	case class.Agent:
 	case r.limiter != nil:
@@ -263,7 +263,7 @@ func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domai
 	case r.opts.ClientToken == "" || tokenEqual(tok, r.opts.ClientToken):
 		return exempt, true
 	}
-	r.metric.Inc("loadb_requests_unauthorized")
+	r.metric.Inc("mesh_requests_unauthorized")
 	writeMessage(w, 401, "Invalid API Token")
 	return Identity{}, false
 }
@@ -273,7 +273,7 @@ func tokenEqual(got, want string) bool {
 }
 
 func isHealth(req *http.Request, class domain.RequestClass) bool {
-	return class.Agent && strings.TrimSuffix(req.URL.Path, "/") == "/loadb/health"
+	return class.Agent && strings.TrimSuffix(req.URL.Path, "/") == "/mesh/health"
 }
 
 // clientIP is the leftmost X-Forwarded-For entry, then X-Real-IP, then the
@@ -320,7 +320,7 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 			sw.onHeader, sw.client = ticket.Responding, id.Key
 		}
 	}
-	w.Header().Set("X-Algod-Loadb-Mesh-Mode", string(r.opts.Mode))
+	w.Header().Set("X-Algod-Mesh-Mode", string(r.opts.Mode))
 	if class.SimulateLimits {
 		if lim, ok := domain.FleetSimulateLimits(cands, best, r.opts.SyncTolerance); ok {
 			writeJSON(w, http.StatusOK, lim)
@@ -329,8 +329,8 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		if anySimulateLimits(cands) {
 			// The nodes that report limits are all out for now: a stock
 			// node's 404 would tell the client the fleet has none.
-			r.metric.Inc("loadb_requests_unroutable", "class", class.StatKey())
-			writeMessage(w, 503, "algod-loadb-mesh: no node that reports simulate limits is available")
+			r.metric.Inc("mesh_requests_unroutable", "class", class.StatKey())
+			writeMessage(w, 503, "algod-mesh: no node that reports simulate limits is available")
 			return
 		}
 		// No node reports limits: stock algod answers 404, as it does alone.
@@ -397,7 +397,7 @@ func answerQuotaExceeded(ctx context.Context, w http.ResponseWriter) {
 		t.Exhausted().Write(w)
 		return
 	}
-	writeMessage(w, http.StatusTooManyRequests, "algod-loadb-mesh: rate limit exceeded")
+	writeMessage(w, http.StatusTooManyRequests, "algod-mesh: rate limit exceeded")
 }
 
 func (r *Router) sel(cands []domain.Upstream, class domain.RequestClass, best uint64) (domain.Selection, bool) {
@@ -430,8 +430,8 @@ func (r *Router) pick(ctx context.Context, class domain.RequestClass, cands []do
 // on the request as a whole; the client's own context stays on req, so that
 // its departure is told apart from the request's deadline.
 func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
-	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", u.ID)
-	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(u.Tier))
+	w.Header().Set("X-Algod-Mesh-Upstream", u.ID)
+	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(u.Tier))
 	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
@@ -454,12 +454,12 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		// dtalgorand's slots for heavy requests are full: send them elsewhere
 		// for a while, and the rest as before.
 		r.stats.Busy(u.ID, min(out.RetryAfter, maxBusy))
-		r.metric.Inc("loadb_upstream_busy", "upstream", u.ID, "class", class.StatKey())
+		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
 	default:
 		r.stats.Record(u.ID, class.StatKey(), out)
 	}
-	r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
-	r.metric.Observe("loadb_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
+	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
+	r.metric.Observe("mesh_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
 	return out
 }
 
@@ -481,7 +481,7 @@ func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(int, http.Heade
 		}
 		e, ok := domain.ParseEffort(v)
 		if !ok {
-			r.metric.Inc("loadb_effort_unreadable", "upstream", u.ID)
+			r.metric.Inc("mesh_effort_unreadable", "upstream", u.ID)
 			return
 		}
 		t.Reported(e)
@@ -498,7 +498,7 @@ var timeLimitPass = map[int]bool{http.StatusGatewayTimeout: true}
 const maxBusy = 10 * time.Second
 
 func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, cands []domain.Upstream, best uint64) {
-	r.metric.Inc("loadb_requests_unroutable", "class", class.StatKey())
+	r.metric.Inc("mesh_requests_unroutable", "class", class.StatKey())
 	summary := make([]string, 0, len(cands))
 	for _, u := range cands {
 		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v tt=%v breaker=%v draining=%v)", u.ID, u.Health,
@@ -506,19 +506,19 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	}
 	r.log.Warn("no eligible upstream", "class", class.String(), "best", best, "candidates", strings.Join(summary, " "))
 	if class.LocalOnly && r.opts.Balancer {
-		writeMessage(w, 503, "algod-loadb-mesh: this agent is a balancer with no local node, and this request is only answered by one")
+		writeMessage(w, 503, "algod-mesh: this agent is a balancer with no local node, and this request is only answered by one")
 		return
 	}
 	if class.TimeTravel && !anyTimeTravel(cands) {
-		writeMessage(w, 503, "algod-loadb-mesh: this request needs a time-travel node and the fleet has none")
+		writeMessage(w, 503, "algod-mesh: this request needs a time-travel node and the fleet has none")
 		return
 	}
 	if class.Heavy() && anyBusy(cands) {
 		w.Header().Set("Retry-After", "1")
-		writeMessage(w, 503, "algod-loadb-mesh: every node able to serve this request is busy")
+		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
 		return
 	}
-	writeMessage(w, 503, "algod-loadb-mesh: no eligible upstream for this request")
+	writeMessage(w, 503, "algod-mesh: no eligible upstream for this request")
 }
 
 // anySimulateLimits reports whether any candidate that is not excluded
@@ -570,7 +570,7 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 			}
 			prev = rc
 			if sel, ok = r.sel(cands, rc, best); ok {
-				r.metric.Inc("loadb_simulate_relaxed")
+				r.metric.Inc("mesh_simulate_relaxed")
 				r.log.Debug("no upstream fits the simulate request, relaxed", "class", class.String(), "relaxed", rc.String())
 				class = rc
 				break
@@ -665,7 +665,7 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 			if !timeLeft(ctx) {
 				break
 			}
-			r.metric.Inc("loadb_retries")
+			r.metric.Inc("mesh_retries")
 			r.log.Debug("retrying on next upstream", "path", req.URL.Path, "failed", tries[i-1].ID, "err", last.Err, "status", last.Status)
 			reset()
 		}
@@ -686,7 +686,7 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 	}
 	if replay && timeLeft(ctx) {
 		if ext, ok := r.externalFallback(ctx, class, tries); ok && timeLeft(ctx) {
-			r.metric.Inc("loadb_retries")
+			r.metric.Inc("mesh_retries")
 			r.log.Debug("retrying on external", "path", req.URL.Path, "failed", tries[len(tries)-1].ID, "external", ext.ID)
 			reset()
 			last = r.forward(ctx, w, req, ext, class, nil)
@@ -742,14 +742,14 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 	case req.Context().Err() != nil:
 		return
 	case out.Err != nil && errors.Is(out.Err, context.DeadlineExceeded):
-		writeMessage(w, 504, "algod-loadb-mesh: upstream timeout")
+		writeMessage(w, 504, "algod-mesh: upstream timeout")
 	case class.Heavy() && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(out.RetryAfter), 10))
-		writeMessage(w, 503, "algod-loadb-mesh: every node able to serve this request is busy")
+		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
 	case out.Status >= 500 || out.Status == 429:
-		writeMessage(w, 502, fmt.Sprintf("algod-loadb-mesh: upstream answered %d", out.Status))
+		writeMessage(w, 502, fmt.Sprintf("algod-mesh: upstream answered %d", out.Status))
 	default:
-		writeMessage(w, 502, "algod-loadb-mesh: upstream unreachable")
+		writeMessage(w, 502, "algod-mesh: upstream unreachable")
 	}
 }
 
@@ -765,18 +765,18 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 		local := cands[0]
 		ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
 		defer cancel()
-		r.metric.Inc("loadb_wait_coalesced")
+		r.metric.Inc("mesh_wait_coalesced")
 		body, err := r.monitor.WaitForBlockAfter(ctx, *class.WaitAfter)
 		if req.Context().Err() != nil {
 			return
 		}
 		if body == nil {
-			writeMessage(w, 503, "algod-loadb-mesh: local node status unavailable")
+			writeMessage(w, 503, "algod-mesh: local node status unavailable")
 			return
 		}
 		_ = err // on timeout algod itself answers with the current status; so do we
-		w.Header().Set("X-Algod-Loadb-Mesh-Upstream", local.ID)
-		w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(local.Tier))
+		w.Header().Set("X-Algod-Mesh-Upstream", local.ID)
+		w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(local.Tier))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		_, _ = w.Write(body)
@@ -805,7 +805,7 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 	ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
 	defer cancel()
 	if r.dir.HeartbeatRound() <= after {
-		r.metric.Inc("loadb_wait_held")
+		r.metric.Inc("mesh_wait_held")
 	}
 	round, err := r.dir.WaitForHeartbeatRound(ctx, after)
 	if req.Context().Err() != nil {
@@ -837,8 +837,8 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", f.upstream.ID)
-	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
+	w.Header().Set("X-Algod-Mesh-Upstream", f.upstream.ID)
+	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(f.body)
@@ -865,7 +865,7 @@ func (r *Router) worthWaiting(cands []domain.Upstream, class domain.RequestClass
 func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	ctx, cancel := context.WithTimeout(req.Context(), r.opts.WaitTimeout)
 	defer cancel()
-	r.metric.Inc("loadb_wait_coalesced")
+	r.metric.Inc("mesh_wait_coalesced")
 	round, _ := r.dir.WaitForHeartbeatRound(ctx, *class.WaitAfter)
 	if req.Context().Err() != nil {
 		return
@@ -880,8 +880,8 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", f.upstream.ID)
-	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
+	w.Header().Set("X-Algod-Mesh-Upstream", f.upstream.ID)
+	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(f.body)
@@ -978,7 +978,7 @@ func (r *Router) getStatus(ctx context.Context, u domain.Upstream, class domain.
 	}
 	out.Duration = r.clock.Now().Sub(start)
 	r.stats.Record(u.ID, class.StatKey(), out)
-	r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed() || err != nil))
+	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed() || err != nil))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1013,13 +1013,13 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
 		r.forwardSelected(ctx, cw, req, class, sel)
 		if cw.status == 200 {
-			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get("X-Algod-Mesh-Upstream"))
 		}
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(req.Body, 4<<20))
 	if err != nil {
-		writeMessage(w, 400, "algod-loadb-mesh: cannot read body")
+		writeMessage(w, 400, "algod-mesh: cannot read body")
 		return
 	}
 	targets := dedupeByURL(meshFirst(append([]domain.Upstream{sel.Chosen}, sel.Alternates...)))
@@ -1031,7 +1031,7 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 	for range targets {
 		res := <-results
 		if res.err == nil && res.resp.StatusCode == 200 {
-			r.metric.Inc("loadb_multibroadcast", "outcome", "ok")
+			r.metric.Inc("mesh_multibroadcast", "outcome", "ok")
 			r.rememberTxn(txIDFrom(res.body), res.u.ID)
 			cancel() // other broadcasts are best effort
 			writeFan(w, res)
@@ -1047,11 +1047,11 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 			fallback = &res
 		}
 	}
-	r.metric.Inc("loadb_multibroadcast", "outcome", "failed")
+	r.metric.Inc("mesh_multibroadcast", "outcome", "failed")
 	if unanswered == len(targets) && timeLeft(ctx) {
 		// No node answered at all: the externals are the last resort.
 		if ext, ok := r.externalFallback(ctx, class, targets); ok && timeLeft(ctx) {
-			r.metric.Inc("loadb_retries")
+			r.metric.Inc("mesh_retries")
 			r.log.Debug("retrying on external", "path", req.URL.Path, "external", ext.ID)
 			req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 			cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
@@ -1065,7 +1065,7 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 		}
 	}
 	if fallback.err != nil {
-		writeMessage(w, 502, "algod-loadb-mesh: broadcast failed on every node: "+fallback.err.Error())
+		writeMessage(w, 502, "algod-mesh: broadcast failed on every node: "+fallback.err.Error())
 		return
 	}
 	writeFan(w, *fallback)
@@ -1149,7 +1149,7 @@ func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, tar
 			if ctx.Err() == nil { // not cancelled by us or the client: the outcome is about the upstream
 				r.stats.Record(u.ID, class.StatKey(), out)
 			}
-			r.metric.Inc("loadb_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
+			r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
 			results <- res
 		}(u)
 	}
@@ -1166,8 +1166,8 @@ func writeFan(w http.ResponseWriter, res fanResult) {
 		}
 		w.Header()[k] = vs
 	}
-	w.Header().Set("X-Algod-Loadb-Mesh-Upstream", res.u.ID)
-	w.Header().Set("X-Algod-Loadb-Mesh-Tier", fmt.Sprint(res.u.Tier))
+	w.Header().Set("X-Algod-Mesh-Upstream", res.u.ID)
+	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(res.u.Tier))
 	w.WriteHeader(res.resp.StatusCode)
 	_, _ = w.Write(res.body)
 }
@@ -1212,11 +1212,11 @@ func (r *Router) anyEligible(cands []domain.Upstream, best uint64) bool {
 	return false
 }
 
-// serveAgent answers /loadb/* from the agent itself.
+// serveAgent answers /mesh/* from the agent itself.
 func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 	cands, best := r.dir.Snapshot()
 	switch strings.TrimSuffix(req.URL.Path, "/") {
-	case "/loadb/health":
+	case "/mesh/health":
 		if r.draining.Load() {
 			writeMessage(w, 503, "draining")
 			return
@@ -1234,7 +1234,7 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		writeMessage(w, 503, "no eligible upstream")
-	case "/loadb/status":
+	case "/mesh/status":
 		role := domain.RoleNode
 		var local any = r.monitor.State()
 		if r.opts.Balancer {
@@ -1249,9 +1249,9 @@ func (r *Router) serveAgent(w http.ResponseWriter, req *http.Request) {
 			status["passthrough"] = (*f)()
 		}
 		writeJSON(w, 200, status)
-	case "/loadb/peers":
+	case "/mesh/peers":
 		writeJSON(w, 200, cands)
-	case "/loadb/metrics":
+	case "/mesh/metrics":
 		if r.metrics == nil {
 			writeMessage(w, 404, "metrics disabled")
 			return
@@ -1324,7 +1324,7 @@ func (s *statusWriter) begin(code int) {
 
 // exposedHeaders are the mesh's own that a browser client may read: where
 // its answer came from, and what it cost and has left.
-const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", X-Algod-Loadb-Mesh-Upstream, X-Algod-Loadb-Mesh-Tier"
+const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", X-Algod-Mesh-Upstream, X-Algod-Mesh-Tier"
 
 // cors runs as the final headers go out, after any upstream's were copied
 // in: Set leaves one Access-Control-Allow-Origin where a proxied algod

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/config"
 )
 
 // The ratelimit section reaches the router as the limiter's options; off,

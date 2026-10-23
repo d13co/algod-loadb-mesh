@@ -188,7 +188,7 @@ func TestAdminToken(t *testing.T) {
 	if _, err = load(t, cfg+"admin_token_file: "+own+".missing\n"); err == nil || !strings.Contains(err.Error(), "admin_token_file") {
 		t.Fatalf("an explicit missing file must fail: %v", err)
 	}
-	// Unreadable default file: fail rather than silently leaving /loadb closed.
+	// Unreadable default file: fail rather than silently leaving /mesh closed.
 	if os.Getuid() != 0 {
 		if err := os.Chmod(filepath.Join(dir, "algod.admin.token"), 0); err != nil {
 			t.Fatal(err)

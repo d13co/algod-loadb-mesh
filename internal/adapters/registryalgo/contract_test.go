@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // The embedded programs and spec are copies of the AlgoKit build output;

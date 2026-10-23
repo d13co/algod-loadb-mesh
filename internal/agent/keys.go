@@ -11,6 +11,9 @@ import (
 // which is the trust model requested (one sync account, no RBAC); moving to
 // per-agent keys later only changes this function and the registry record.
 func AgentKey(material []byte, nodeID string) (ed25519.PrivateKey, error) {
+	// "algod-loadb-mesh" is the project's old name, kept on purpose: it is a
+	// frozen protocol constant (see keys_test.go). Changing it changes every
+	// agent key, so old and new nodes would reject each other's heartbeats.
 	seed, err := hkdf.Key(sha256.New, material, []byte("algod-loadb-mesh"), "agent-key:"+nodeID, ed25519.SeedSize)
 	if err != nil {
 		return nil, err

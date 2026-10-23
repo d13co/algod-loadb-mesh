@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // TestHeartbeatPropagationLatency guards against missed monitor changes: the

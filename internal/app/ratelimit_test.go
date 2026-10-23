@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/clock"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/metrics"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/adapters/clock"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/adapters/metrics"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // testWeights makes every request cost one credit.
@@ -130,8 +130,8 @@ func TestRateLimitTokens(t *testing.T) {
 			t.Fatalf("loopback: %d", rec.Code)
 		}
 	}
-	if rec := f.call("GET", "/loadb/status", "acme-token", clientA, ""); rec.Code != 401 {
-		t.Fatalf("/loadb with a client token: %d", rec.Code)
+	if rec := f.call("GET", "/mesh/status", "acme-token", clientA, ""); rec.Code != 401 {
+		t.Fatalf("/mesh with a client token: %d", rec.Code)
 	}
 }
 
@@ -140,11 +140,11 @@ func TestRateLimitTokens(t *testing.T) {
 func TestRateLimitKeepsAgentEndpointsClosed(t *testing.T) {
 	f := newSimFleetWith(t, domain.Capabilities{}, RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1, RateLimit: &LimiterOptions{
 		Plans: map[string]domain.Plan{"free": {}}, AnonymousPlan: "free"}})
-	if rec := f.call("GET", "/loadb/status", "", clientA, ""); rec.Code != 403 {
-		t.Fatalf("/loadb/status: %d", rec.Code)
+	if rec := f.call("GET", "/mesh/status", "", clientA, ""); rec.Code != 403 {
+		t.Fatalf("/mesh/status: %d", rec.Code)
 	}
-	if rec := f.call("GET", "/loadb/health", "", clientA, ""); rec.Code != 200 {
-		t.Fatalf("/loadb/health: %d", rec.Code)
+	if rec := f.call("GET", "/mesh/health", "", clientA, ""); rec.Code != 200 {
+		t.Fatalf("/mesh/health: %d", rec.Code)
 	}
 }
 
@@ -305,8 +305,8 @@ func TestSimulateBusyNode(t *testing.T) {
 	if st := f.r.stats.Snapshot("b"); !st.Busy || st.ErrorRate != 0 || st.BreakerOpen {
 		t.Fatalf("busy node stats: %+v", st)
 	}
-	if rec := f.do("GET", "/v2/status", nil); rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "b" {
-		t.Fatalf("plain request went to %q", rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := f.do("GET", "/v2/status", nil); rec.Header().Get("X-Algod-Mesh-Upstream") != "b" {
+		t.Fatalf("plain request went to %q", rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 	// Every node busy: the client hears it, with the wait.
 	f.c.SetSimulate(0, 503, 1)
@@ -337,8 +337,8 @@ func TestSimulateTimeLimitPassedThrough(t *testing.T) {
 	}
 	// A plain request's 504 is still withheld and retried.
 	f.b.SetFailing(true)
-	if rec := f.do("GET", "/v2/status", nil); rec.Code != 200 || rec.Header().Get("X-Algod-Loadb-Mesh-Upstream") != "c" {
-		t.Fatalf("plain request: %d via %q", rec.Code, rec.Header().Get("X-Algod-Loadb-Mesh-Upstream"))
+	if rec := f.do("GET", "/v2/status", nil); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "c" {
+		t.Fatalf("plain request: %d via %q", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"))
 	}
 }
 

@@ -24,7 +24,7 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/types"
 	"gopkg.in/yaml.v3"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // Config is the whole file.
@@ -34,7 +34,7 @@ type Config struct {
 	Listen          Addrs     `yaml:"listen"`
 	ClientToken     string    `yaml:"client_token"`
 	ClientTokenFile string    `yaml:"client_token_file"`
-	AdminToken      string    `yaml:"admin_token"`      // required for /loadb/*; also accepted as a client token
+	AdminToken      string    `yaml:"admin_token"`      // required for /mesh/*; also accepted as a client token
 	AdminTokenFile  string    `yaml:"admin_token_file"` // default: algod.admin.token in local.data_dir
 	Log             Log       `yaml:"log"`
 	Local           Local     `yaml:"local"`
@@ -613,7 +613,7 @@ func (c *Config) Finish() error {
 		case err == nil:
 			c.AdminToken = t
 		case !explicit && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)):
-			// no default admin token: /loadb/* is closed unless auth is off entirely
+			// no default admin token: /mesh/* is closed unless auth is off entirely
 		default:
 			return fmt.Errorf("admin_token_file: %w", err)
 		}
@@ -868,6 +868,8 @@ func (c *Config) KeyMaterial() ([]byte, error) {
 	if seed, err := c.SyncSeed(); err != nil || seed != nil {
 		return seed, err
 	}
+	// The prefix carries the project's old name on purpose: it is a frozen
+	// protocol constant (see keymaterial_test.go) that every agent key depends on.
 	sum := sha256.Sum256([]byte("algod-loadb-mesh-shared-secret:" + c.Mesh.SharedSecret))
 	return sum[:], nil
 }

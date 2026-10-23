@@ -1,4 +1,4 @@
-# algod-loadb-mesh registry contract
+# algod-mesh registry contract
 
 AlgoKit project for the registry application: the fleet's node records, in
 boxes, sealed with keys derived from the sync key (see
@@ -50,7 +50,7 @@ client embeds them
 
 ## Deploying
 
-The Go CLI's `algod-loadb-mesh registry init` is the normal way to create a
+The Go CLI's `algod-mesh registry init` is the normal way to create a
 registry. For an ad-hoc deploy with the sync account as `DEPLOYER`:
 
 ```sh

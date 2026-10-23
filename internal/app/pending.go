@@ -10,8 +10,8 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/encoding/msgpack"
 	"github.com/algorand/go-codec/codec"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // pendingGrace is how long a pending lookup waits for a better answer (a
@@ -60,7 +60,7 @@ func (r *Router) handlePending(ctx context.Context, w http.ResponseWriter, req *
 	}
 	if len(order) == 0 {
 		if pinned.Status == 404 {
-			writeMessage(w, 404, "algod-loadb-mesh: transaction not found on any node")
+			writeMessage(w, 404, "algod-mesh: transaction not found on any node")
 			return
 		}
 		r.answerFailure(w, req, class, *pinned)
@@ -104,12 +104,12 @@ collect:
 		}
 	}
 	cancel()
-	r.metric.Inc("loadb_pending_lookups", "answer", pendingAnswer[rank])
+	r.metric.Inc("mesh_pending_lookups", "answer", pendingAnswer[rank])
 	if rank == pendingInPool || rank == pendingPoolError {
 		r.rememberTxn(class.PendingID, chosen.u.ID) // later polls go straight there
 	}
 	if rank == pendingFailed && chosen.err != nil {
-		writeMessage(w, 502, "algod-loadb-mesh: pending lookup failed on every node: "+chosen.err.Error())
+		writeMessage(w, 502, "algod-mesh: pending lookup failed on every node: "+chosen.err.Error())
 		return
 	}
 	writeFan(w, *chosen)

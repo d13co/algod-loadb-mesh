@@ -67,7 +67,7 @@
         22,
         28
     ],
-    "desc": "algod-loadb-mesh fleet registry (docs/REGISTRY_CONTRACT.md \u00a77).\n\nARC-4 application. Boxes named `n<tag>` hold one sealed NodeRecord each,\nwhere the tag is a 16-byte keyed hash of the node id computed off chain, so\nthe chain never sees node ids. The program never looks inside the tag or\nthe record. Only the creator (the sync account) may call a method, update\nor delete the application.",
+    "desc": "algod-mesh fleet registry (docs/REGISTRY_CONTRACT.md \u00a77).\n\nARC-4 application. Boxes named `n<tag>` hold one sealed NodeRecord each,\nwhere the tag is a 16-byte keyed hash of the node id computed off chain, so\nthe chain never sees node ids. The program never looks inside the tag or\nthe record. Only the creator (the sync account) may call a method, update\nor delete the application.",
     "networks": {},
     "state": {
         "schema": {

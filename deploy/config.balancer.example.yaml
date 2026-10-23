@@ -4,8 +4,8 @@
 role: balancer
 mode: loadbalancer
 listen: 0.0.0.0:4000
-client_token_file: /etc/algod-loadb-mesh/client.token
-admin_token_file: /etc/algod-loadb-mesh/admin.token   # no algod data dir to take the default from
+client_token_file: /etc/algod-mesh/client.token
+admin_token_file: /etc/algod-mesh/admin.token   # no algod data dir to take the default from
 
 local:
   id: lb1
@@ -15,10 +15,10 @@ local:
 registry:
   type: algorand
   app_id: 0
-  sync_key_file: /etc/algod-loadb-mesh/sync.key
+  sync_key_file: /etc/algod-mesh/sync.key
   algod_url: http://10.112.0.44:8080  # any synced algod, for registry reads and self-registration; required
   algod_token: 0123456789abcdef...
-  cache: /var/lib/algod-loadb-mesh/registry.cache
+  cache: /var/lib/algod-mesh/registry.cache
 
 mesh:
   listen: [10.112.0.9:4001, 10.114.0.9:4001]      # one socket per mesh interface

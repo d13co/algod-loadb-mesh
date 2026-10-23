@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/ports"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 // MonitorOptions configures the local node monitor.
@@ -156,7 +156,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 		backoff.reset()
 		m.watch(ctx)
 		if ctx.Err() == nil {
-			m.metric.Inc("loadb_local_disconnects")
+			m.metric.Inc("mesh_local_disconnects")
 			_ = m.clock.Sleep(ctx, backoff.next())
 		}
 	}
@@ -287,7 +287,7 @@ func (m *Monitor) watch(ctx context.Context) {
 			m.update(func(s *LocalState) { s.Online = false; s.LastError = err.Error() })
 			return
 		}
-		m.metric.Inc("loadb_local_rounds")
+		m.metric.Inc("mesh_local_rounds")
 		m.log.Debug("round", "round", st.LastRound)
 		known := m.State().LimitsKnown
 		var lim *domain.SimulateLimits
@@ -358,7 +358,7 @@ func (m *Monitor) verifyOldest(ctx context.Context, full bool) {
 		m.log.Warn("oldest-round verification failed", "err", err)
 		return
 	}
-	m.metric.Gauge("loadb_local_oldest_round", float64(measured))
+	m.metric.Gauge("mesh_local_oldest_round", float64(measured))
 	if measured > expected {
 		m.log.Warn("node serves fewer blocks than its config claims; using measured oldest round",
 			"configured", expected, "measured", measured)

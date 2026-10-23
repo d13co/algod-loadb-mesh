@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/adapters/logging"
-	"github.com/d13co/algod-loadb-mesh/internal/devfleet"
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
+	"github.com/d13co/algod-mesh/internal/devfleet"
 )
 
 // lockedBuffer lets the test read log output while agents write it.
@@ -45,7 +45,7 @@ func TestRequestAndGossipLogging(t *testing.T) {
 	plain := f.Servers[1].URL
 
 	call(t, "GET", plain+"/v2/blocks/100", "", "")
-	call(t, "GET", plain+"/loadb/health", "", "")
+	call(t, "GET", plain+"/mesh/health", "", "")
 
 	var block, health map[string]any
 	waitFor(t, 2*time.Second, "request log lines", func() bool {
@@ -53,7 +53,7 @@ func TestRequestAndGossipLogging(t *testing.T) {
 			switch e["path"] {
 			case "/v2/blocks/100":
 				block = e
-			case "/loadb/health":
+			case "/mesh/health":
 				health = e
 			}
 		}

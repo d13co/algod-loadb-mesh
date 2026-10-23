@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 
 	"encoding/json"
-	"github.com/d13co/algod-loadb-mesh/internal/agent"
-	"github.com/d13co/algod-loadb-mesh/internal/app"
+	"github.com/d13co/algod-mesh/internal/agent"
+	"github.com/d13co/algod-mesh/internal/app"
 	"io"
 	"net/http"
 	"slices"
@@ -18,16 +18,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/d13co/algod-loadb-mesh/internal/config"
-	"github.com/d13co/algod-loadb-mesh/internal/devfleet"
-	"github.com/d13co/algod-loadb-mesh/internal/domain"
-	"github.com/d13co/algod-loadb-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/devfleet"
+	"github.com/d13co/algod-mesh/internal/domain"
+	"github.com/d13co/algod-mesh/internal/fakealgod"
 )
 
 type resp struct {
 	code   int
 	node   string // X-Fake-Node
-	up     string // X-Algod-Loadb-Mesh-Upstream
+	up     string // X-Algod-Mesh-Upstream
 	body   []byte
 	header http.Header
 }
@@ -44,7 +44,7 @@ func call(t *testing.T, method, url, token string, body string) resp {
 	}
 	defer r.Body.Close()
 	b, _ := io.ReadAll(r.Body)
-	return resp{code: r.StatusCode, node: r.Header.Get("X-Fake-Node"), up: r.Header.Get("X-Algod-Loadb-Mesh-Upstream"), body: b, header: r.Header}
+	return resp{code: r.StatusCode, node: r.Header.Get("X-Fake-Node"), up: r.Header.Get("X-Algod-Mesh-Upstream"), body: b, header: r.Header}
 }
 
 // defaultToken is sent with every helper request; tests that configure a
@@ -53,7 +53,7 @@ var defaultToken string
 
 func get(t *testing.T, url string) resp { return call(t, "GET", url, defaultToken, "") }
 
-// adminToken is sent to /loadb/* by agentGet; tests that configure one set it.
+// adminToken is sent to /mesh/* by agentGet; tests that configure one set it.
 var adminToken string
 
 func agentGet(t *testing.T, url string) resp { return call(t, "GET", url, adminToken, "") }
@@ -72,7 +72,7 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 
 func status(t *testing.T, agentURL string) (map[string]any, []domain.Upstream) {
 	t.Helper()
-	r := agentGet(t, agentURL+"/loadb/status")
+	r := agentGet(t, agentURL+"/mesh/status")
 	var st struct {
 		Upstreams []domain.Upstream `json:"upstreams"`
 		Other     map[string]any    `json:"-"`
@@ -129,7 +129,7 @@ func start(t *testing.T, o devfleet.Options) *devfleet.Fleet {
 		for !converged() {
 			if time.Now().After(deadline) {
 				for j := range f.Agents {
-					t.Logf("agent %d status: %s", j, agentGet(t, f.Servers[j].URL+"/loadb/status").body)
+					t.Logf("agent %d status: %s", j, agentGet(t, f.Servers[j].URL+"/mesh/status").body)
 				}
 				t.Fatalf("fleet did not converge at %s", url)
 			}
@@ -151,7 +151,7 @@ func TestFallbackServesLocallyAndRoutesByCapability(t *testing.T) {
 	f := start(t, devfleet.Options{Nodes: threeNodes(), Mode: "fallback", ReturnHysteresis: 2})
 	arch, plain, devn := f.Servers[0].URL, f.Servers[1].URL, f.Servers[2].URL
 
-	if r := get(t, plain+"/v2/status"); r.node != "plain" || r.header.Get("X-Algod-Loadb-Mesh-Mode") != "fallback" {
+	if r := get(t, plain+"/v2/status"); r.node != "plain" || r.header.Get("X-Algod-Mesh-Mode") != "fallback" {
 		t.Fatalf("local first: %+v", r)
 	}
 	// Old block from a non-archival agent goes to the archival node.
@@ -435,7 +435,7 @@ func recsBefore(t *testing.T, f *devfleet.Fleet) []domain.NodeRecord {
 	// The devn agent re-registers itself only on first success, so derive
 	// the key the same way the fleet did.
 	var out []domain.NodeRecord
-	r := agentGet(t, f.Servers[2].URL+"/loadb/status")
+	r := agentGet(t, f.Servers[2].URL+"/mesh/status")
 	var st struct {
 		Local struct {
 			Online bool `json:"online"`
@@ -491,20 +491,20 @@ func TestClientTokenAndAgentEndpoints(t *testing.T) {
 	if r := call(t, "GET", u+"/v2/status", "admin", ""); r.code != 200 {
 		t.Fatalf("admin token is a client token too: %d", r.code)
 	}
-	if r := call(t, "GET", u+"/loadb/health", "", ""); r.code != 200 {
+	if r := call(t, "GET", u+"/mesh/health", "", ""); r.code != 200 {
 		t.Fatalf("health is open: %d %s", r.code, r.body)
 	}
-	for _, path := range []string{"/loadb/status", "/loadb/peers", "/loadb/metrics", "/loadb/nope"} {
+	for _, path := range []string{"/mesh/status", "/mesh/peers", "/mesh/metrics", "/mesh/nope"} {
 		for _, tok := range []string{"", "secret", "wrong"} {
 			if r := call(t, "GET", u+path, tok, ""); r.code != 401 {
 				t.Errorf("%s with token %q: %d, want 401", path, tok, r.code)
 			}
 		}
 	}
-	if r := call(t, "GET", u+"/loadb/metrics", "admin", ""); r.code != 200 || !strings.Contains(string(r.body), "loadb_heartbeats_sent_total") {
+	if r := call(t, "GET", u+"/mesh/metrics", "admin", ""); r.code != 200 || !strings.Contains(string(r.body), "mesh_heartbeats_sent_total") {
 		t.Fatalf("metrics: %d %s", r.code, r.body)
 	}
-	if r := call(t, "GET", u+"/loadb/peers", "admin", ""); r.code != 200 {
+	if r := call(t, "GET", u+"/mesh/peers", "admin", ""); r.code != 200 {
 		t.Fatalf("peers: %d", r.code)
 	}
 }
@@ -570,21 +570,21 @@ func TestCORSLikeAlgod(t *testing.T) {
 		"Vary":                        {"Origin"},
 	})
 	// A browser may read what a request cost and what is left.
-	if e := proxied.Header.Get("Access-Control-Expose-Headers"); !strings.Contains(e, "RateLimit") || !strings.Contains(e, "X-Algod-Loadb-Mesh-Cost") {
+	if e := proxied.Header.Get("Access-Control-Expose-Headers"); !strings.Contains(e, "RateLimit") || !strings.Contains(e, "X-Algod-Mesh-Cost") {
 		t.Errorf("proxied: Access-Control-Expose-Headers = %q", e)
 	}
 	check("proxied without origin", do("GET", "/v2/status", "", "secret"), 200, http.Header{
 		"Access-Control-Allow-Origin": nil,
 		"Vary":                        {"Origin"},
 	})
-	check("agent", do("GET", "/loadb/health", "https://x.example", ""), 200, http.Header{
+	check("agent", do("GET", "/mesh/health", "https://x.example", ""), 200, http.Header{
 		"Access-Control-Allow-Origin": {"*"},
 		"Vary":                        {"Origin"},
 	})
 }
 
 // With a client token but no admin token, the agent endpoints stay closed.
-// (start() is not used: its convergence check needs /loadb/status.)
+// (start() is not used: its convergence check needs /mesh/status.)
 func TestAgentEndpointsClosedWithoutAdminToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -594,10 +594,10 @@ func TestAgentEndpointsClosedWithoutAdminToken(t *testing.T) {
 	}
 	t.Cleanup(f.Close)
 	u := f.Servers[0].URL
-	if r := call(t, "GET", u+"/loadb/status", "secret", ""); r.code != 403 {
+	if r := call(t, "GET", u+"/mesh/status", "secret", ""); r.code != 403 {
 		t.Fatalf("status without admin token configured: %d %s", r.code, r.body)
 	}
-	if r := call(t, "GET", u+"/loadb/health", "", ""); r.code == 401 || r.code == 403 {
+	if r := call(t, "GET", u+"/mesh/health", "", ""); r.code == 401 || r.code == 403 {
 		t.Fatalf("health must stay open: %d", r.code)
 	}
 }
@@ -658,7 +658,7 @@ func TestBalancerReceivesHeartbeatsAndRoutes(t *testing.T) {
 	if r := get(t, lb+"/v2/transactions/pending"); r.code != 503 || !strings.Contains(string(r.body), "balancer") {
 		t.Fatalf("local-only request on a balancer: %d %s", r.code, r.body)
 	}
-	if r := agentGet(t, lb+"/loadb/health"); r.code != 200 {
+	if r := agentGet(t, lb+"/mesh/health"); r.code != 200 {
 		t.Fatalf("balancer health: %d %s", r.code, r.body)
 	}
 	if recs, _, _ := f.Registry.List(context.Background()); len(recs) != 4 {
@@ -721,7 +721,7 @@ func TestBalancerWaitForBlockAfterWaitsForHeartbeat(t *testing.T) {
 // links reads the mesh links an agent reports.
 func links(t *testing.T, agentURL string) []app.LinkStatus {
 	t.Helper()
-	r := agentGet(t, agentURL+"/loadb/status")
+	r := agentGet(t, agentURL+"/mesh/status")
 	var st struct {
 		Links []app.LinkStatus `json:"links"`
 	}
@@ -783,8 +783,8 @@ func TestMeshPathFailover(t *testing.T) {
 		}
 		return allByHeartbeat(t, f)
 	})
-	m := agentGet(t, plain+"/loadb/metrics")
-	if !strings.Contains(string(m.body), `loadb_path_switches_total{reason="deaf"}`) {
+	m := agentGet(t, plain+"/mesh/metrics")
+	if !strings.Contains(string(m.body), `mesh_path_switches_total{reason="deaf"}`) {
 		t.Fatalf("plain must have learnt from the peers' HeardMS:\n%s", m.body)
 	}
 	// Healed: no more direct probes of anyone. The agents' own long-polls
@@ -863,8 +863,8 @@ func TestRateLimits(t *testing.T) {
 			Tokens: []config.RateToken{{Name: "acme", Token: "acme-token", Plan: "pro"}}}})
 	u := f.Servers[0].URL
 	r := call(t, "GET", u+"/v2/status", "", "")
-	if r.code != 200 || r.header.Get("RateLimit-Policy") != `"minute";q=1000;w=60` || r.header.Get("X-Algod-Loadb-Mesh-Cost") != "1" {
-		t.Fatalf("anonymous: %d, policy %q, cost %q", r.code, r.header.Get("RateLimit-Policy"), r.header.Get("X-Algod-Loadb-Mesh-Cost"))
+	if r.code != 200 || r.header.Get("RateLimit-Policy") != `"minute";q=1000;w=60` || r.header.Get("X-Algod-Mesh-Cost") != "1" {
+		t.Fatalf("anonymous: %d, policy %q, cost %q", r.code, r.header.Get("RateLimit-Policy"), r.header.Get("X-Algod-Mesh-Cost"))
 	}
 	for range 3 {
 		if r := call(t, "GET", u+"/v2/status", "acme-token", ""); r.code != 200 {

@@ -2,7 +2,7 @@
 # Agent keys derive from mesh.shared_secret, which must match on all hosts.
 mode: fallback
 listen: 0.0.0.0:4000
-client_token_file: /etc/algod-loadb-mesh/client.token
+client_token_file: /etc/algod-mesh/client.token
 local:
   id: k44
   data_dir: /var/lib/algorand

@@ -37,6 +37,9 @@ func DeriveSyncKey(seed []byte) (SyncKey, error) {
 	if len(seed) < 32 {
 		return k, errors.New("sync key: seed shorter than 32 bytes")
 	}
+	// "algod-loadb-mesh" is the project's old name, kept on purpose: it is a
+	// frozen protocol constant (see protocol_test.go). Changing it changes every
+	// derived key and makes existing registries unreadable.
 	out, err := hkdf.Key(sha256.New, seed[:32], []byte("algod-loadb-mesh"), "registry-v1", 32)
 	if err != nil {
 		return k, err
@@ -49,6 +52,7 @@ func DeriveSyncKey(seed []byte) (SyncKey, error) {
 // derived from the sync key, truncated to BoxTagLen bytes. Only key holders
 // can compute it or tell which node a box belongs to.
 func BoxTag(key SyncKey, id string) [BoxTagLen]byte {
+	// Old project name, frozen like the salt in DeriveSyncKey.
 	tagKey, err := hkdf.Key(sha256.New, key[:], []byte("algod-loadb-mesh"), "registry-box-tag-v1", 32)
 	if err != nil {
 		panic(err) // only fails for lengths beyond 255 × 32
